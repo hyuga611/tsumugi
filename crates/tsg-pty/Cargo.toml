@@ -1,0 +1,11 @@
+[package]
+name = "tsg-pty"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+portable-pty = "0.9.0"

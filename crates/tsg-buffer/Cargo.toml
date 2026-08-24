@@ -1,0 +1,10 @@
+[package]
+name = "tsg-buffer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tsg-term = { version = "0.0.0", path = "../tsg-term" }

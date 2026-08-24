@@ -1,0 +1,7 @@
+# 作業コピーでも LF を保つ。シェル統合スクリプトは include_str! で
+# バイナリへ埋め込まれるため、CRLF が混ざると Unix 側で壊れる。
+* text=auto eol=lf
+
+*.png  binary
+*.ico  binary
+*.rgba binary

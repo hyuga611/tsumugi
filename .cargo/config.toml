@@ -1,0 +1,10 @@
+# このマシンでは共有 target ディレクトリ（%LOCALAPPDATA% 配下）に出力した
+# 実行ファイルが Windows のアプリケーション制御ポリシーにブロックされ、
+# 起動できない（os error 4551）。プローブも本体もバイナリを実際に起動して
+# 確かめる必要があるため、リポジトリ内の target/ を使う。
+#
+# ⚠️ 環境変数 CARGO_TARGET_DIR はこの設定より優先される。
+#    シェルに CARGO_TARGET_DIR が設定されている場合は、明示的に上書きすること:
+#      CARGO_TARGET_DIR=./target cargo run -p tsg
+[build]
+target-dir = "target"

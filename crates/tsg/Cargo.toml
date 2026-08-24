@@ -1,0 +1,25 @@
+[package]
+name = "tsg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+arboard = "3.6.1"
+pollster = "1.0.1"
+raw-window-handle = "0.6.2"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = { version = "1.1.4", default-features = false, features = ["parse", "display", "serde"] }
+tsg-buffer = { version = "0.0.0", path = "../tsg-buffer" }
+tsg-modal = { version = "0.0.0", path = "../tsg-modal" }
+tsg-mux = { version = "0.0.0", path = "../tsg-mux" }
+tsg-pty = { version = "0.0.0", path = "../tsg-pty" }
+tsg-render = { version = "0.0.0", path = "../tsg-render" }
+tsg-term = { version = "0.0.0", path = "../tsg-term" }
+winit = "0.30.13"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Console", "Win32_Graphics_Dwm", "Win32_UI_WindowsAndMessaging", "Win32_Globalization"] }

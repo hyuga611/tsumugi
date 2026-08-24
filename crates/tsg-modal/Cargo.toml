@@ -1,0 +1,13 @@
+[package]
+name = "tsg-modal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tsg-buffer = { version = "0.0.0", path = "../tsg-buffer" }
+
+[dev-dependencies]
+tsg-term = { path = "../tsg-term" }
