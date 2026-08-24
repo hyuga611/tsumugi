@@ -148,7 +148,7 @@ fn is_blank_cell(cell: &Cell) -> bool {
 }
 
 /// その列の書記素クラスタ。全角の右半分（スペーサ）では左半分の内容を返す。
-pub fn cell_text<'a>(buf: &'a dyn Buffer, line: usize, col: usize) -> &'a str {
+pub fn cell_text(buf: &dyn Buffer, line: usize, col: usize) -> &str {
     let Some(cells) = buf.cells(line) else {
         return "";
     };

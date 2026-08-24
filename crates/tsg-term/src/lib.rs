@@ -352,7 +352,7 @@ impl Perform for TermState {
             0x07 => {}                          // BEL
             0x08 => self.grid.backspace(),      // BS
             0x09 => self.grid.tab(),            // HT
-            0x0A | 0x0B | 0x0C => self.grid.line_feed(),
+            0x0A..=0x0C => self.grid.line_feed(),
             0x0D => self.grid.carriage_return(),
             _ => {}
         }

@@ -100,12 +100,17 @@ pub struct FontStack {
     pub ascent: f32,
 }
 
+/// 合字を持つか調べるときに試す並び。プログラマが実際に見る形にしてある。
+pub const LIGATURE_PROBES: [&str; 6] = ["->", "=>", "!=", "==", "<=", "|>"];
+
 /// プラットフォーム別の候補。前から順に、実在した最初のものを採る。
 fn candidates() -> (&'static [&'static str], &'static [&'static str], &'static [&'static str]) {
     #[cfg(target_os = "windows")]
     {
         (
-            &["Cascadia Mono", "Consolas", "Courier New"],
+            // Cascadia Code を Mono より先に置く。寸法は同じで、
+            // **合字を持つかどうかだけ**が違う。合字を切りたい人は設定で切れる。
+            &["Cascadia Code", "Cascadia Mono", "Consolas", "Courier New"],
             &["MS Gothic", "Yu Gothic UI", "Meiryo", "Yu Gothic", "MS Mincho"],
             &["Segoe UI Emoji"],
         )
@@ -226,8 +231,8 @@ impl FontStack {
         };
 
         // 基準フォント以外を、セル格子に合うよう伸縮させる。
-        for i in 1..fonts.len() {
-            fonts[i].scale = fit_scale(&fonts[i], px, cell_w);
+        for font in &mut fonts[1..] {
+            font.scale = fit_scale(font, px, cell_w);
         }
 
         Ok(Self {
@@ -336,6 +341,21 @@ impl FontStack {
             }
         }
         Some(placed)
+    }
+
+    /// このフォントで実際に合字が組まれる数（`LIGATURE_PROBES` のうち）。
+    ///
+    /// **設定を入れただけでは合字は出ない。** 字体が持っていなければ出ない。
+    /// Consolas も SF Mono も持っていないので、「合字を on にしたのに変わらない」
+    /// は必ず起きる。`--diagnose` でここを出して、字体の話だと分かるようにする。
+    pub fn ligature_support(&self) -> usize {
+        LIGATURE_PROBES
+            .iter()
+            .filter(|s| {
+                self.shape_cells(s)
+                    .is_some_and(|g| g.len() < s.chars().count())
+            })
+            .count()
     }
 
     /// 各フォントに適用した伸縮倍率。診断用。

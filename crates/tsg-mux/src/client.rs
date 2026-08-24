@@ -1,7 +1,7 @@
 //! mux クライアント。GUI（`tsg`）はこれ越しにしかセッションを触らない。
 
 use std::io::{BufRead, BufReader, Write};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, TryRecvError};
+use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::Duration;
 
@@ -57,18 +57,14 @@ impl Client {
         Ok(())
     }
 
+    /// 来ていれば 1 通。**切れているかどうかはここでは区別しない**
+    /// （切れたことは他の道で分かるし、呼ぶ側は「今は無い」と同じに扱う）。
     pub fn try_recv(&self) -> Option<ServerMsg> {
-        match self.rx.try_recv() {
-            Ok(m) => Some(m),
-            Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
-        }
+        self.rx.try_recv().ok()
     }
 
     pub fn recv_timeout(&self, dur: Duration) -> Option<ServerMsg> {
-        match self.rx.recv_timeout(dur) {
-            Ok(m) => Some(m),
-            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => None,
-        }
+        self.rx.recv_timeout(dur).ok()
     }
 
     /// 条件を満たすメッセージが来るまで待つ（テストと初期化用）。

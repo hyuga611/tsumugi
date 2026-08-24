@@ -28,7 +28,7 @@ const ROWS: u16 = 30;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Shell {
-    PowerShell,
+    Windows,
     Pwsh,
     Bash,
 }
@@ -36,7 +36,7 @@ enum Shell {
 impl Shell {
     fn program(self) -> &'static str {
         match self {
-            Shell::PowerShell => "powershell.exe",
+            Shell::Windows => "powershell.exe",
             Shell::Pwsh => "pwsh",
             Shell::Bash => "bash",
         }
@@ -44,7 +44,7 @@ impl Shell {
 
     fn label(self) -> &'static str {
         match self {
-            Shell::PowerShell => "Windows PowerShell 5.1",
+            Shell::Windows => "Windows PowerShell 5.1",
             Shell::Pwsh => "PowerShell 7+",
             Shell::Bash => "bash",
         }
@@ -52,14 +52,14 @@ impl Shell {
 
     fn extension(self) -> &'static str {
         match self {
-            Shell::PowerShell | Shell::Pwsh => "ps1",
+            Shell::Windows | Shell::Pwsh => "ps1",
             Shell::Bash => "sh",
         }
     }
 
     fn args(self, script: &str) -> Vec<String> {
         match self {
-            Shell::PowerShell | Shell::Pwsh => vec![
+            Shell::Windows | Shell::Pwsh => vec![
                 "-NoProfile".into(),
                 "-NonInteractive".into(),
                 "-ExecutionPolicy".into(),
@@ -74,7 +74,7 @@ impl Shell {
     /// 実行ファイルの実体が見つかったものだけを返す。
     fn available() -> Vec<(Shell, PathBuf)> {
         let candidates = if cfg!(windows) {
-            vec![Shell::PowerShell, Shell::Pwsh, Shell::Bash]
+            vec![Shell::Windows, Shell::Pwsh, Shell::Bash]
         } else {
             vec![Shell::Bash]
         };
@@ -202,7 +202,7 @@ fn run_script(shell: Shell, exe: &Path, body: &str, timeout: Duration) -> Result
 /// （ファイルの文字コード問題と ConPTY の問題を切り分けるため）。
 fn script_direct(shell: Shell) -> String {
     match shell {
-        Shell::PowerShell | Shell::Pwsh => r#"
+        Shell::Windows | Shell::Pwsh => r#"
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $e = [char]27
@@ -284,7 +284,7 @@ printf 'DONE\r\n'
 /// 検査 2 用。実際にプロンプト関数へシェル統合を仕込み、成功・失敗コマンドを走らせる。
 fn script_integration(shell: Shell) -> String {
     match shell {
-        Shell::PowerShell | Shell::Pwsh => r#"
+        Shell::Windows | Shell::Pwsh => r#"
 $ErrorActionPreference = 'Continue'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $e = [char]27
@@ -510,7 +510,7 @@ fn main() -> Result<()> {
         let shell = match argv.get(2).map(String::as_str) {
             Some("bash") => Shell::Bash,
             Some("pwsh") => Shell::Pwsh,
-            _ => Shell::PowerShell,
+            _ => Shell::Windows,
         };
         let body = match argv.get(3) {
             Some(s) => s.clone(),

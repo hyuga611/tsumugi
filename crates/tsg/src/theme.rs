@@ -179,7 +179,9 @@ impl Seed {
 
             rec_on: s.ansi[9],
 
-            help_bg: mix(s.bg, if s.dark { BLACK } else { WHITE }, 0.35),
+            // 使い方の面は**沈める**。明るいテーマで白へ寄せると、既に白い背景と
+            // 見分けが付かず、面として立たない。どちらの明暗でも暗い側へ動かす。
+            help_bg: mix(s.bg, BLACK, if s.dark { 0.35 } else { 0.05 }),
             help_title: s.ansi[11],
             help_body: mix(s.fg, s.bg, 0.05),
             help_note: dim,
@@ -472,6 +474,19 @@ mod tests {
                 let d = contrast(t.mode_fg, band);
                 assert!(d > 0.35, "{name}/{label}: 帯の字が読めない（{d:.2}）");
             }
+        }
+    }
+
+    /// 使い方の面が背景と**見分けられる**こと。明るいテーマで白へ寄せると
+    /// 面が消える（実際に白磁でそうなった）。
+    #[test]
+    fn the_help_panel_is_a_distinct_surface_in_every_theme() {
+        for (name, _) in BUILTIN {
+            let t = builtin(name).expect("引けない");
+            let d = contrast(t.help_bg, t.bg);
+            assert!(d > 0.008, "{name}: 使い方の面が背景に溶けている（{d:.4}）");
+            let text = contrast(t.help_body, t.help_bg);
+            assert!(text > 0.55, "{name}: 使い方の字が読めない（{text:.2}）");
         }
     }
 

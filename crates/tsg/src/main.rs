@@ -860,9 +860,7 @@ impl App {
     /// サーバからのメッセージを取り込む。何か来ていれば true。
     fn pump(&mut self) -> bool {
         let mut got = false;
-        loop {
-            let Some(client) = &self.client else { break };
-            let Some(msg) = client.try_recv() else { break };
+        while let Some(msg) = self.client.as_ref().and_then(Client::try_recv) {
             got = true;
             match msg {
                 ServerMsg::Attached { session, .. } => {
@@ -3475,6 +3473,18 @@ fn print_font_diagnostics(renderer: &Renderer) {
     println!("フォント: {}", chain.join(" -> "));
     println!("セル: {cw:.1} x {ch:.1} px (font {:.0}px)", f.px);
     println!("  ※ 括弧内はセル格子へ合わせるための伸縮倍率");
+
+    // **設定を on にしただけでは合字は出ない。** 字体が持っていなければ出ない
+    // （Consolas も SF Mono も持っていない）。字体の話だと分かるように出す。
+    let base = f.families().first().copied().unwrap_or("?");
+    let ligs = f.ligature_support();
+    let total = tsg_render::font::LIGATURE_PROBES.len();
+    if ligs == 0 {
+        println!("合字: {base} は合字を持っていません（設定を on にしても出ません）");
+    } else {
+        println!("合字: {base} で {ligs}/{total} 組める");
+    }
+
     println!("\nCJK 幅検査（送り幅がセル幅の何倍か）:");
 
     let mut all_ok = true;

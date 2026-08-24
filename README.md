@@ -10,7 +10,7 @@ Rust / クロスプラットフォーム（Windows・macOS・Linux）。
 **M0 スパイク（`arch.md` §9 の判定ゲート）は 🟢 通過。** 危険な仮定3つ
 （ConPTY を OSC 133 が通る / IME の preedit が出る / CJK 幅が崩れない）はすべて実機で成立し、
 設計の変更は不要だった。実測は [docs/m0-results.md](docs/m0-results.md)。
-**M1〜M7 実装済み** — vim のモーションでスクロールバックを歩いてヤンクでき、
+**M1〜M8 実装済み** — vim のモーションでスクロールバックを歩いてヤンクでき、
 **ウィンドウを閉じてもシェルは死なない**（mux サーバが別プロセスでセッションを保持）。
 色（SGR）・テキストオブジェクト・マウス操作層・右クリックメニュー・コマンドパレットまで入り、
 起動したディレクトリで開く / `-e` / 透過とぼかしにも対応した。
@@ -20,7 +20,12 @@ Rust / クロスプラットフォーム（Windows・macOS・Linux）。
 シェル統合を配るようになり（`tsg --install-shell-integration`）、
 ガター・`[[` `]]`・`ac` が実際のシェルで効く。編集は全文ではなく差分で送る。
 `tsg --install` でスタートメニュー・PATH・右クリックに載り、**表示は日本語と英語**、
-既定で背景が透けてぼける。残りは [docs/m7-results.md](docs/m7-results.md) §5。
+既定で背景が透けてぼける。
+**M8 で仕上げた** — 合字（`->` が 1 つの字形になる）・配色（夜霧 / 墨 / 白磁、
+`[theme.colors]` で個別に上書き）・**設定の読み直し**（保存した瞬間に効く）・
+**外から動かす口**（`--list` / `--send` / `--capture` / `--rpc`、[docs/rpc.md](docs/rpc.md)）。
+あわせて **mux ソケットを自分だけに閉じた**（それまで同じマシンの他ユーザから
+到達できた）。方針は [SECURITY.md](SECURITY.md)。
 
 ## 入れる・起動する
 
@@ -55,6 +60,9 @@ tsg --install-shell-integration     # プロンプトの位置を伝える設定
 | [docs/m5-results.md](docs/m5-results.md) | マーク / マクロ・配置の残り・マウス経路の完了・構文強調。実機で見つけた 4 件 |
 | [docs/m6-results.md](docs/m6-results.md) | シェル統合の配布と編集の差分化。実機で見つけた 3 件 |
 | [docs/m7-results.md](docs/m7-results.md) | 起動導線・アイコン・UI の作り直し・日本語 / 英語 |
+| [docs/m8-results.md](docs/m8-results.md) | 合字・テーマ・設定の読み直し・RPC の口と、安全側の作り直し |
+| [docs/rpc.md](docs/rpc.md) | **外から動かす口**。全メッセージと、安全のこと |
+| [SECURITY.md](SECURITY.md) | 何を守り、何を守らないか |
 
 ## 読む順番
 
@@ -77,7 +85,7 @@ tsg --install-shell-integration     # プロンプトの位置を伝える設定
 | `tsg-probe` | M0-a 判定ゲートの実測ツール |
 
 ```
-cargo test --workspace        # 301 tests
+cargo test --workspace        # 336 tests
 cargo run -p tsg-probe        # M0-a: ConPTY と OSC 133 を実測
 cargo run -p tsg -- --diagnose  # フォントと CJK 幅の数値だけ出して終了
 tsg                           # 起動したディレクトリでシェルが開く
@@ -85,6 +93,10 @@ tsg --help                    # 使えるオプション一覧
 tsg -e cargo test --workspace # シェルの代わりにコマンドを走らせる（専用セッション）
 tsg --opacity 0.9             # 背景を透かす（Windows 11 ではぼかしも入る）
 cargo run -p tsg -- --session work   # 名前付きセッション
+
+tsg --list                    # 走っているセッション
+tsg -s work --capture         # そのセッションに見えているものをテキストで
+tsg -s work --rpc             # 生のプロトコルで動かす（docs/rpc.md）
 cargo run -p tsg -- --session work --send "ls
 "   # 走っているセッションへ外から入力
 cargo run -p tsg -- --session work --tap            # そのセッションの生バイトを覗く
