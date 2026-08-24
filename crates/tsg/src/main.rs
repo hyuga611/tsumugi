@@ -18,6 +18,7 @@ mod overlay;
 mod platform;
 mod install;
 mod session;
+mod theme;
 mod shell;
 
 use std::io::Write;
@@ -42,50 +43,22 @@ use winit::window::{Window, WindowId};
 
 use cli::{Cli, Mode as CliMode};
 use config::Config;
+use theme::Theme;
 use session::{GUTTER, PaneView, Rect, Session};
 
+/// クリア色。**`Color::Default` の解決先とクリア色を別々に持たせない。**
+/// 2 か所に書くと、テーマを変えたときに片方だけ古い色のまま残る。
+fn background_of(th: &Theme, opacity: f32) -> [f32; 4] {
+    [th.bg[0], th.bg[1], th.bg[2], opacity]
+}
 
-/// 既定の背景。`Color::Default` の解決先でもあるので、レンダラの
-/// クリア色とここを別々に持たせない（初期化時に注入する）。
-const BG: [f32; 4] = [0.06, 0.07, 0.09, 1.0];
 
-const FG: [f32; 4] = [0.87, 0.88, 0.90, 1.0];
-const DIM: [f32; 4] = [0.48, 0.51, 0.57, 1.0];
-const CURSOR: [f32; 4] = [0.40, 0.72, 0.95, 0.55];
-const SELECTION: [f32; 4] = [0.30, 0.45, 0.62, 0.45];
-const STATUS_BG: [f32; 4] = [0.13, 0.15, 0.19, 1.0];
-const STATUS_FG: [f32; 4] = [0.62, 0.66, 0.72, 1.0];
-const PREEDIT: [f32; 4] = [0.95, 0.72, 0.35, 1.0];
-const DIVIDER: [f32; 4] = [0.22, 0.24, 0.28, 1.0];
-const DIVIDER_ACTIVE: [f32; 4] = [0.35, 0.55, 0.72, 1.0];
-const TAB_ACTIVE: [f32; 4] = [0.20, 0.26, 0.34, 1.0];
-const PANEL_BG: [f32; 4] = [0.11, 0.13, 0.17, 1.0];
-const PANEL_EDGE: [f32; 4] = [0.28, 0.33, 0.41, 1.0];
-const PANEL_SEL: [f32; 4] = [0.22, 0.34, 0.48, 1.0];
-const GUT_OK: [f32; 4] = [0.42, 0.68, 0.45, 1.0];
-const GUT_ERR: [f32; 4] = [0.85, 0.36, 0.40, 1.0];
-const GUT_RUN: [f32; 4] = [0.80, 0.66, 0.32, 1.0];
-const GUT_MARK: [f32; 4] = [0.55, 0.62, 0.86, 1.0];
-const HOVER: [f32; 4] = [0.45, 0.70, 0.95, 1.0];
-const ACCENT: [f32; 4] = [0.62, 0.72, 0.88, 1.0];
-// モードごとの色。**今どのモードかを、字を読まなくても分かるようにする。**
-// キーバインドに不慣れなうちは、ここが唯一の手がかりになる。
-const MODE_INSERT: [f32; 4] = [0.24, 0.44, 0.68, 1.0];
-const MODE_NORMAL: [f32; 4] = [0.24, 0.50, 0.35, 1.0];
-const MODE_VISUAL: [f32; 4] = [0.62, 0.46, 0.20, 1.0];
-const MODE_LAYOUT: [f32; 4] = [0.40, 0.32, 0.58, 1.0];
-const MODE_PENDING: [f32; 4] = [0.34, 0.36, 0.40, 1.0];
-const MODE_FG: [f32; 4] = [0.96, 0.97, 0.99, 1.0];
-// 構文強調。端末の 16 色とは別に持つ（SGR とぶつかると出力側の色が壊れる）。
-const SYN_COMMENT: [f32; 4] = [0.45, 0.53, 0.47, 1.0];
-const SYN_STR: [f32; 4] = [0.83, 0.71, 0.42, 1.0];
-const SYN_NUM: [f32; 4] = [0.55, 0.78, 0.78, 1.0];
-const SYN_KEY: [f32; 4] = [0.68, 0.62, 0.88, 1.0];
-const REC_ON: [f32; 4] = [0.90, 0.40, 0.42, 1.0];
 
 struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
+    /// 画面の色。**設定の読み直しで差し替わる**ので const ではない。
+    theme: Theme,
     client: Option<Client>,
     session_name: String,
     session: Session,
@@ -142,6 +115,7 @@ impl App {
             session_name: cli.session.clone(),
             session: Session::default(),
             engine: Engine::new(),
+            theme: cfg.theme,
             clipboard: None,
             mods: ModifiersState::empty(),
             preedit: String::new(),
@@ -279,6 +253,7 @@ impl App {
                 Effect::Scrolled(delta) => self.scroll_by(delta),
                 Effect::Message(msg) => self.status_msg = msg,
                 Effect::HelpToggled(_) => self.status_msg.clear(),
+                Effect::SetTheme(name) => self.apply_theme(&name),
                 Effect::Mux(req) => self.run_mux(req, event_loop),
                 Effect::Bell => {}
                 // ウィンドウを閉じても、開いているファイルはセッションに残る。
@@ -1561,13 +1536,13 @@ impl App {
     }
 
     /// モードの色。帯・カーソル・区切り線で同じ色を使う。
-    fn mode_color(mode: Mode) -> [f32; 4] {
+    fn mode_color(th: &Theme, mode: Mode) -> [f32; 4] {
         match mode {
-            Mode::Insert => MODE_INSERT,
-            Mode::Normal => MODE_NORMAL,
-            Mode::Visual(_) => MODE_VISUAL,
-            Mode::Layout => MODE_LAYOUT,
-            Mode::OperatorPending => MODE_PENDING,
+            Mode::Insert => th.mode_insert,
+            Mode::Normal => th.mode_normal,
+            Mode::Visual(_) => th.mode_visual,
+            Mode::Layout => th.mode_layout,
+            Mode::OperatorPending => th.mode_pending,
         }
     }
 
@@ -2028,6 +2003,7 @@ impl App {
     // ---- 描画 -------------------------------------------------------------
 
     fn draw(&mut self) {
+        let th = self.theme;
         self.update_view();
 
         let active = self.session.active;
@@ -2046,7 +2022,7 @@ impl App {
             renderer.begin();
 
             if help {
-                draw_help(renderer, cols, rows);
+                draw_help(renderer, &th, cols, rows);
             } else {
                 for id in &visible {
                     let Some(view) = self.session.panes.get(id) else {
@@ -2054,7 +2030,7 @@ impl App {
                     };
                     let rect = view.rect;
                     let is_active = *id == active;
-                    let divider = if is_active { DIVIDER_ACTIVE } else { DIVIDER };
+                    let divider = if is_active { th.divider_active } else { th.divider };
 
                     if rect.x > 0 {
                         renderer.rect(
@@ -2094,18 +2070,18 @@ impl App {
                         // 字が出るかどうかに製品の見た目を賭けない。
                         // 太さでも区別するので、色が見分けにくくても伝わる。
                         let (w, color) = if b.is_running() {
-                            (0.55, GUT_RUN)
+                            (0.55, th.gut_run)
                         } else if b.is_error() {
-                            (0.9, GUT_ERR)
+                            (0.9, th.gut_err)
                         } else {
-                            (0.25, GUT_OK)
+                            (0.25, th.gut_ok)
                         };
                         renderer.rect(
                             view.rect.x as f32 + 0.2,
                             (rect.y + r) as f32,
                             w,
                             1.0,
-                            if is_active { color } else { fade(color, 0.45) },
+                            if is_active { color } else { th.fade(color, 0.45) },
                         );
                     }
 
@@ -2123,7 +2099,7 @@ impl App {
                                 (rect.y + r) as f32 + 0.88,
                                 (x1 - x0) as f32,
                                 0.08,
-                                HOVER,
+                                th.hover,
                             );
                         }
                     }
@@ -2138,9 +2114,9 @@ impl App {
                             (rect.y + r) as f32,
                             &name.to_string(),
                             if is_active {
-                                GUT_MARK
+                                th.gut_mark
                             } else {
-                                fade(GUT_MARK, 0.45)
+                                th.fade(th.gut_mark, 0.45)
                             },
                             true,
                         );
@@ -2158,8 +2134,8 @@ impl App {
                             let bg = cells
                                 .get(c)
                                 .filter(|_| c < rect.w)
-                                .and_then(|cell| cell_colors(&cell.attrs).1)
-                                .map(|b| if is_active { b } else { fade(b, 0.35) });
+                                .and_then(|cell| cell_colors(&th, &cell.attrs).1)
+                                .map(|b| if is_active { b } else { th.fade(b, 0.35) });
                             if bg != run {
                                 if let Some(color) = run {
                                     renderer.rect(
@@ -2187,7 +2163,7 @@ impl App {
                                     (rect.y + r) as f32,
                                     w,
                                     1.0,
-                                    SELECTION,
+                                    th.selection,
                                 );
                             }
                         }
@@ -2207,14 +2183,14 @@ impl App {
                                 continue;
                             }
                             let mut fg = match syn.get(c) {
-                                Some(tsg_modal::Token::Comment) => SYN_COMMENT,
-                                Some(tsg_modal::Token::Str) => SYN_STR,
-                                Some(tsg_modal::Token::Number) => SYN_NUM,
-                                Some(tsg_modal::Token::Keyword) => SYN_KEY,
-                                _ => cell_colors(&cell.attrs).0,
+                                Some(tsg_modal::Token::Comment) => th.syn_comment,
+                                Some(tsg_modal::Token::Str) => th.syn_str,
+                                Some(tsg_modal::Token::Number) => th.syn_num,
+                                Some(tsg_modal::Token::Keyword) => th.syn_key,
+                                _ => cell_colors(&th, &cell.attrs).0,
                             };
                             if !is_active {
-                                fg = fade(fg, 0.45);
+                                fg = th.fade(fg, 0.45);
                             }
                             let (x, y) = ((rect.x + c) as f32, (rect.y + r) as f32);
                             if cell.text != " " {
@@ -2244,13 +2220,13 @@ impl App {
                     {
                         let (cx, cy) = ((rect.x + cursor.col) as f32, (rect.y + cr) as f32);
                         match mode {
-                            Mode::Insert => renderer.rect(cx, cy, 0.15, 1.0, CURSOR),
-                            _ => renderer.rect(cx, cy, 1.0, 1.0, CURSOR),
+                            Mode::Insert => renderer.rect(cx, cy, 0.15, 1.0, th.cursor),
+                            _ => renderer.rect(cx, cy, 1.0, 1.0, th.cursor),
                         }
                         if !preedit.is_empty() {
-                            renderer.text(cx, cy, &preedit, PREEDIT, true);
+                            renderer.text(cx, cy, &preedit, th.preedit, true);
                             let w = display_width(&preedit) as f32;
-                            renderer.rect(cx, cy + 0.92, w, 0.08, PREEDIT);
+                            renderer.rect(cx, cy + 0.92, w, 0.08, th.preedit);
                         }
                     }
                 }
@@ -2274,6 +2250,7 @@ impl App {
 
     /// タブバー。1 枚しか無いときは行を使わない（`tab_rows`）。
     fn draw_tabs(&mut self) {
+        let th = self.theme;
         if self.tab_rows() == 0 {
             return;
         }
@@ -2282,17 +2259,18 @@ impl App {
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
-        renderer.rect(0.0, 0.0, cols as f32, 1.0, STATUS_BG);
+        renderer.rect(0.0, 0.0, cols as f32, 1.0, th.status_bg);
         for (x, w, _, label, active) in spans {
             if active {
-                renderer.rect(x as f32, 0.0, w as f32, 1.0, TAB_ACTIVE);
+                renderer.rect(x as f32, 0.0, w as f32, 1.0, th.tab_active);
             }
-            renderer.text(x as f32, 0.0, &label, if active { FG } else { DIM }, true);
+            renderer.text(x as f32, 0.0, &label, if active { th.fg } else { th.dim }, true);
         }
     }
 
     /// 右クリックメニュー。
     fn draw_menu(&mut self) {
+        let th = self.theme;
         if !self.menu.open {
             return;
         }
@@ -2314,25 +2292,25 @@ impl App {
         let Some(r) = self.renderer.as_mut() else {
             return;
         };
-        panel(r, x, y, w, h);
+        panel(r, &th, x, y, w, h);
         for (i, (row, sel)) in rows.iter().enumerate() {
             let ry = (y + i) as f32;
             match row {
                 overlay::Row::Header(title) => {
-                    r.text((x + 1) as f32, ry, title, ACCENT, true);
+                    r.text((x + 1) as f32, ry, title, th.accent, true);
                 }
                 overlay::Row::Item(it) => {
                     if *sel {
-                        r.rect(x as f32, ry, w as f32, 1.0, PANEL_SEL);
+                        r.rect(x as f32, ry, w as f32, 1.0, th.panel_sel);
                     }
-                    r.text((x + 2) as f32, ry, it.title, FG, true);
+                    r.text((x + 2) as f32, ry, it.title, th.fg, true);
                     if !it.keys.is_empty() {
                         let kw = display_width(&it.keys);
                         r.text(
                             (x + w).saturating_sub(kw + 1) as f32,
                             ry,
                             &it.keys,
-                            DIM,
+                            th.dim,
                             true,
                         );
                     }
@@ -2343,6 +2321,7 @@ impl App {
 
     /// コマンドパレット。
     fn draw_palette(&mut self) {
+        let th = self.theme;
         if !self.palette.open {
             return;
         }
@@ -2381,44 +2360,45 @@ impl App {
         let Some(r) = self.renderer.as_mut() else {
             return;
         };
-        panel(r, x, y, w, shown + 3);
-        r.rect(x as f32, y as f32, w as f32, 1.0, TAB_ACTIVE);
-        r.text((x + 1) as f32, y as f32, &query, FG, true);
+        panel(r, &th, x, y, w, shown + 3);
+        r.rect(x as f32, y as f32, w as f32, 1.0, th.tab_active);
+        r.text((x + 1) as f32, y as f32, &query, th.fg, true);
         // カーソル
         let qw = display_width(&query);
-        r.rect((x + 1 + qw) as f32, y as f32, 0.15, 1.0, CURSOR);
+        r.rect((x + 1 + qw) as f32, y as f32, 0.15, 1.0, th.cursor);
 
         if rows.is_empty() {
             // 一覧の絞り込みではなくコマンドを打っている最中は、そう言う。
             // 「一致するものがありません」だけ出ると、打ち間違えたのかと思う。
-            r.text((x + 1) as f32, (y + 1) as f32, &hint, DIM, true);
+            r.text((x + 1) as f32, (y + 1) as f32, &hint, th.dim, true);
             return;
         }
         for (i, (title, keys, sel)) in rows.iter().enumerate() {
             let ry = (y + 1 + i) as f32;
             if *sel {
-                r.rect(x as f32, ry, w as f32, 1.0, PANEL_SEL);
+                r.rect(x as f32, ry, w as f32, 1.0, th.panel_sel);
             }
-            r.text((x + 2) as f32, ry, title, FG, true);
+            r.text((x + 2) as f32, ry, title, th.fg, true);
             if !keys.is_empty() {
                 let kw = display_width(keys);
-                r.text((x + w).saturating_sub(kw + 1) as f32, ry, keys, DIM, true);
+                r.text((x + w).saturating_sub(kw + 1) as f32, ry, keys, th.dim, true);
             }
         }
         if total > shown {
             let more = t!(format!("ほか {} 件", total - shown), format!("{} more", total - shown));
-            r.text((x + 2) as f32, (y + shown + 1) as f32, &more, DIM, true);
+            r.text((x + 2) as f32, (y + shown + 1) as f32, &more, th.dim, true);
         }
         // 使い方の 1 行。**一覧を出したのに動かし方が分からない**を作らない。
         let foot = t!(
             "↑↓ で選ぶ · Enter で実行 · Esc で閉じる · そのまま打つと絞り込み",
             "↑↓ choose · Enter run · Esc close · type to filter"
         );
-        r.text((x + 2) as f32, (y + shown + 2) as f32, foot, DIM, true);
+        r.text((x + 2) as f32, (y + shown + 2) as f32, foot, th.dim, true);
     }
 
     /// 名前を選ぶだけの一覧（セッション切り替え）。
     fn draw_picker(&mut self) {
+        let th = self.theme;
         if !self.picker.open {
             return;
         }
@@ -2440,15 +2420,15 @@ impl App {
         let Some(r) = self.renderer.as_mut() else {
             return;
         };
-        panel(r, x, y, w, shown.max(1) + 1);
-        r.rect(x as f32, y as f32, w as f32, 1.0, TAB_ACTIVE);
-        r.text((x + 1) as f32, y as f32, &title, FG, true);
+        panel(r, &th, x, y, w, shown.max(1) + 1);
+        r.rect(x as f32, y as f32, w as f32, 1.0, th.tab_active);
+        r.text((x + 1) as f32, y as f32, &title, th.fg, true);
         if rows.is_empty() {
             r.text(
                 (x + 1) as f32,
                 (y + 1) as f32,
                 t!("走っているセッションがありません", "no sessions are running"),
-                DIM,
+                th.dim,
                 true,
             );
             return;
@@ -2456,11 +2436,11 @@ impl App {
         for (i, (name, sel, current)) in rows.iter().enumerate() {
             let ry = (y + 1 + i) as f32;
             if *sel {
-                r.rect(x as f32, ry, w as f32, 1.0, PANEL_SEL);
+                r.rect(x as f32, ry, w as f32, 1.0, th.panel_sel);
             }
-            r.text((x + 2) as f32, ry, name, FG, true);
+            r.text((x + 2) as f32, ry, name, th.fg, true);
             if *current {
-                r.text((x + w).saturating_sub(6) as f32, ry, t!("今ここ", "here"), DIM, true);
+                r.text((x + w).saturating_sub(6) as f32, ry, t!("今ここ", "here"), th.dim, true);
             }
         }
     }
@@ -2469,6 +2449,7 @@ impl App {
     ///
     /// 記号を並べず、押せるものはボタンの形にして、今できることを言葉で書く。
     fn draw_status(&mut self, mode: Mode, visible: &[u32]) {
+        let th = self.theme;
         let buttons = self.status_buttons();
         let recording = self.engine.macros.recording().is_some();
 
@@ -2504,12 +2485,12 @@ impl App {
 
         let status_row = self.rows.saturating_sub(1) as f32;
         let cols = self.cols;
-        let mode_bg = Self::mode_color(mode);
+        let mode_bg = Self::mode_color(&th, mode);
 
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
-        renderer.rect(0.0, status_row, cols as f32, 1.0, STATUS_BG);
+        renderer.rect(0.0, status_row, cols as f32, 1.0, th.status_bg);
 
         let mut x = 0usize;
         for (label, target) in &buttons {
@@ -2517,12 +2498,12 @@ impl App {
             match target {
                 StatusTarget::Mode => {
                     renderer.rect(x as f32, status_row, w as f32, 1.0, mode_bg);
-                    renderer.text(x as f32, status_row, label, MODE_FG, true);
+                    renderer.text(x as f32, status_row, label, th.mode_fg, true);
                 }
                 StatusTarget::Macro if recording => {
-                    renderer.text(x as f32, status_row, label, REC_ON, true);
+                    renderer.text(x as f32, status_row, label, th.rec_on, true);
                 }
-                _ => renderer.text(x as f32, status_row, label, STATUS_FG, true),
+                _ => renderer.text(x as f32, status_row, label, th.status_fg, true),
             }
             x += w;
         }
@@ -2532,7 +2513,7 @@ impl App {
             cols.saturating_sub(rw) as f32,
             status_row,
             &right,
-            DIM,
+            th.dim,
             true,
         );
 
@@ -2544,9 +2525,37 @@ impl App {
                 (x + 2) as f32,
                 status_row,
                 &truncate_width(&hint, room),
-                DIM,
+                th.dim,
                 true,
             );
+        }
+    }
+
+    /// 配色を差し替える。
+    ///
+    /// **クリア色も一緒に変える。** ここを忘れると、セルは新しい色で描かれるのに
+    /// 何も無い部分だけ古い背景のまま残る。
+    fn apply_theme(&mut self, name: &str) {
+        if !self.cfg.set_theme(name) {
+            self.status_msg = t!(
+                "その配色は知りません: ",
+                "no such theme: "
+            )
+            .to_string()
+                + name;
+            return;
+        }
+        self.theme = self.cfg.theme;
+        if let Some(r) = self.renderer.as_mut() {
+            r.background = background_of(&self.theme, self.cfg.opacity);
+        }
+        self.status_msg = format!(
+            "{}{}",
+            t!("配色: ", "theme: "),
+            self.cfg.theme_name
+        );
+        if let Some(w) = &self.window {
+            w.request_redraw();
         }
     }
 
@@ -2801,12 +2810,12 @@ fn file_url_to_path(url: &str) -> Option<String> {
 }
 
 /// 一覧の下地。枠を1本引くだけで、下の本文と混ざらなくなる。
-fn panel(r: &mut Renderer, x: usize, y: usize, w: usize, h: usize) {
-    r.rect(x as f32, y as f32, w as f32, h as f32, PANEL_BG);
-    r.rect(x as f32, y as f32, w as f32, 0.06, PANEL_EDGE);
-    r.rect(x as f32, (y + h) as f32 - 0.06, w as f32, 0.06, PANEL_EDGE);
-    r.rect(x as f32, y as f32, 0.06, h as f32, PANEL_EDGE);
-    r.rect((x + w) as f32 - 0.06, y as f32, 0.06, h as f32, PANEL_EDGE);
+fn panel(r: &mut Renderer, th: &Theme, x: usize, y: usize, w: usize, h: usize) {
+    r.rect(x as f32, y as f32, w as f32, h as f32, th.panel_bg);
+    r.rect(x as f32, y as f32, w as f32, 0.06, th.panel_edge);
+    r.rect(x as f32, (y + h) as f32 - 0.06, w as f32, 0.06, th.panel_edge);
+    r.rect(x as f32, y as f32, 0.06, h as f32, th.panel_edge);
+    r.rect((x + w) as f32 - 0.06, y as f32, 0.06, h as f32, th.panel_edge);
 }
 
 /// 左クリック 1 回が何をするか。
@@ -2864,30 +2873,12 @@ fn status_hit(buttons: &[(String, StatusTarget)], col: usize) -> StatusTarget {
     StatusTarget::Ownership
 }
 
-fn rgba(v: [u8; 3]) -> [f32; 4] {
-    [
-        v[0] as f32 / 255.0,
-        v[1] as f32 / 255.0,
-        v[2] as f32 / 255.0,
-        1.0,
-    ]
-}
-
 /// 背景へ向けて色を寄せる。非アクティブなペインを沈ませるのに使う。
 /// 灰色に潰さず寄せるだけなので、どのペインでも色の意味は読める。
-fn fade(c: [f32; 4], t: f32) -> [f32; 4] {
-    [
-        c[0] + (BG[0] - c[0]) * t,
-        c[1] + (BG[1] - c[1]) * t,
-        c[2] + (BG[2] - c[2]) * t,
-        c[3],
-    ]
-}
-
 /// セルの SGR を (前景, 背景) の RGBA へ落とす。背景が `None` なら塗らない。
 ///
 /// `Color::Default` の解決先はここにしかない。テーマを差し替えるならここ。
-fn cell_colors(attrs: &Attrs) -> ([f32; 4], Option<[f32; 4]>) {
+fn cell_colors(th: &Theme, attrs: &Attrs) -> ([f32; 4], Option<[f32; 4]>) {
     let rev = attrs.has(Attrs::REVERSE);
     let (fg_c, bg_c) = attrs.resolved();
     let fg_c = if attrs.has(Attrs::BOLD) {
@@ -2897,18 +2888,18 @@ fn cell_colors(attrs: &Attrs) -> ([f32; 4], Option<[f32; 4]>) {
     };
 
     // 既定色の反転は、テーマの前景と背景を入れ替えた形になる。
-    let mut fg = fg_c.rgb().map(rgba).unwrap_or(if rev { BG } else { FG });
-    let bg = match bg_c.rgb() {
-        Some(v) => Some(rgba(v)),
-        None if rev => Some(FG),
+    let mut fg = th.resolve(fg_c).unwrap_or(if rev { th.bg } else { th.fg });
+    let bg = match th.resolve(bg_c) {
+        Some(v) => Some(v),
+        None if rev => Some(th.fg),
         None => None,
     };
 
     if attrs.has(Attrs::DIM) {
-        fg = fade(fg, 0.45);
+        fg = th.fade(fg, 0.45);
     }
     if attrs.has(Attrs::HIDDEN) {
-        fg = bg.unwrap_or(BG);
+        fg = bg.unwrap_or(th.bg);
     }
     (fg, bg)
 }
@@ -2939,13 +2930,10 @@ fn truncate_width(s: &str, max: usize) -> String {
 /// **キーの一覧から書かない。** 初めて開いた人が知りたいのは
 /// 「マウスで何ができるか」と「モードとは何か」で、キーはその後でいい。
 /// 全部の一覧はコマンドパレットが持っているので、ここでは代表だけ出す。
-fn draw_help(renderer: &mut Renderer, cols: usize, rows: usize) {
-    const TITLE: [f32; 4] = [0.95, 0.80, 0.45, 1.0];
-    const BODY: [f32; 4] = [0.86, 0.88, 0.91, 1.0];
-    const NOTE: [f32; 4] = [0.55, 0.59, 0.65, 1.0];
-    const PANEL: [f32; 4] = [0.08, 0.09, 0.12, 1.0];
+fn draw_help(renderer: &mut Renderer, th: &Theme, cols: usize, rows: usize) {
+    let (title, body, note, panel) = (th.help_title, th.help_body, th.help_note, th.help_bg);
 
-    renderer.rect(0.0, 0.0, cols as f32, rows as f32, PANEL);
+    renderer.rect(0.0, 0.0, cols as f32, rows as f32, panel);
 
     let x = 4.0;
     let mut row = 1.0f32;
@@ -2959,13 +2947,13 @@ fn draw_help(renderer: &mut Renderer, cols: usize, rows: usize) {
     let col2 = (cols / 3).clamp(18, 30);
     let pair = |renderer: &mut Renderer, row: &mut f32, a: &str, b: &str| {
         if (*row as usize) < rows.saturating_sub(1) {
-            renderer.text(x + 2.0, *row, a, BODY, true);
-            renderer.text(x + 2.0 + col2 as f32, *row, b, NOTE, true);
+            renderer.text(x + 2.0, *row, a, body, true);
+            renderer.text(x + 2.0 + col2 as f32, *row, b, note, true);
         }
         *row += 1.0;
     };
 
-    line(renderer, &mut row, "tsumugi", TITLE);
+    line(renderer, &mut row, "tsumugi", title);
     line(
         renderer,
         &mut row,
@@ -2973,7 +2961,7 @@ fn draw_help(renderer: &mut Renderer, cols: usize, rows: usize) {
             "ターミナルの画面を、そのまま読んで・選んで・編集できます",
             "read, select and edit the terminal screen itself"
         ),
-        NOTE,
+        note,
     );
     row += 1.0;
 
@@ -2981,7 +2969,7 @@ fn draw_help(renderer: &mut Renderer, cols: usize, rows: usize) {
         renderer,
         &mut row,
         t!("■ マウスだけで使えます", "■ The mouse is enough"),
-        TITLE,
+        title,
     );
     for (a, b) in [
         (
@@ -3025,7 +3013,7 @@ fn draw_help(renderer: &mut Renderer, cols: usize, rows: usize) {
         renderer,
         &mut row,
         t!("■ 2 つのモードがあります", "■ Two modes"),
-        TITLE,
+        title,
     );
     for (a, b) in [
         (
@@ -3053,7 +3041,7 @@ fn draw_help(renderer: &mut Renderer, cols: usize, rows: usize) {
         renderer,
         &mut row,
         t!("■ キーで速くしたくなったら", "■ When you want to go faster"),
-        TITLE,
+        title,
     );
     for (a, b) in [
         ("j  k", t!("下 / 上へ", "down / up")),
@@ -3075,7 +3063,7 @@ fn draw_help(renderer: &mut Renderer, cols: usize, rows: usize) {
             "ウィンドウを閉じてもシェルは死にません。開き直せば続きから使えます。",
             "closing the window does not kill your shells; reopen to continue"
         ),
-        NOTE,
+        note,
     );
     line(
         renderer,
@@ -3084,7 +3072,7 @@ fn draw_help(renderer: &mut Renderer, cols: usize, rows: usize) {
             "どれかキーを押す / クリックすると閉じます",
             "press any key or click to close"
         ),
-        NOTE,
+        note,
     );
 }
 
@@ -3131,7 +3119,7 @@ impl ApplicationHandler for App {
         ) {
             Ok(mut r) => {
                 // `Color::Default` の解決先とクリア色を別々に持たせない
-                r.background = [BG[0], BG[1], BG[2], self.cfg.opacity];
+                r.background = background_of(&self.theme, self.cfg.opacity);
                 r
             }
             Err(e) => {
@@ -3534,6 +3522,7 @@ fn main() -> Result<()> {
     cfg.override_with(&cli);
     // 表示の言葉はここで 1 度だけ決める（以降プロセス全体で変わらない）
     tsg_modal::set_lang(cfg.lang);
+    session::set_scrollback(cfg.scrollback);
     if let Some(w) = warning {
         eprintln!("設定: {w}（既定で起動します）");
     }
@@ -3654,47 +3643,62 @@ mod tests {
         Attrs { fg, bg, flags }
     }
 
+    fn th() -> Theme {
+        Theme::default()
+    }
+
     #[test]
     fn plain_cells_do_not_paint_a_background() {
         // 既定色の背景まで塗ると、80x24 ぶんの無駄な矩形が毎フレーム出る
-        let (fg, bg) = cell_colors(&Attrs::default());
+        let th = th();
+        let (fg, bg) = cell_colors(&th, &Attrs::default());
         assert_eq!(bg, None);
-        assert_eq!(fg, FG);
+        assert_eq!(fg, th.fg);
     }
 
     #[test]
     fn reverse_on_default_colors_swaps_the_theme() {
-        let (fg, bg) = cell_colors(&attrs(
-            tsg_term::Color::Default,
-            tsg_term::Color::Default,
-            Attrs::REVERSE,
-        ));
-        assert_eq!(fg, BG);
-        assert_eq!(bg, Some(FG));
+        let th = th();
+        let (fg, bg) = cell_colors(
+            &th,
+            &attrs(
+                tsg_term::Color::Default,
+                tsg_term::Color::Default,
+                Attrs::REVERSE,
+            ),
+        );
+        assert_eq!(fg, th.bg);
+        assert_eq!(bg, Some(th.fg));
     }
 
     #[test]
     fn bold_promotes_the_standard_palette() {
-        let (bold, _) = cell_colors(&attrs(
-            tsg_term::Color::Indexed(1),
-            tsg_term::Color::Default,
-            Attrs::BOLD,
-        ));
-        let (bright, _) = cell_colors(&attrs(
-            tsg_term::Color::Indexed(9),
-            tsg_term::Color::Default,
-            0,
-        ));
+        let th = th();
+        let (bold, _) = cell_colors(
+            &th,
+            &attrs(
+                tsg_term::Color::Indexed(1),
+                tsg_term::Color::Default,
+                Attrs::BOLD,
+            ),
+        );
+        let (bright, _) = cell_colors(
+            &th,
+            &attrs(tsg_term::Color::Indexed(9), tsg_term::Color::Default, 0),
+        );
         assert_eq!(bold, bright);
     }
 
     #[test]
     fn hidden_makes_the_glyph_match_its_background() {
-        let (fg, bg) = cell_colors(&attrs(
-            tsg_term::Color::Indexed(1),
-            tsg_term::Color::Indexed(4),
-            Attrs::HIDDEN,
-        ));
+        let (fg, bg) = cell_colors(
+            &th(),
+            &attrs(
+                tsg_term::Color::Indexed(1),
+                tsg_term::Color::Indexed(4),
+                Attrs::HIDDEN,
+            ),
+        );
         assert_eq!(Some(fg), bg);
     }
 

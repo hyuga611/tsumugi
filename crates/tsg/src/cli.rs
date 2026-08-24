@@ -46,6 +46,8 @@ pub struct Cli {
     pub font_size: Option<f32>,
     /// 表示の言語（`ja` / `en`）。設定より優先する。
     pub lang: Option<String>,
+    /// テーマの名前。設定より優先する。
+    pub theme: Option<String>,
     /// `--session` を明示されたか。`-e` のときの既定を変えるのに使う。
     pub session_given: bool,
 }
@@ -61,6 +63,7 @@ impl Default for Cli {
             blur: None,
             font_size: None,
             lang: None,
+            theme: None,
             session_given: false,
         }
     }
@@ -81,6 +84,7 @@ tsumugi (tsg) — ターミナルの画面を vim で編集できるドキュメ
       --no-blur            背景のぼかしを切る
       --font-size <px>     文字の大きさ
       --lang <ja|en>       表示の言語（既定: OS に合わせる）
+      --theme <名前>       配色（夜霧 / 墨 / 白磁。英名 yogiri / sumi / hakuji でも可）
       --install            スタートメニュー / デスクトップ / PATH /
                            フォルダの右クリックに登録する（exe は動かさない）
       --uninstall          それを全部外す
@@ -104,6 +108,17 @@ tsumugi (tsg) — ターミナルの画面を vim で編集できるドキュメ
 
   [font]
   size = 18.0
+  ligatures = true        # -> や != を 1 つの字形に組む
+
+  [scrollback]
+  lines = 10000
+
+  [theme]
+  name = \"夜霧\"           # 夜霧 / 墨 / 白磁
+
+  [theme.colors]          # 個別に上書き（省略可）
+  background = \"#0f1217\"
+  ansi1 = \"#e05a63\"
 
 はじめに（1 回だけ）:
   tsg --install                          # スタートメニュー・PATH・右クリックに登録
@@ -185,6 +200,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Cli {
             "--blur" => cli.blur = Some(true),
             "--font-size" => cli.font_size = next(&mut i).and_then(|v| v.parse().ok()),
             "--lang" => cli.lang = next_value(&args, &mut i),
+            "--theme" => cli.theme = next_value(&args, &mut i),
             "--shell-integration" => {
                 cli.mode = Mode::ShellIntegration(next_value(&args, &mut i));
             }

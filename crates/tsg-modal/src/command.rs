@@ -233,6 +233,10 @@ pub enum Command {
     /// 使い方の表示。起動しただけでは何をすればいいか分からない、を潰すための一級機能。
     ToggleHelp,
 
+    /// 配色を変える。**名前はこの層にとって不透明**で、実際に色を知っているのは
+    /// ホストだけ（`arch.md` の不変条件 2「`tsg-modal` は純粋」）。
+    SetTheme(&'static str),
+
     Quit,
 }
 
@@ -298,6 +302,30 @@ impl CommandSpec {
 /// **未配線: 左ガター・右クリックメニュー・コマンドパレット。**
 /// これらを宣言している行は、まだキーボードからしか届かない。
 pub const REGISTRY: &[CommandSpec] = &[
+    CommandSpec {
+        id: "ui.theme.yogiri",
+        title: "配色: 夜霧（暗い / 既定）",
+        title_en: "Theme: Yogiri (dark, default)",
+        keys: &[],
+        mouse: MousePath::Palette,
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "ui.theme.sumi",
+        title: "配色: 墨（暗い / 高コントラスト）",
+        title_en: "Theme: Sumi (dark, high contrast)",
+        keys: &[],
+        mouse: MousePath::Palette,
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "ui.theme.hakuji",
+        title: "配色: 白磁（明るい）",
+        title_en: "Theme: Hakuji (light)",
+        keys: &[],
+        mouse: MousePath::Palette,
+        in_palette: true,
+    },
     CommandSpec {
         id: "ui.help",
         title: "使い方を表示",

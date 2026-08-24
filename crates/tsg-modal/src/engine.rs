@@ -59,6 +59,8 @@ pub enum Effect {
     Scrolled(isize),
     Message(String),
     HelpToggled(bool),
+    /// 配色を変える。色を知っているのはホストだけなので、名前だけ渡す。
+    SetTheme(String),
     /// mux（別プロセス）への要求。ホストが `tsg-mux` のメッセージへ翻訳する。
     Mux(MuxRequest),
     /// コマンドパレットを開く（`prefix` を入れた状態で）。
@@ -716,6 +718,9 @@ impl Engine {
         let selection = self.selection();
         let cmd = match id {
             "ui.help" => Command::ToggleHelp,
+            "ui.theme.yogiri" => Command::SetTheme("yogiri"),
+            "ui.theme.sumi" => Command::SetTheme("sumi"),
+            "ui.theme.hakuji" => Command::SetTheme("hakuji"),
             "mode.insert" => Command::EnterInsert(InsertAt::Here),
             "mode.normal" => Command::EnterNormal,
             "mode.visual.char" => Command::EnterVisual(VisualKind::Char),
@@ -1128,6 +1133,7 @@ impl Engine {
                 self.macros.last = Some(name);
                 vec![Effect::MacroReplay(keys)]
             }
+            Command::SetTheme(name) => vec![Effect::SetTheme(name.to_string())],
             Command::Quit => vec![Effect::Quit],
         }
     }

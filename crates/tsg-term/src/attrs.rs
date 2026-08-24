@@ -16,15 +16,6 @@ pub enum Color {
 }
 
 impl Color {
-    /// パレットを解決した RGB。`Default` だけは描画側に委ねるので `None`。
-    pub fn rgb(self) -> Option<[u8; 3]> {
-        match self {
-            Color::Default => None,
-            Color::Rgb(r, g, b) => Some([r, g, b]),
-            Color::Indexed(i) => Some(indexed_rgb(i)),
-        }
-    }
-
     /// 太字のときに標準色を明色へ繰り上げる（xterm 以来の慣習）。
     pub fn brighten(self) -> Self {
         match self {
@@ -34,8 +25,10 @@ impl Color {
     }
 }
 
-/// 標準 16 色。アプリの暗い背景に載る前提で選んである。
-const BASE16: [[u8; 3]; 16] = [
+/// 標準 16 色の**既定値**。実際に使う 16 色はテーマが持つ
+/// （`tsg::theme`）。ここに在るのは、テーマを持たない道（プローブ・テスト・
+/// 行の ANSI 復元）が参照する素の表。
+pub const BASE16: [[u8; 3]; 16] = [
     [0x15, 0x18, 0x1d], // 0 黒
     [0xe0, 0x5a, 0x63], // 1 赤
     [0x7f, 0xc0, 0x6e], // 2 緑
@@ -57,7 +50,12 @@ const BASE16: [[u8; 3]; 16] = [
 /// 6×6×6 キューブの各段の輝度（xterm と同じ）。
 const CUBE: [u8; 6] = [0, 95, 135, 175, 215, 255];
 
-fn indexed_rgb(i: u8) -> [u8; 3] {
+/// インデックス色を RGB へ。
+///
+/// **16 以降はテーマで動かさない。** アプリが `[38;5;208m` と書くとき
+/// 期待しているのは決まった橙で、そこを振り替えると出力が嘘になる。
+/// 0-15 だけはテーマが差し替える（`tsg::theme::Theme::resolve`）。
+pub fn indexed_rgb(i: u8) -> [u8; 3] {
     match i {
         0..=15 => BASE16[i as usize],
         16..=231 => {

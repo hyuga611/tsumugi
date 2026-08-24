@@ -8,11 +8,13 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use tsg_modal::Lang;
 
+use crate::theme::{self, Theme};
+
 /// 既定で少し透かす。**背景がぼけて後ろが透ける**のが標準の見た目。
 ///
 /// 不透明が既定だと「透過は設定でできる」で終わってしまい、
 /// 初めて開いた人がこの端末の見た目を知らないまま使うことになる。
-pub const DEFAULT_OPACITY: f32 = 0.90;
+pub const DEFAULT_OPACITY: f32 = 0.85;
 pub const DEFAULT_FONT_SIZE: f32 = 18.0;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -20,8 +22,18 @@ pub struct Config {
     pub opacity: f32,
     pub blur: bool,
     pub font_size: f32,
+    /// 合字を組むか（`->` を 1 つの字形にする）。
+    pub ligatures: bool,
+    /// スクロールバックに残す行数。
+    pub scrollback: usize,
     /// 表示の言語。設定に無ければ OS の言語を見る。
+    ///
+    /// **これだけは読み直しで変えない。** 言語はプロセス全体で 1 つと決めてあり
+    /// （`t!` が起動時の値を見る）、途中で変えると画面の一部だけ古い言語のまま残る。
     pub lang: Lang,
+    /// 使うテーマの名前。表示と `:theme` のために持つ。
+    pub theme_name: String,
+    pub theme: Theme,
 }
 
 impl Default for Config {
@@ -30,7 +42,11 @@ impl Default for Config {
             opacity: DEFAULT_OPACITY,
             blur: true,
             font_size: DEFAULT_FONT_SIZE,
+            ligatures: true,
+            scrollback: tsg_term::grid::DEFAULT_MAX_SCROLLBACK,
             lang: detect_lang(),
+            theme_name: theme::DEFAULT_THEME.to_string(),
+            theme: Theme::default(),
         }
     }
 }
@@ -43,6 +59,27 @@ struct File {
     font: Font,
     #[serde(default)]
     ui: Ui,
+    #[serde(default)]
+    scrollback: Scrollback,
+    #[serde(default)]
+    theme: ThemeFile,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Scrollback {
+    lines: Option<usize>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ThemeFile {
+    /// 組み込みテーマの名前。
+    name: Option<String>,
+    /// 個別の色の上書き。`#rrggbb` / `#rrggbbaa` / `#rgb`。
+    ///
+    /// 知らない名前と読めない値は**黙って捨てず、警告に出す**。
+    /// 綴りを間違えたときに「書いたのに効かない」で終わらせない。
+    #[serde(default)]
+    colors: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -75,6 +112,7 @@ struct Window {
 #[derive(Debug, Default, Deserialize)]
 struct Font {
     size: Option<f32>,
+    ligatures: Option<bool>,
 }
 
 /// 設定ファイルの場所。
@@ -98,7 +136,10 @@ impl Config {
             return (Self::default(), None);
         };
         match toml::from_str::<File>(&text) {
-            Ok(f) => (Self::from_file(&f), None),
+            Ok(f) => {
+                let (cfg, warn) = Self::from_file(&f);
+                (cfg, warn.map(|w| format!("{}: {w}", p.display())))
+            }
             Err(e) => (
                 Self::default(),
                 Some(format!("{} が読めません: {e}", p.display())),
@@ -106,19 +147,50 @@ impl Config {
         }
     }
 
-    fn from_file(f: &File) -> Self {
+    fn from_file(f: &File) -> (Self, Option<String>) {
         let d = Self::default();
-        Self {
+        let mut bad: Vec<String> = Vec::new();
+
+        // テーマ。知らない名前なら既定のまま進む（**開かないより開く**）。
+        let want = f.theme.name.clone().unwrap_or_else(|| d.theme_name.clone());
+        let (name, mut theme) = match theme::builtin(&want) {
+            Some(t) => (want, t),
+            None => {
+                bad.push(format!(
+                    "テーマ「{want}」を知りません（{}）",
+                    theme::names().join(" / ")
+                ));
+                (d.theme_name.clone(), d.theme)
+            }
+        };
+        for (key, value) in &f.theme.colors {
+            match theme::parse_color(value) {
+                Some(c) if theme::set_named(&mut theme, key, c) => {}
+                Some(_) => bad.push(format!("色の名前「{key}」を知りません")),
+                None => bad.push(format!("色「{key} = {value}」を読めません（#rrggbb の形）")),
+            }
+        }
+
+        let cfg = Self {
             opacity: f.window.opacity.unwrap_or(d.opacity).clamp(0.2, 1.0),
             blur: f.window.blur.unwrap_or(d.blur),
             font_size: f.font.size.unwrap_or(d.font_size).clamp(6.0, 96.0),
+            ligatures: f.font.ligatures.unwrap_or(d.ligatures),
+            scrollback: f
+                .scrollback
+                .lines
+                .unwrap_or(d.scrollback)
+                .clamp(100, 1_000_000),
             lang: f
                 .ui
                 .lang
                 .as_deref()
                 .and_then(Lang::parse)
                 .unwrap_or(d.lang),
-        }
+            theme_name: name,
+            theme,
+        };
+        (cfg, (!bad.is_empty()).then(|| bad.join(" / ")))
     }
 
     /// コマンドラインの指定で上書きする。指定が無いものは触らない。
@@ -135,6 +207,22 @@ impl Config {
         if let Some(v) = cli.lang.as_deref().and_then(Lang::parse) {
             self.lang = v;
         }
+        if let Some(name) = cli.theme.as_deref()
+            && let Some(t) = theme::builtin(name)
+        {
+            self.theme = t;
+            self.theme_name = name.to_string();
+        }
+    }
+
+    /// テーマだけを差し替える。`:theme` と設定の読み直しが使う。
+    pub fn set_theme(&mut self, name: &str) -> bool {
+        let Some(t) = theme::builtin(name) else {
+            return false;
+        };
+        self.theme = t;
+        self.theme_name = name.to_string();
+        true
     }
 
     /// 背景を透かすか。1.0 なら不透明のまま扱う（余計な合成をしない）。
@@ -148,7 +236,11 @@ mod tests {
     use super::*;
 
     fn parsed(s: &str) -> Config {
-        Config::from_file(&toml::from_str::<File>(s).expect("読めない"))
+        Config::from_file(&toml::from_str::<File>(s).expect("読めない")).0
+    }
+
+    fn warning(s: &str) -> Option<String> {
+        Config::from_file(&toml::from_str::<File>(s).expect("読めない")).1
     }
 
     #[test]
@@ -177,6 +269,56 @@ mod tests {
         assert!(toml::from_str::<File>("[window\nopacity =").is_err());
         // load() は既定＋警告を返す。ここでは既定側の性質だけ固定しておく。
         assert_eq!(Config::default().opacity, DEFAULT_OPACITY);
+    }
+
+    #[test]
+    fn a_theme_can_be_picked_by_name_and_a_typo_is_reported() {
+        let c = parsed("[theme]
+name = \"白磁\"
+");
+        assert_eq!(c.theme_name, "白磁");
+        assert_eq!(c.theme, theme::builtin("白磁").expect("引けない"));
+
+        // 知らない名前でも**開く**。ただし黙らない。
+        let c = parsed("[theme]
+name = \"no-such-theme\"
+");
+        assert_eq!(c.theme, Theme::default(), "知らない名前で既定に落ちていない");
+        let w = warning("[theme]
+name = \"no-such-theme\"
+").expect("警告が出ていない");
+        assert!(w.contains("no-such-theme"), "何が悪いか言っていない: {w}");
+    }
+
+    #[test]
+    fn individual_colors_can_be_overridden_and_mistakes_are_reported() {
+        let c = parsed("[theme.colors]
+background = \"#102030\"
+ansi1 = \"#ff0000\"
+");
+        assert_eq!(c.theme.bg, [16.0 / 255.0, 32.0 / 255.0, 48.0 / 255.0, 1.0]);
+        assert_eq!(c.theme.ansi[1], [1.0, 0.0, 0.0, 1.0]);
+
+        // **書いたのに効かない**で終わらせない。
+        let w = warning("[theme.colors]
+backgruond = \"#102030\"
+").expect("警告が出ていない");
+        assert!(w.contains("backgruond"), "綴り違いを指摘していない: {w}");
+        let w = warning("[theme.colors]
+background = \"blue\"
+").expect("警告が出ていない");
+        assert!(w.contains("#rrggbb"), "書き方を教えていない: {w}");
+    }
+
+    #[test]
+    fn an_absurd_scrollback_is_clamped_not_obeyed() {
+        // 0 行だとモーションの行き先が消え、10 億行だとメモリが尽きる。
+        assert!(parsed("[scrollback]
+lines = 0
+").scrollback >= 100);
+        assert!(parsed("[scrollback]
+lines = 99999999999
+").scrollback <= 1_000_000);
     }
 
     #[test]

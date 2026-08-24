@@ -93,6 +93,25 @@ pub struct PaneView {
     pub alive: bool,
 }
 
+/// スクロールバックの上限。**プロセス全体で 1 つ**の設定なので、
+/// ペインを作る 6 か所へ引数で配って回らず、ここで持つ。
+/// 設定の読み直しで変わる（`set_scrollback`）。
+static SCROLLBACK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// 設定を反映する。0 は「既定のまま」。
+pub fn set_scrollback(lines: usize) {
+    SCROLLBACK.store(lines, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn new_terminal(cols: usize, rows: usize) -> Terminal {
+    let mut t = Terminal::new(cols.max(1), rows.max(1), AmbiguousWidth::Wide);
+    let n = SCROLLBACK.load(std::sync::atomic::Ordering::Relaxed);
+    if n > 0 {
+        t.state.grid.set_max_scrollback(n);
+    }
+    t
+}
+
 impl PaneView {
     /// 本文の領域。ガターを除いた残り。
     ///
@@ -109,7 +128,7 @@ impl PaneView {
 
     pub fn new(cols: usize, rows: usize) -> Self {
         Self {
-            term: Terminal::new(cols.max(1), rows.max(1), AmbiguousWidth::Wide),
+            term: new_terminal(cols, rows),
             file: None,
             title: String::new(),
             rect: Rect::default(),
@@ -172,7 +191,7 @@ impl PaneView {
 
     /// 再アタッチ時の画面復元。行を流し込んで写しを組み直す。
     pub fn restore(&mut self, lines: &[String], cols: usize, rows: usize) {
-        self.term = Terminal::new(cols.max(1), rows.max(1), AmbiguousWidth::Wide);
+        self.term = new_terminal(cols, rows);
         let mut data = String::new();
         for line in lines {
             data.push_str(line);
