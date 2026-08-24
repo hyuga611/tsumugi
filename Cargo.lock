@@ -2209,6 +2209,7 @@ dependencies = [
  "pollster",
  "raw-window-handle",
  "serde",
+ "serde_json",
  "toml",
  "tsg-buffer",
  "tsg-modal",

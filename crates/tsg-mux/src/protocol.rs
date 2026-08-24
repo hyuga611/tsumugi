@@ -11,7 +11,7 @@
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -310,6 +310,11 @@ pub struct SessionInfo {
 pub enum ClientMsg {
     Attach {
         version: u32,
+        /// このクライアントが見せる大きさ。
+        ///
+        /// **0 は「大きさを持ち込まない」。** 台本から覗くだけのクライアント
+        /// （`--send` / `--tap` / `--rpc`）が適当な 80x24 を名乗ると、
+        /// その後に開くペインまでその大きさになる。窓を持たない側は 0 を送る。
         cols: u16,
         rows: u16,
         /// 最初のペインを開く作業ディレクトリ。

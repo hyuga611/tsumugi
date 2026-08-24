@@ -19,6 +19,12 @@ pub enum Mode {
     Send(String),
     /// セッションの生バイトを覗く
     Tap,
+    /// 走っているセッションの一覧。
+    List,
+    /// ペインに見えているものをテキストで取る。
+    Capture(Option<u32>),
+    /// 生のプロトコルを標準入出力で話す。
+    Rpc,
     /// フォントと CJK 幅の数値だけ出して終了
     Diagnose,
     /// シェル統合のスクリプトを標準出力へ出す（`eval` で読ませる用）
@@ -94,7 +100,10 @@ tsumugi (tsg) — ターミナルの画面を vim で編集できるドキュメ
                            それを置いて、シェルの設定ファイルに 1 行足す
       --diagnose           フォントと CJK 幅の実測値を出して終了
       --send <文字列>      走っているセッションへ入力を流す（\\n で改行）
+      --list               走っているセッションを並べる
       --tap                そのセッションの生バイトを覗く
+      --capture [ペイン]   ペインに見えているものをテキストで取る（既定: いまのペイン）
+      --rpc                生のプロトコルを標準入出力で話す（docs/rpc.md）
   -h, --help               これ
   -V, --version            版
 
@@ -211,6 +220,11 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Cli {
             "--uninstall" => cli.mode = Mode::Uninstall,
             "--diagnose" => cli.mode = Mode::Diagnose,
             "--tap" => cli.mode = Mode::Tap,
+            "--list" => cli.mode = Mode::List,
+            "--rpc" => cli.mode = Mode::Rpc,
+            "--capture" => {
+                cli.mode = Mode::Capture(next_value(&args, &mut i).and_then(|v| v.parse().ok()));
+            }
             "--send" => {
                 let rest = args[i + 1..].join(" ");
                 cli.mode = Mode::Send(rest);

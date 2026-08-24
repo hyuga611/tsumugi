@@ -18,6 +18,7 @@ mod overlay;
 mod platform;
 mod install;
 mod reload;
+mod rpc;
 mod session;
 mod theme;
 mod shell;
@@ -3405,90 +3406,8 @@ impl ApplicationHandler for App {
     }
 }
 
-/// サーバへ繋ぐ。居なければ**別プロセスとして**起こす（不変条件 4）。
-/// `--tap`。セッションの出力を人が読める形で流し続ける。
-///
-/// 「端末が実際に何を送ってきたか」を推測ではなく実物で見るための道具。
-fn tap_session(session: &str) -> Result<()> {
-    let mut client = Client::connect(session)
-        .with_context(|| format!("セッション '{session}' が見つかりません"))?;
-    client.send(&ClientMsg::Attach {
-        version: PROTOCOL_VERSION,
-        cols: 80,
-        rows: 24,
-        cwd: None,
-        command: None,
-    })?;
-    println!("--tap: セッション '{session}' を覗いています（Ctrl-C で終了）");
-    loop {
-        match client.recv_timeout(Duration::from_millis(500)) {
-            Some(ServerMsg::Output { pane, data }) => {
-                if let Some(bytes) = tsg_mux::decode_bytes(&data) {
-                    println!("[pane {pane}] {}", escape_bytes(&bytes));
-                }
-            }
-            Some(ServerMsg::Resized { pane, cols, rows }) => {
-                println!("[pane {pane}] === RESIZED {cols}x{rows} ===");
-            }
-            Some(_) | None => {}
-        }
-    }
-}
 
-/// 制御文字を目に見える形にする。
-fn escape_bytes(bytes: &[u8]) -> String {
-    let mut out = String::new();
-    for &b in bytes {
-        match b {
-            0x1b => out.push_str("<ESC>"),
-            0x07 => out.push_str("<BEL>"),
-            b'\r' => out.push_str("<CR>"),
-            b'\n' => out.push_str("<LF>\n         "),
-            0x00..=0x1f => out.push_str(&format!("<{b:02x}>")),
-            _ => out.push(b as char),
-        }
-    }
-    out
-}
 
-/// `--send`。既存セッションのアクティブなペインへ文字列を流し込む。
-///
-/// 改行は `\n` と書ける（シェルへは CR で送る。端末が期待するのは CR）。
-fn send_to_session(session: &str, text: &str) -> Result<()> {
-    let mut client = Client::connect(session)
-        .with_context(|| format!("セッション '{session}' が見つかりません"))?;
-    client.send(&ClientMsg::Attach {
-        version: PROTOCOL_VERSION,
-        cols: 80,
-        rows: 24,
-        cwd: None,
-        command: None,
-    })?;
-    let attached = client
-        .wait_for(Duration::from_secs(5), |m| {
-            matches!(m, ServerMsg::Attached { .. })
-        })
-        .context("Attach に応答がありません")?;
-    let ServerMsg::Attached { session: info, .. } = attached else {
-        bail!("想定外の応答");
-    };
-    let pane = info
-        .tabs
-        .iter()
-        .find(|t| t.id == info.active_tab)
-        .map_or(0, |t| t.active_pane);
-
-    let bytes = text.replace(r"\n", "\r").replace(r"\e", "\x1b");
-    client.send(&ClientMsg::Input {
-        pane,
-        data: tsg_mux::encode_bytes(bytes.as_bytes()),
-    })?;
-    // 送り終える前に切ると取りこぼす
-    std::thread::sleep(Duration::from_millis(300));
-    client.send(&ClientMsg::Detach)?;
-    println!("ペイン {pane} へ {} バイト送りました", bytes.len());
-    Ok(())
-}
 
 fn connect_or_spawn(session: &str) -> Result<Client> {
     if let Ok(c) = Client::connect(session) {
@@ -3646,8 +3565,11 @@ fn main() -> Result<()> {
             return Ok(());
         }
         cli::Mode::Server => return tsg_mux::run(&cli.session),
-        cli::Mode::Send(text) => return send_to_session(&cli.session, text),
-        cli::Mode::Tap => return tap_session(&cli.session),
+        cli::Mode::Send(text) => return rpc::send(&cli.session, text),
+        cli::Mode::Tap => return rpc::tap(&cli.session),
+        cli::Mode::List => return rpc::list(),
+        cli::Mode::Capture(pane) => return rpc::capture(&cli.session, *pane),
+        cli::Mode::Rpc => return rpc::raw(&cli.session),
         cli::Mode::Install => return report_install(install::install()),
         cli::Mode::Uninstall => return report_install(install::uninstall()),
         cli::Mode::ShellIntegration(name) => return print_shell_integration(name.as_deref()),

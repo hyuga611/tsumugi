@@ -329,14 +329,19 @@ impl State {
                     );
                     return Ok(true);
                 }
-                self.cols = cols;
-                self.rows = rows;
+                // 0 は「大きさを持ち込まない」。窓を持たないクライアントが
+                // 適当な既定値を名乗ると、その後に開くペインまでそれになる。
+                if cols > 0 && rows > 0 {
+                    self.cols = cols;
+                    self.rows = rows;
+                }
                 if self.tabs.is_empty() {
                     // 起動時の指定は最初のペインにだけ効く。
                     // 再アタッチで既にペインがあるなら、そこは触らない。
                     self.spawn_cwd = cwd;
                     self.spawn_command = command;
-                    self.new_tab(cols, rows)?;
+                    let (c, r) = (self.cols, self.rows);
+                    self.new_tab(c, r)?;
                     self.spawn_command = None;
                 }
                 let info = self.info();
