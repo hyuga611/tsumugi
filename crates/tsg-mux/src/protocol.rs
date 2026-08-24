@@ -497,11 +497,6 @@ pub fn decode_bytes(s: &str) -> Option<Vec<u8>> {
     BASE64_STANDARD.decode(s).ok()
 }
 
-/// このセッションのソケット名。
-pub fn socket_name(session: &str) -> String {
-    format!("tsumugi-{session}.sock")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

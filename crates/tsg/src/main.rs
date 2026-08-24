@@ -452,9 +452,17 @@ impl App {
             return;
         }
 
+        // 行を消すときだけ `state` 越しにする。印を一緒に動かす必要があるのは
+        // 行の増減があるときだけで、桁を空白にする道は印に影響しない。
+        if range.kind == RangeKind::Line {
+            view.term
+                .state
+                .remove_document_lines(range.start.line, range.end.line);
+            return;
+        }
         let grid = &mut view.term.state.grid;
         match range.kind {
-            RangeKind::Line => grid.remove_document_lines(range.start.line, range.end.line),
+            RangeKind::Line => unreachable!("上で返している"),
             RangeKind::Block => {
                 let (a, b) = (
                     range.start.col.min(range.end.col),

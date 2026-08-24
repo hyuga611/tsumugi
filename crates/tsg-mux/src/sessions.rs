@@ -7,52 +7,56 @@
 //!
 //! ファイル名は安全な字だけに潰し、**本当の名前は中身に書く**。
 //! 名前を潰したまま一覧に出すと、選んでも別のセッションへ繋いでしまう。
+//!
+//! 置き場所は**自分だけが入れるところ**に限る。ここに書ける他人が居ると、
+//! 一覧に偽のセッション名を並べられる（選ぶと、その名前でサーバが起きる）。
+//! `/tmp` を直に使わないのはそのため。
 
 use std::path::PathBuf;
 
+use crate::endpoint::slug;
+
 /// 置き場所。実行時の一時領域に置く（設定ではないので消えてよい）。
+///
+/// Unix の `/tmp` は誰でも書ける。`XDG_RUNTIME_DIR` が無い環境（macOS など）
+/// では uid を名前に含めた自分専用のディレクトリへ落とす。
 pub fn session_dir() -> PathBuf {
-    let base = if cfg!(windows) {
-        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
-    } else {
-        std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)
+    #[cfg(windows)]
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("tsumugi");
+    #[cfg(unix)]
+    let base = match std::env::var_os("XDG_RUNTIME_DIR") {
+        Some(d) => PathBuf::from(d).join("tsumugi"),
+        // SAFETY: getuid は失敗せず、引数も取らない。
+        None => std::env::temp_dir().join(format!("tsumugi-{}", unsafe { libc::getuid() })),
     };
-    base.unwrap_or_else(std::env::temp_dir)
-        .join("tsumugi")
-        .join("sessions")
+    base.join("sessions")
 }
 
 fn file_of(name: &str) -> PathBuf {
-    let safe: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    // 潰した結果がぶつかっても取り違えないよう、元の名前のハッシュを足す
-    // （`a:b` と `a/b` はどちらも `a_b` になる）
-    session_dir().join(format!("{safe}-{:08x}.session", fnv1a(name)))
+    session_dir().join(format!("{}.session", slug(name)))
 }
 
-/// 名前を短い印にするだけのハッシュ。暗号用途ではない。
-fn fnv1a(s: &str) -> u32 {
-    let mut h: u32 = 0x811c_9dc5;
-    for b in s.as_bytes() {
-        h ^= u32::from(*b);
-        h = h.wrapping_mul(0x0100_0193);
+/// 置き場所を作り、他のユーザから閉じる。
+fn ensure_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
     }
-    h
+    Ok(())
 }
 
 /// このセッションが生きていることを書き残す。
 pub fn register(name: &str) {
     let path = file_of(name);
-    if let Some(dir) = path.parent() {
-        let _ = std::fs::create_dir_all(dir);
+    if let Some(dir) = path.parent()
+        && ensure_dir(dir).is_err()
+    {
+        return;
     }
     let _ = std::fs::write(path, name);
 }
@@ -71,7 +75,10 @@ pub fn known() -> Vec<String> {
         .filter(|e| e.path().extension().is_some_and(|x| x == "session"))
         .filter_map(|e| std::fs::read_to_string(e.path()).ok())
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        // 控えの中身はそのまま一覧に出て、選ぶとサーバが起きる。
+        // 空・長すぎ・制御文字入りは受け取らない。
+        .filter(|s| !s.is_empty() && s.chars().count() <= 64)
+        .filter(|s| !s.chars().any(char::is_control))
         .collect();
     out.sort_unstable();
     out.dedup();

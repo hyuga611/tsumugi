@@ -18,9 +18,10 @@ use std::sync::mpsc::{self, Sender};
 use std::thread;
 
 use anyhow::{Context, Result};
-use interprocess::local_socket::prelude::*;
-use interprocess::local_socket::{GenericNamespaced, ListenerOptions};
 use interprocess::TryClone;
+use interprocess::local_socket::traits::ListenerExt as _;
+
+use crate::endpoint::Endpoint;
 use tsg_pty::{CommandBuilder, PtySession};
 use tsg_term::{AmbiguousWidth, Terminal};
 
@@ -512,7 +513,7 @@ impl State {
                     return Ok(true);
                 };
                 let text = f.text.clone();
-                match std::fs::write(&path, &text) {
+                match write_atomically(&path, &text) {
                     Ok(()) => {
                         f.dirty = false;
                         let path = path.display().to_string();
@@ -694,21 +695,10 @@ impl ServerHandle {
     }
 }
 
-/// ソケットを**同期的に**バインドする。
-///
-/// バインドをスレッドに任せると、`spawn()` が返った直後にクライアントが
-/// 繋ぎに来て「接続できない」で落ちる（実際に踏んだ）。開くところまでは
-/// 呼び出し側の同期処理にして、accept ループだけを別スレッドへ渡す。
-fn bind(socket: &str) -> Result<interprocess::local_socket::Listener> {
-    let name = socket
-        .to_string()
-        .to_ns_name::<GenericNamespaced>()
-        .with_context(|| format!("ソケット名が不正: {socket}"))?;
-    ListenerOptions::new()
-        .name(name)
-        .create_sync()
-        .with_context(|| format!("ソケットを開けません: {socket}"))
-}
+// ソケットは `endpoint` が開く。**自分だけに閉じた口でなければ開かない。**
+// バインドを同期的に済ませるのは、`spawn()` が返った直後にクライアントが
+// 繋ぎに来て「接続できない」で落ちるのを避けるため（実際に踏んだ）。
+// 開くところまでは呼び出し側の同期処理にして、accept ループだけを別スレッドへ渡す。
 
 fn accept_loop(listener: interprocess::local_socket::Listener, tx: Sender<Event>) {
     let mut next_id = 1u64;
@@ -754,16 +744,16 @@ fn accept_loop(listener: interprocess::local_socket::Listener, tx: Sender<Event>
 }
 
 /// listener を起こし、イベントの受け口を返す。
-fn setup(session: &str) -> Result<(Sender<Event>, mpsc::Receiver<Event>)> {
+fn setup(session: &str) -> Result<(Sender<Event>, mpsc::Receiver<Event>, Endpoint)> {
     let (tx, rx) = mpsc::channel::<Event>();
-    let socket = socket_name(session);
+    let endpoint = Endpoint::for_session(session)?;
     // バインドはここで済ませる。返った時点で接続を受けられることを保証する。
-    let listener = bind(&socket)?;
+    let listener = endpoint.bind()?;
     let t = tx.clone();
     thread::Builder::new()
         .name("tsg-mux-listener".into())
         .spawn(move || accept_loop(listener, t))?;
-    Ok((tx, rx))
+    Ok((tx, rx, endpoint))
 }
 
 fn state_loop(state: &mut State, rx: mpsc::Receiver<Event>) {
@@ -779,11 +769,14 @@ fn state_loop(state: &mut State, rx: mpsc::Receiver<Event>) {
 
 /// サーバを別スレッドで起こす（テストと、同一プロセスからの利用向け）。
 pub fn spawn(session: &str) -> Result<ServerHandle> {
-    let (tx, rx) = setup(session)?;
+    let (tx, rx, endpoint) = setup(session)?;
     let mut state = State::new(session.to_string(), tx.clone());
     thread::Builder::new()
         .name("tsg-mux-state".into())
-        .spawn(move || state_loop(&mut state, rx))?;
+        .spawn(move || {
+            state_loop(&mut state, rx);
+            endpoint.cleanup();
+        })?;
     Ok(ServerHandle {
         session: session.to_string(),
         tx,
@@ -793,13 +786,46 @@ pub fn spawn(session: &str) -> Result<ServerHandle> {
 /// サーバをこのプロセスの本体として回す（`tsg --server` 用）。
 /// state ループが終わるまで返らない。
 pub fn run(session: &str) -> Result<()> {
-    let (tx, rx) = setup(session)?;
+    let (tx, rx, endpoint) = setup(session)?;
     // 一覧に出せるよう、生きている間だけ控えを置く（`sessions` の説明を参照）
     crate::sessions::register(session);
     let mut state = State::new(session.to_string(), tx);
     state_loop(&mut state, rx);
     crate::sessions::unregister(session);
+    endpoint.cleanup();
     Ok(())
+}
+
+/// 同じディレクトリへ書いてから置き換える。
+///
+/// `fs::write` は**先に切り詰めてから書く**。途中で電源が落ちたり書き込みが
+/// 失敗したりすると、元の中身も新しい中身も無い空のファイルが残る。
+/// エディタとしてこれは起こしてはいけない事故なので、置き換えでやる。
+///
+/// 同じディレクトリに作るのは、`rename` が同一ファイルシステム内でしか
+/// 原子的にならないため（`/tmp` に作ると跨いでコピーになる）。
+fn write_atomically(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    let Some(dir) = path.parent() else {
+        return std::fs::write(path, text);
+    };
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let tmp = dir.join(format!(".{name}.tsg-{}.tmp", std::process::id()));
+
+    let result = (|| {
+        use std::io::Write as _;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        // rename の前に落とす。書けたことにして名前を付け替え、中身が
+        // 空だった、が一番たちが悪い。
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 fn default_shell() -> String {

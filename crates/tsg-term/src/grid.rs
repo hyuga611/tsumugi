@@ -148,6 +148,14 @@ pub struct Cursor {
     pub col: usize,
 }
 
+/// スクロールバックの既定の上限（行）。
+///
+/// **上限が無いと、出しっぱなしのプロセス 1 つでメモリが尽きる**（`yes` を
+/// 走らせたまま忘れる、巨大なログを `cat` する）。端末は「他人が出した
+/// バイト列」を無制限に受け取る立場なので、ここは必ず閉じておく。
+/// 1 万行はおよそ 400 画面分。実用で足りて、80 桁なら数十 MB に収まる。
+pub const DEFAULT_MAX_SCROLLBACK: usize = 10_000;
+
 pub struct Grid {
     pub cols: usize,
     pub rows: usize,
@@ -169,6 +177,11 @@ pub struct Grid {
     /// スクロール領域（0-origin, 両端含む）
     scroll_top: usize,
     scroll_bot: usize,
+
+    /// スクロールバックに残す最大行数。
+    max_scrollback: usize,
+    /// 上限を超えて先頭から捨てた行数。**まだ印へ反映していない分。**
+    dropped: usize,
 }
 
 impl Grid {
@@ -185,7 +198,43 @@ impl Grid {
             pen: Attrs::default(),
             scroll_top: 0,
             scroll_bot: rows.saturating_sub(1),
+            max_scrollback: DEFAULT_MAX_SCROLLBACK,
+            dropped: 0,
         }
+    }
+
+    /// スクロールバックの上限を変える（設定から）。
+    ///
+    /// 0 は「履歴を持たない」ではなく既定に戻す扱いにする。履歴が完全に無い
+    /// ターミナルは、この製品では**モーションの行き先が消える**ことを意味する。
+    pub fn set_max_scrollback(&mut self, n: usize) {
+        self.max_scrollback = if n == 0 { DEFAULT_MAX_SCROLLBACK } else { n };
+        self.trim_scrollback();
+    }
+
+    pub fn max_scrollback(&self) -> usize {
+        self.max_scrollback
+    }
+
+    /// 上限を超えた分を先頭から捨てる。
+    fn trim_scrollback(&mut self) {
+        let Some(excess) = self.scrollback.len().checked_sub(self.max_scrollback) else {
+            return;
+        };
+        if excess == 0 {
+            return;
+        }
+        self.scrollback.drain(..excess);
+        self.dropped += excess;
+    }
+
+    /// 先頭から捨てた行数を受け取り、数え直しに戻す。
+    ///
+    /// 呼んだ側は**セマンティックマークを同じだけ寄せる責任を負う**
+    /// （`TermState::feed` がやる）。取りっぱなしにすると印が別の行を指す。
+    #[must_use]
+    pub fn take_dropped(&mut self) -> usize {
+        std::mem::take(&mut self.dropped)
     }
 
     pub fn is_alt(&self) -> bool {
@@ -431,6 +480,7 @@ impl Grid {
             let full_screen = self.scroll_top == 0 && self.scroll_bot + 1 == self.rows;
             if full_screen && !self.is_alt() {
                 self.scrollback.push(line);
+                self.trim_scrollback();
             }
             self.screen.insert(self.scroll_bot, self.blank_line());
         }
@@ -690,6 +740,30 @@ mod tests {
         assert_eq!(g.cursor.row, 1);
         assert_eq!(g.cursor.col, 2);
         assert!(g.document_line(0).unwrap().wrapped);
+    }
+
+    #[test]
+    /// **上限が無いとメモリが尽きる。** 端末は他人が出したバイト列を
+    /// 無制限に受け取る立場なので、ここは閉じておく。
+    fn scrollback_stops_growing_at_the_limit() {
+        let mut g = Grid::new(10, 2, AmbiguousWidth::Wide);
+        g.set_max_scrollback(5);
+        for _ in 0..100 {
+            g.scroll_up(1);
+        }
+        assert_eq!(g.scrollback_len(), 5, "上限を超えて履歴が伸びている");
+        assert_eq!(g.take_dropped(), 95, "捨てた行数が数えられていない");
+        assert_eq!(g.take_dropped(), 0, "同じ分を二度数えている");
+    }
+
+    #[test]
+    fn lowering_the_limit_trims_what_is_already_there() {
+        let mut g = Grid::new(10, 2, AmbiguousWidth::Wide);
+        for _ in 0..50 {
+            g.scroll_up(1);
+        }
+        g.set_max_scrollback(10);
+        assert_eq!(g.scrollback_len(), 10);
     }
 
     #[test]

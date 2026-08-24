@@ -6,10 +6,10 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use interprocess::local_socket::prelude::*;
-use interprocess::local_socket::{GenericNamespaced, Stream};
 use interprocess::TryClone;
+use interprocess::local_socket::Stream;
 
+use crate::endpoint::Endpoint;
 use crate::protocol::*;
 
 pub struct Client {
@@ -20,14 +20,11 @@ pub struct Client {
 
 impl Client {
     /// 走っているサーバへ繋ぐ。居なければエラー。
+    ///
+    /// 繋ぎ先が**自分のものであること**の確認は `Endpoint::connect` が持つ。
+    /// ここでそれを迂回する経路を作らない。
     pub fn connect(session: &str) -> Result<Self> {
-        let socket = socket_name(session);
-        let name = socket
-            .clone()
-            .to_ns_name::<GenericNamespaced>()
-            .with_context(|| format!("ソケット名が不正: {socket}"))?;
-        let stream = Stream::connect(name)
-            .with_context(|| format!("サーバへ接続できません: {socket}"))?;
+        let stream = Endpoint::for_session(session)?.connect()?;
         let writer = stream.try_clone().context("ソケットの複製に失敗")?;
 
         let (tx, rx) = mpsc::channel::<ServerMsg>();

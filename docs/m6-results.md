@@ -36,7 +36,7 @@ PowerShell で読み込んで `echo` を 2 回、`cmd /c exit 3`、`echo` を 1 
 
 - 左ガターに**細い緑 3 本と太い赤 1 本**が出た（成功と失敗が見分けられている）
 - `]e` で失敗したコマンドへ飛べた
-- `vac` で `PS C:\Users\atlan\dev\tsumugi> cmd /c exit 3` がクリップボードへ入った
+- `vac` で `PS C:\dev\tsumugi> cmd /c exit 3` がクリップボードへ入った
 - `Space v` で割った新しいペインが**同じディレクトリで開いた**（OSC 7 が届いている。
   統合前はホームで開いていた）
 

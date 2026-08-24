@@ -70,6 +70,35 @@ impl SemanticMarks {
         self.marks.is_empty()
     }
 
+    /// 先頭から `n` 行が消えたので、印を同じだけ手前へ寄せる。
+    ///
+    /// 印は**ドキュメント絶対行番号**で持っている。行が消えたのに寄せないと、
+    /// ガターの印と `[[` `]]` が実在しない行、あるいは無関係な行を指す。
+    /// 消えた側へ落ちた印は捨てる（指す先がもう無い）。
+    pub fn shift_up(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        self.marks.retain(|m| m.line >= n);
+        for m in &mut self.marks {
+            m.line -= n;
+        }
+    }
+
+    /// `from..=to` の行が消えたので、その範囲の印を捨てて後ろを詰める。
+    pub fn remove_lines(&mut self, from: usize, to: usize) {
+        if from > to {
+            return;
+        }
+        let n = to - from + 1;
+        self.marks.retain(|m| m.line < from || m.line > to);
+        for m in &mut self.marks {
+            if m.line > to {
+                m.line -= n;
+            }
+        }
+    }
+
     pub fn clear(&mut self) {
         self.marks.clear();
     }
@@ -136,6 +165,27 @@ pub fn parse_mark(rest: &[&[u8]]) -> Option<MarkKind> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shifting_moves_the_marks_and_drops_the_ones_that_fell_off() {
+        let mut m = SemanticMarks::default();
+        m.push(MarkKind::PromptStart, 2, 0);
+        m.push(MarkKind::PromptStart, 10, 0);
+        m.shift_up(5);
+        let lines: Vec<usize> = m.all().iter().map(|x| x.line).collect();
+        assert_eq!(lines, vec![5], "寄せた後の行がずれている（印が別の行を指す）");
+    }
+
+    #[test]
+    fn removing_lines_drops_the_marks_inside_and_pulls_the_rest_up() {
+        let mut m = SemanticMarks::default();
+        for line in [0usize, 3, 4, 9] {
+            m.push(MarkKind::PromptStart, line, 0);
+        }
+        m.remove_lines(3, 4);
+        let lines: Vec<usize> = m.all().iter().map(|x| x.line).collect();
+        assert_eq!(lines, vec![0, 7], "消した範囲の印が残る / 後ろが詰まっていない");
+    }
 
     #[test]
     fn parses_each_tag() {

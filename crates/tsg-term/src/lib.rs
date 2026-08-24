@@ -130,6 +130,19 @@ impl TermState {
         }
     }
 
+    /// ドキュメント絶対行の範囲を、**印ごと**取り除く。
+    ///
+    /// `grid` を直に触ると印が置き去りになり、ガターと `[[` `]]` が
+    /// 無関係な行を指す。表示から消す道はここ 1 本に絞る。
+    pub fn remove_document_lines(&mut self, from: usize, to: usize) {
+        let last = to.min(self.grid.document_len().saturating_sub(1));
+        if from > last {
+            return;
+        }
+        self.grid.remove_document_lines(from, last);
+        self.marks.remove_lines(from, last);
+    }
+
     fn mark(&mut self, kind: MarkKind) {
         // alt screen 上のセマンティックマークは捨てる。
         //
@@ -442,12 +455,12 @@ impl Perform for TermState {
         match kind {
             b"0" | b"2" => {
                 if let Some(t) = params.get(1) {
-                    self.title = String::from_utf8_lossy(t).into_owned();
+                    self.title = sanitize_osc_text(t, 256);
                 }
             }
             b"7" => {
                 if let Some(u) = params.get(1) {
-                    self.cwd = Some(String::from_utf8_lossy(u).into_owned());
+                    self.cwd = Some(sanitize_osc_text(u, 4096)).filter(|s| !s.is_empty());
                 }
             }
             // 133 が本命。633 は VSCode / PSReadLine 系の同義シーケンス。
@@ -459,6 +472,20 @@ impl Perform for TermState {
             _ => {}
         }
     }
+}
+
+/// OSC が持ち込む文字列を、そのまま画面や OS へ渡さない形にする。
+///
+/// ここへ来る中身は**子プロセスが自由に決められる**（`printf` 1 行で好きな
+/// タイトルを付けられる）。制御文字が混ざるとステータス行やタブの見た目が壊れ、
+/// 長さに上限が無ければメモリがそのぶん伸びる。
+/// 表示に使うものは、表示できる字だけ・決めた長さまでに切る。
+fn sanitize_osc_text(raw: &[u8], max_chars: usize) -> String {
+    String::from_utf8_lossy(raw)
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(max_chars)
+        .collect()
 }
 
 /// パーサと状態を束ねたもの。
@@ -477,6 +504,10 @@ impl Terminal {
 
     pub fn feed(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.state, bytes);
+        // 上限を超えて履歴の先頭が捨てられたら、印を同じだけ寄せる。
+        // ここが**唯一の合わせ場所**。取りこぼすと印が別の行を指す。
+        let dropped = self.state.grid.take_dropped();
+        self.state.marks.shift_up(dropped);
     }
 }
 
@@ -687,6 +718,52 @@ mod tests {
         let ansi = t.state.grid.line_ansi(0).unwrap();
         assert!(ansi.contains("45m") || ansi.contains("48;5;5"), "背景色が落ちた: {ansi:?}");
         assert!(ansi.trim_end_matches("[0m").ends_with(' '), "空白が残っていない");
+    }
+
+    /// タイトルは**子プロセスが自由に決められる**。制御文字と長さを
+    /// 素通しにすると、ステータス行の見た目が壊れ、メモリがそのぶん伸びる。
+    #[test]
+    fn a_hostile_title_cannot_carry_control_characters_or_grow_without_end() {
+        let mut t = term();
+        t.feed(b"]0;ab[31mc");
+        assert!(
+            !t.state.title.chars().any(char::is_control),
+            "制御文字が残っている: {:?}",
+            t.state.title
+        );
+
+        let long = format!("]0;{}", "x".repeat(10_000));
+        t.feed(long.as_bytes());
+        assert!(
+            t.state.title.chars().count() <= 256,
+            "長さの上限が効いていない: {}",
+            t.state.title.chars().count()
+        );
+    }
+
+    /// 履歴の先頭が捨てられたら、印も同じだけ寄る。
+    /// ここがずれると、ガターの印と `[[` `]]` が無関係な行を指す。
+    #[test]
+    fn marks_follow_the_lines_when_old_scrollback_is_dropped() {
+        let mut t = Terminal::new(20, 2, AmbiguousWidth::Wide);
+        t.state.grid.set_max_scrollback(4);
+        t.feed(b"]133;Aprompt
+");
+        let before = t.state.marks.all()[0].line;
+        for _ in 0..20 {
+            t.feed(b"x
+");
+        }
+        assert_eq!(t.state.grid.scrollback_len(), 4, "履歴が上限を超えている");
+        if let Some(m) = t.state.marks.all().first() {
+            assert!(
+                m.line < t.state.grid.document_len(),
+                "印が実在しない行を指している: {} / {}",
+                m.line,
+                t.state.grid.document_len()
+            );
+            assert!(m.line < before, "行が捨てられたのに印が動いていない");
+        }
     }
 
     #[test]

@@ -4,13 +4,17 @@
 //! ウィンドウを閉じてもプロセスが生き、再アタッチできることがこの層の存在理由。
 
 pub mod client;
+pub mod endpoint;
 pub mod protocol;
 pub mod server;
 pub mod sessions;
+#[cfg(windows)]
+mod win_sd;
 
 pub use client::Client;
+pub use endpoint::Endpoint;
 pub use protocol::{
     ClientMsg, Dir, Edit, Layout, PaneInfo, PROTOCOL_VERSION, ServerMsg, SessionInfo, TabInfo,
-    decode_bytes, encode_bytes, socket_name,
+    decode_bytes, encode_bytes,
 };
 pub use server::{ServerHandle, run, spawn};
