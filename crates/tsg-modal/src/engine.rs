@@ -61,6 +61,8 @@ pub enum Effect {
     HelpToggled(bool),
     /// 配色を変える。色を知っているのはホストだけなので、名前だけ渡す。
     SetTheme(String),
+    /// 設定ファイルを開く。場所を知っているのはホストだけ。
+    OpenConfig,
     /// mux（別プロセス）への要求。ホストが `tsg-mux` のメッセージへ翻訳する。
     Mux(MuxRequest),
     /// コマンドパレットを開く（`prefix` を入れた状態で）。
@@ -718,6 +720,7 @@ impl Engine {
         let selection = self.selection();
         let cmd = match id {
             "ui.help" => Command::ToggleHelp,
+            "ui.config" => Command::OpenConfig,
             "ui.theme.yogiri" => Command::SetTheme("yogiri"),
             "ui.theme.sumi" => Command::SetTheme("sumi"),
             "ui.theme.hakuji" => Command::SetTheme("hakuji"),
@@ -1134,6 +1137,7 @@ impl Engine {
                 vec![Effect::MacroReplay(keys)]
             }
             Command::SetTheme(name) => vec![Effect::SetTheme(name.to_string())],
+            Command::OpenConfig => vec![Effect::OpenConfig],
             Command::Quit => vec![Effect::Quit],
         }
     }

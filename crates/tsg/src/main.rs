@@ -17,6 +17,7 @@ mod mouse;
 mod overlay;
 mod platform;
 mod install;
+mod reload;
 mod session;
 mod theme;
 mod shell;
@@ -59,6 +60,10 @@ struct App {
     renderer: Option<Renderer>,
     /// 画面の色。**設定の読み直しで差し替わる**ので const ではない。
     theme: Theme,
+    /// 起動時のコマンドライン。読み直しても**指定はコマンドラインが勝つ**
+    /// ようにするため、捨てずに持っておく。
+    cli: Cli,
+    watch: reload::Watch,
     client: Option<Client>,
     session_name: String,
     session: Session,
@@ -116,6 +121,8 @@ impl App {
             session: Session::default(),
             engine: Engine::new(),
             theme: cfg.theme,
+            cli: cli.clone(),
+            watch: reload::Watch::new(),
             clipboard: None,
             mods: ModifiersState::empty(),
             preedit: String::new(),
@@ -254,6 +261,7 @@ impl App {
                 Effect::Message(msg) => self.status_msg = msg,
                 Effect::HelpToggled(_) => self.status_msg.clear(),
                 Effect::SetTheme(name) => self.apply_theme(&name),
+                Effect::OpenConfig => self.open_config(),
                 Effect::Mux(req) => self.run_mux(req, event_loop),
                 Effect::Bell => {}
                 // ウィンドウを閉じても、開いているファイルはセッションに残る。
@@ -2577,6 +2585,86 @@ impl App {
         }
     }
 
+    /// 設定ファイルを読み直して、変えられるものを当てる。
+    ///
+    /// **開かなくなるより、古い設定で動き続けるほうがまし。** 読めない設定は
+    /// 当てずに、何が悪いかだけ画面に出す（起動時は既定へ倒すが、動いている
+    /// 途中で既定へ戻すと、それまでの見た目まで巻き戻って驚かせる）。
+    fn reload_config(&mut self) -> bool {
+        let (mut next, warning) = Config::load();
+        if let Some(w) = warning {
+            self.status_msg = format!("{}{w}", t!("設定: ", "config: "));
+            return true;
+        }
+        // コマンドラインの指定は読み直しても勝つ。設定ファイルに引きずられて
+        // `--opacity 1.0` で開いた窓が勝手に透け始める、を起こさない。
+        next.override_with(&self.cli);
+        if next == self.cfg {
+            return false;
+        }
+
+        // 言語だけは変えない。`t!` は起動時に決めた値を見るので、途中で
+        // 変えると画面の一部だけ古い言語のまま残る。
+        let lang_changed = next.lang != self.cfg.lang;
+        next.lang = self.cfg.lang;
+
+        let font_changed = (next.font_size - self.cfg.font_size).abs() > 0.01;
+        let scrollback_changed = next.scrollback != self.cfg.scrollback;
+        let blur_changed = next.blur != self.cfg.blur;
+        self.cfg = next;
+        self.theme = self.cfg.theme;
+
+        if scrollback_changed {
+            session::set_scrollback(self.cfg.scrollback);
+            for view in self.session.panes.values_mut() {
+                view.term.state.grid.set_max_scrollback(self.cfg.scrollback);
+            }
+        }
+        if let Some(r) = self.renderer.as_mut() {
+            r.background = background_of(&self.theme, self.cfg.opacity);
+            r.set_ligatures(self.cfg.ligatures);
+            if font_changed {
+                r.set_font_size(self.cfg.font_size);
+            }
+        }
+        if blur_changed
+            && let Some(w) = &self.window
+        {
+            platform::decorate(w.as_ref(), self.cfg.blur);
+        }
+        if font_changed {
+            self.resize_window();
+        }
+
+        self.status_msg = if lang_changed {
+            t!(
+                "設定を読み直した（言語は次に開いたときから）",
+                "config reloaded (language applies next launch)"
+            )
+            .to_string()
+        } else {
+            t!("設定を読み直した", "config reloaded").to_string()
+        };
+        true
+    }
+
+    /// 設定ファイルを開く。**開いて保存すればその場で効く**（`reload`）ので、
+    /// 設定を詰める道がこれ 1 本でつながる。まだ無ければ空で開く。
+    fn open_config(&mut self) {
+        let Some(path) = self.watch.path().map(std::path::Path::to_path_buf) else {
+            self.status_msg = t!(
+                "設定ファイルの場所が分かりません",
+                "cannot locate the config file"
+            )
+            .to_string();
+            return;
+        };
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        self.open_file(&path.to_string_lossy());
+    }
+
     /// 配色を差し替える。
     ///
     /// **クリア色も一緒に変える。** ここを忘れると、セルは新しい色で描かれるのに
@@ -3296,7 +3384,11 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        if self.pump()
+        let mut dirty = self.pump();
+        if self.watch.changed() {
+            dirty |= self.reload_config();
+        }
+        if dirty
             && let Some(w) = &self.window
         {
             w.request_redraw();

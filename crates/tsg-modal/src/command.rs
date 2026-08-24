@@ -237,6 +237,10 @@ pub enum Command {
     /// ホストだけ（`arch.md` の不変条件 2「`tsg-modal` は純粋」）。
     SetTheme(&'static str),
 
+    /// 設定ファイルを開く。**場所を知っているのはホストだけ**なので、
+    /// ここは「開け」としか言わない。
+    OpenConfig,
+
     Quit,
 }
 
@@ -302,6 +306,14 @@ impl CommandSpec {
 /// **未配線: 左ガター・右クリックメニュー・コマンドパレット。**
 /// これらを宣言している行は、まだキーボードからしか届かない。
 pub const REGISTRY: &[CommandSpec] = &[
+    CommandSpec {
+        id: "ui.config",
+        title: "設定ファイルを開く",
+        title_en: "Open the config file",
+        keys: &[],
+        mouse: MousePath::Palette,
+        in_palette: true,
+    },
     CommandSpec {
         id: "ui.theme.yogiri",
         title: "配色: 夜霧（暗い / 既定）",

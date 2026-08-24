@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Mode {
     /// 通常起動（GUI）
     Run,
@@ -33,7 +33,7 @@ pub enum Mode {
     Version,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Cli {
     pub mode: Mode,
     pub session: String,
