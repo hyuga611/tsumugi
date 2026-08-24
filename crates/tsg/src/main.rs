@@ -2169,6 +2169,18 @@ impl App {
                         }
                     }
 
+                    // ファイルではカーソルは常にエンジンのもの。端末では入力中だけ
+                    // シェルのカーソル（そこが「生きている末尾」だから）。
+                    //
+                    // 字を描く**前**に決める。合字の run をカーソルの位置で
+                    // 切る必要があり、そのためには先に居場所が要る。
+                    let cursor = if view.editing() || mode != Mode::Insert {
+                        cursor_engine
+                    } else {
+                        let g = &view.term.state.grid;
+                        Pos::new(g.cursor_absolute(), g.cursor.col)
+                    };
+
                     // 開いているファイルの言語。端末には付けない
                     // （出力は SGR で色を持っているので、上から塗ると嘘になる）。
                     let lang = view.lang();
@@ -2178,6 +2190,14 @@ impl App {
                             break;
                         };
                         let syn = tsg_modal::highlight(lang, cells);
+                        // 合字は**1 つの字形**なので、色が変わるところとカーソルの
+                        // 居るところで run を切る。切らないと、途中で色を変えられず、
+                        // カーソルの下の字が何だったか分からなくなる。
+                        let caret = (is_active && cursor.line == top + r).then_some(cursor.col);
+                        let mut run = String::new();
+                        let mut run_at = 0usize;
+                        let mut run_fg = [0.0f32; 4];
+
                         for (c, cell) in cells.iter().enumerate().take(rect.w) {
                             if cell.is_spacer() {
                                 continue;
@@ -2193,9 +2213,35 @@ impl App {
                                 fg = th.fade(fg, 0.45);
                             }
                             let (x, y) = ((rect.x + c) as f32, (rect.y + r) as f32);
-                            if cell.text != " " {
+
+                            // この字を run に足せるか。
+                            let joinable = cell.width == 1
+                                && cell.text != " "
+                                && cell.text.chars().count() == 1
+                                && caret != Some(c);
+                            let continues = joinable
+                                && !run.is_empty()
+                                && fg == run_fg
+                                && run_at + run.chars().count() == c;
+                            if !continues && !run.is_empty() {
+                                renderer.glyph_run(
+                                    (rect.x + run_at) as f32,
+                                    y,
+                                    &run,
+                                    run_fg,
+                                );
+                                run.clear();
+                            }
+                            if joinable {
+                                if run.is_empty() {
+                                    run_at = c;
+                                    run_fg = fg;
+                                }
+                                run.push_str(&cell.text);
+                            } else if cell.text != " " {
                                 renderer.glyph(x, y, &cell.text, fg);
                             }
+
                             let w = f32::from(cell.width.max(1));
                             if cell.attrs.has(Attrs::UNDERLINE) {
                                 renderer.rect(x, y + 0.92, w, 0.06, fg);
@@ -2204,16 +2250,16 @@ impl App {
                                 renderer.rect(x, y + 0.52, w, 0.06, fg);
                             }
                         }
+                        if !run.is_empty() {
+                            renderer.glyph_run(
+                                (rect.x + run_at) as f32,
+                                (rect.y + r) as f32,
+                                &run,
+                                run_fg,
+                            );
+                        }
                     }
 
-                    // ファイルではカーソルは常にエンジンのもの。端末では入力中だけ
-                    // シェルのカーソル（そこが「生きている末尾」だから）。
-                    let cursor = if view.editing() || mode != Mode::Insert {
-                        cursor_engine
-                    } else {
-                        let g = &view.term.state.grid;
-                        Pos::new(g.cursor_absolute(), g.cursor.col)
-                    };
                     if is_active
                         && let Some(cr) = cursor.line.checked_sub(top).filter(|r| *r < rect.h)
                         && cursor.col < rect.w
@@ -3120,6 +3166,7 @@ impl ApplicationHandler for App {
             Ok(mut r) => {
                 // `Color::Default` の解決先とクリア色を別々に持たせない
                 r.background = background_of(&self.theme, self.cfg.opacity);
+                r.set_ligatures(self.cfg.ligatures);
                 r
             }
             Err(e) => {

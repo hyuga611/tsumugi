@@ -1,7 +1,7 @@
 //! フォント探索とグリフのラスタライズ。
 //!
-//! `arch.md` §3 の選定通り fontdb（探索）+ swash（ラスタライズ）。
-//! シェーピング（rustybuzz / リガチャ）は M5 の担当で、ここではまだ使わない。
+//! `arch.md` §3 の選定通り fontdb（探索）+ swash（ラスタライズ）+
+//! rustybuzz（シェーピング）。
 //!
 //! フォールバックチェーンを自前で持つのが要点。CJK と絵文字は
 //! 等幅欧文フォントに入っていないため、**セル単位でフォントを切り替える**。
@@ -29,6 +29,11 @@ pub struct FontData {
 impl FontData {
     fn font_ref(&self) -> Option<FontRef<'_>> {
         FontRef::from_index(&self.data, self.index as usize)
+    }
+
+    /// シェーピング用の顔。合字（`liga` / `calt`）はここが持つ。
+    pub fn shaper(&self) -> Option<rustybuzz::Face<'_>> {
+        rustybuzz::Face::from_slice(&self.data, self.index)
     }
 }
 
@@ -294,6 +299,45 @@ impl FontStack {
         )
     }
 
+    /// **1 セル 1 文字**の並びを基準フォントで組み、(グリフ, 何セル目) を返す。
+    ///
+    /// 端末は格子なので、シェーピングが返す送り幅をそのまま使ってはいけない。
+    /// 合字の字形は入力の何文字ぶんかを 1 つの**クラスタ**として返すので、
+    /// クラスタの先頭が何セル目かを見て置く。等幅フォントの合字はその字数ぶんの
+    /// 幅に設計されているので、これで格子と合う。
+    ///
+    /// `text` に全角や結合文字が混ざっていると格子と対応が取れないので、
+    /// 呼ぶ側が 1 文字 1 セルであることを保証する。保証できなければ `None`。
+    pub fn shape_cells(&self, text: &str) -> Option<Vec<(u16, u16)>> {
+        let face = self.fonts.first()?.shaper()?;
+
+        let mut buf = rustybuzz::UnicodeBuffer::new();
+        buf.push_str(text);
+        buf.set_direction(rustybuzz::Direction::LeftToRight);
+        let out = rustybuzz::shape(&face, &[], buf);
+
+        // クラスタはバイト位置で返る。バイト位置 → 何文字目（＝何セル目）の対応表。
+        let mut cell_of = vec![u16::MAX; text.len() + 1];
+        for (i, (byte, _)) in text.char_indices().enumerate() {
+            cell_of[byte] = u16::try_from(i).ok()?;
+        }
+
+        let mut placed = Vec::with_capacity(out.len());
+        for info in out.glyph_infos() {
+            // クラスタが文字の途中を指したら、格子との対応が壊れている。
+            // 当てずっぽうに置かず、呼ぶ側に 1 文字ずつ描かせる。
+            let cell = *cell_of.get(info.cluster as usize)?;
+            if cell == u16::MAX {
+                return None;
+            }
+            let gid = u16::try_from(info.glyph_id).ok()?;
+            if gid != 0 {
+                placed.push((gid, cell));
+            }
+        }
+        Some(placed)
+    }
+
     /// 各フォントに適用した伸縮倍率。診断用。
     pub fn scales(&self) -> Vec<f32> {
         self.fonts.iter().map(|f| f.scale).collect()
@@ -307,6 +351,51 @@ impl FontStack {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 組んだ結果が**格子と 1 対 1 で対応する**こと。
+    ///
+    /// 合字を持つフォントかどうかは環境次第なので、ここで見るのは
+    /// 「どのグリフも、実在するセルに、左から順に置かれる」という不変条件。
+    /// ここが崩れると字が重なる・行が右へずれる。
+    #[test]
+    fn shaping_places_every_glyph_on_a_real_cell() {
+        let Ok(stack) = FontStack::discover(18.0) else {
+            eprintln!("フォントが見つからないためスキップ");
+            return;
+        };
+        for text in ["->", "===", "!=", "a -> b", "x", "|||>", "fn main() {"] {
+            let cells = text.chars().count();
+            let Some(placed) = stack.shape_cells(text) else {
+                panic!("{text:?} を組めない");
+            };
+            assert!(!placed.is_empty(), "{text:?} で何も出ない");
+            assert!(
+                placed.len() <= cells,
+                "{text:?}: グリフがセル数より多い（{} > {cells}）",
+                placed.len()
+            );
+            let mut last = None;
+            for (_, cell) in &placed {
+                assert!(
+                    (*cell as usize) < cells,
+                    "{text:?}: 実在しないセル {cell} に置いた"
+                );
+                if let Some(prev) = last {
+                    assert!(*cell > prev, "{text:?}: 左から順になっていない");
+                }
+                last = Some(*cell);
+            }
+        }
+    }
+
+    /// 空の入力で落ちない（行末で必ず通る道）。
+    #[test]
+    fn shaping_an_empty_run_is_not_an_error() {
+        let Ok(stack) = FontStack::discover(18.0) else {
+            return;
+        };
+        assert_eq!(stack.shape_cells(""), Some(Vec::new()));
+    }
 
     /// M0-b が実際に踏んだ不整合の回帰テスト。
     ///

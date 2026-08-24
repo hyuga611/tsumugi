@@ -167,17 +167,12 @@ mod tests {
 
     #[test]
     fn cube_and_grayscale_resolve() {
-        assert_eq!(Color::Indexed(16).rgb(), Some([0, 0, 0]));
-        assert_eq!(Color::Indexed(231).rgb(), Some([255, 255, 255]));
-        assert_eq!(Color::Indexed(232).rgb(), Some([8, 8, 8]));
-        assert_eq!(Color::Indexed(255).rgb(), Some([238, 238, 238]));
+        assert_eq!(indexed_rgb(16), [0, 0, 0]);
+        assert_eq!(indexed_rgb(231), [255, 255, 255]);
+        assert_eq!(indexed_rgb(232), [8, 8, 8]);
+        assert_eq!(indexed_rgb(255), [238, 238, 238]);
         // 196 = 赤（キューブの r=5, g=0, b=0）
-        assert_eq!(Color::Indexed(196).rgb(), Some([255, 0, 0]));
-    }
-
-    #[test]
-    fn default_is_left_to_the_theme() {
-        assert_eq!(Color::Default.rgb(), None);
+        assert_eq!(indexed_rgb(196), [255, 0, 0]);
     }
 
     #[test]

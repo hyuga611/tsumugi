@@ -12,6 +12,7 @@ bytemuck = { version = "1.25.2", features = ["derive"] }
 fontdb = "0.24.0"
 pollster = "1.0.1"
 raw-window-handle = "0.6.2"
+rustybuzz = "0.20"
 swash = "0.2.10"
 unicode-width = "0.2.2"
 wgpu = "30.0.1"

@@ -3,7 +3,9 @@
 //! `arch.md` の依存の向きに従い、このクレートは winit を知らない。
 //! ウィンドウは `HasWindowHandle + HasDisplayHandle` として受け取る。
 //!
-//! M0-b の範囲: 単色テキスト + 矩形。SGR の色属性は M1。
+//! 合字（リガチャ）はここが持つ。端末は**格子**なので、シェーピングの結果を
+//! 素直に並べるのではなく「どのセルに置くか」へ翻訳する必要がある。詳しくは
+//! `shape_run`。
 
 pub mod font;
 
@@ -16,6 +18,64 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 pub use font::{FontStack, RasterizedGlyph, Rasterizer};
 
 const ATLAS_SIZE: u32 = 2048;
+
+/// シェーピング結果を控える行数の上限。行の中身は無限にあり得るので、
+/// 際限なく溜めない。溢れたら丸ごと捨てて組み直す（1 フレームぶんの取り直し）。
+const SHAPE_CACHE_MAX: usize = 4096;
+
+/// 合字になり得る字を含むか。
+///
+/// **含まないほうが圧倒的に多い。** 日本語の文章にも `ls` の出力にも合字は
+/// 出ないので、そこでシェーピングを走らせるのは丸損になる。
+/// ここで弾いて、素通しの道を軽いままにしておく。
+fn may_ligate(text: &str) -> bool {
+    text.chars().any(|c| {
+        matches!(
+            c,
+            '=' | '-'
+                | '<'
+                | '>'
+                | '+'
+                | '*'
+                | '/'
+                | '!'
+                | '&'
+                | '|'
+                | ':'
+                | '.'
+                | '~'
+                | '?'
+                | '#'
+                | '$'
+                | '%'
+                | '^'
+                | ';'
+                | '_'
+                | '\\'
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::may_ligate;
+
+    /// 合字を含まない行でシェーピングを走らせない。**そちらが圧倒的に多い。**
+    #[test]
+    fn ordinary_text_takes_the_cheap_path() {
+        assert!(!may_ligate("hello world"), "ただの語で組みに行っている");
+        assert!(!may_ligate("日本語のテキスト"));
+        assert!(!may_ligate("total 134"));
+        assert!(!may_ligate(""));
+    }
+
+    #[test]
+    fn code_punctuation_goes_through_the_shaper() {
+        for s in ["->", "!=", "=>", "|>", "a := b", "// note", "<$>"] {
+            assert!(may_ligate(s), "{s:?} を素通ししている");
+        }
+    }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -164,6 +224,10 @@ pub struct Renderer {
 
     atlas: Atlas,
     cache: HashMap<(usize, u16), Option<AtlasEntry>>,
+    /// 合字を組むか。切ると `glyph_run` は 1 セル 1 文字で積む。
+    ligatures: bool,
+    /// シェーピングの結果。**同じ行を毎フレーム組み直さない**ための控え。
+    shaped: HashMap<Box<str>, Box<[(u16, u16)]>>,
 
     instances: Vec<Instance>,
     /// 合成面がプリマルチプライドか。クリア色の出し方が変わる。
@@ -365,6 +429,8 @@ impl Renderer {
             instance_cap,
             atlas,
             cache: HashMap::new(),
+            ligatures: true,
+            shaped: HashMap::new(),
             premultiplied,
             instances: Vec::new(),
             fonts,
@@ -401,6 +467,9 @@ impl Renderer {
         }
         self.cache.clear();
         self.atlas.reset();
+        // 組み方は大きさに依らないので控えは残せるが、アトラスを畳んだ以上
+        // 参照先が消えている。一緒に捨てる。
+        self.shaped.clear();
         true
     }
 
@@ -441,7 +510,12 @@ impl Renderer {
         let Some((font_idx, gid)) = self.fonts.glyph_for(c) else {
             return;
         };
+        self.place_glyph(col, row, font_idx, gid, color);
+    }
 
+    /// アトラスに載せて 1 つ積む。文字ではなく**グリフ ID** で指す
+    /// （合字は元の文字に対応するグリフを持たない）。
+    fn place_glyph(&mut self, col: f32, row: f32, font_idx: usize, gid: u16, color: [f32; 4]) {
         let entry = *self.cache.entry((font_idx, gid)).or_insert_with(|| {
             let px = self.fonts.px_for(font_idx);
             let g = self.raster.render(&self.fonts.fonts[font_idx], px, gid)?;
@@ -470,6 +544,69 @@ impl Renderer {
             mode: 0,
             _pad: [0; 3],
         });
+    }
+
+    /// 合字を組むか（設定から）。切り替えたら控えは捨てる。
+    pub fn set_ligatures(&mut self, on: bool) {
+        if self.ligatures != on {
+            self.ligatures = on;
+            self.shaped.clear();
+        }
+    }
+
+    pub fn ligatures(&self) -> bool {
+        self.ligatures
+    }
+
+    /// **1 セル 1 文字**の並びを、合字を組みつつ積む。
+    ///
+    /// 端末は格子なので、シェーピングの送り幅をそのまま使ってはいけない。
+    /// 合字の字形は「入力の何文字ぶんか」を 1 つのクラスタとして返すので、
+    /// **クラスタの先頭が何セル目か**を見て置く。等幅フォントの合字は
+    /// その字数ぶんの幅に設計されているので、これで格子と合う。
+    ///
+    /// 呼ぶ側の責任:
+    /// - `text` は 1 文字 1 セル（全角・結合文字を混ぜない）
+    /// - 色が変わるところ、カーソルの居るところで**run を切る**
+    ///   （合字は 1 つの字形なので、途中で色を変えられない。カーソルの下では
+    ///   元の字が見えたほうが直せる）
+    pub fn glyph_run(&mut self, col: f32, row: f32, text: &str, color: [f32; 4]) {
+        if text.is_empty() {
+            return;
+        }
+        if !self.ligatures || !may_ligate(text) {
+            for (i, c) in text.chars().enumerate() {
+                self.glyph(col + i as f32, row, c.encode_utf8(&mut [0u8; 4]), color);
+            }
+            return;
+        }
+        let Some(placed) = self.shape_run(text) else {
+            for (i, c) in text.chars().enumerate() {
+                self.glyph(col + i as f32, row, c.encode_utf8(&mut [0u8; 4]), color);
+            }
+            return;
+        };
+        for (gid, cell) in placed {
+            self.place_glyph(col + f32::from(cell), row, 0, gid, color);
+        }
+    }
+
+    /// 基準フォントで組んだ (グリフ, 何セル目) の列。組めなければ `None`。
+    ///
+    /// 組むこと自体は `FontStack` の仕事で、ここは**同じ行を毎フレーム
+    /// 組み直さない**ための控えを持つだけ。
+    fn shape_run(&mut self, text: &str) -> Option<Vec<(u16, u16)>> {
+        if let Some(hit) = self.shaped.get(text) {
+            return Some(hit.to_vec());
+        }
+        let placed = self.fonts.shape_cells(text)?;
+        // 控えが際限なく増えないようにする。行の中身は無限にあり得る。
+        if self.shaped.len() >= SHAPE_CACHE_MAX {
+            self.shaped.clear();
+        }
+        self.shaped
+            .insert(text.into(), placed.clone().into_boxed_slice());
+        Some(placed)
     }
 
     /// 文字列を左から積む。CJK は 2 セル進める。
