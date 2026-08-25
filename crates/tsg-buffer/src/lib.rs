@@ -16,7 +16,7 @@ pub mod syntax;
 use tsg_term::{Cell, Grid, SemanticMarks};
 
 pub use file::{FileBuffer, Splice};
-pub use syntax::{Lang, Token, highlight};
+pub use syntax::{Lang, State as SyntaxState, Token, highlight, highlight_from};
 
 pub use tsg_term::{Cell as BufferCell, CommandBlock, MarkKind, SemanticMarks as Marks};
 

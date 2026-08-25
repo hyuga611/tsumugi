@@ -97,6 +97,14 @@ pub struct PaneView {
     /// すぎないので、端末に食わせればセルになり、描画・選択・コピー・
     /// Ctrl＋クリックがそのまま効く。専用の描画経路を増やさない。
     pub preview: Option<Terminal>,
+    /// 各行の**入り口**の構文状態（`syntax::State`）。
+    ///
+    /// ブロックコメントや三重引用符は行をまたぐので、その行だけ見ても
+    /// 色が決まらない。**上から数え直すのは高いので控えておく。**
+    /// 編集された行から下だけ捨てれば、次の描画で足りない分だけ数え直す。
+    pub syntax_at: Vec<tsg_modal::SyntaxState>,
+    /// `syntax_at` を作ったときの中身の版。**変わっていたら捨てる。**
+    syntax_rev: u64,
     /// 言語サーバが言ってきた誤り。**行番号で持つ**（ファイルの行なので
     /// スクロールバックのように動かない）。
     pub diagnostics: Vec<tsg_lsp::Diagnostic>,
@@ -141,6 +149,41 @@ pub fn line_numbers() -> bool {
 }
 
 impl PaneView {
+    /// `line` の入り口の構文状態。足りなければ**そこまで数えて控える**。
+    ///
+    /// 数え直すのは控えの続きからだけ。画面に出ている数十行のために
+    /// 毎回ファイルの頭から読むと、大きなファイルで目に見えて重くなる。
+    pub fn syntax_state(
+        &mut self,
+        lang: tsg_modal::SyntaxLang,
+        line: usize,
+    ) -> tsg_modal::SyntaxState {
+        if lang == tsg_modal::SyntaxLang::None {
+            return tsg_modal::SyntaxState::default();
+        }
+        // 中身が変わっていたら控えは使えない。**行をまたいで積み上げた
+        // ものは、どこか 1 行でも変われば下が全部ずれる。**
+        let rev = self.file.as_ref().map_or(0, tsg_modal::FileBuffer::rev);
+        if rev != self.syntax_rev {
+            self.syntax_rev = rev;
+            self.syntax_at.clear();
+        }
+        if self.syntax_at.is_empty() {
+            self.syntax_at.push(tsg_modal::SyntaxState::default());
+        }
+        while self.syntax_at.len() <= line {
+            let at = self.syntax_at.len() - 1;
+            let state = self.syntax_at[at];
+            let next = match self.buffer().cells(at) {
+                Some(cells) => tsg_modal::highlight_from(lang, cells, state).1,
+                // 行が無い。そこから先は素の状態でいい。
+                None => tsg_modal::SyntaxState::default(),
+            };
+            self.syntax_at.push(next);
+        }
+        self.syntax_at.get(line).copied().unwrap_or_default()
+    }
+
     /// 左のふちの幅。印のぶんと、ファイルを開いていれば行番号のぶん。
     ///
     /// **端末には行番号を出さない。** 端末の「行」はコマンドの出力が
@@ -194,6 +237,8 @@ impl PaneView {
             follow_tail: true,
             alive: true,
             preview: None,
+            syntax_at: Vec::new(),
+            syntax_rev: 0,
             diagnostics: Vec::new(),
             folds: Vec::new(),
         }

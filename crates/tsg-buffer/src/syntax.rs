@@ -4,10 +4,14 @@
 //! ここで欲しいのは「読むときに目が滑らないこと」であって構文木ではない。
 //! そこで、行をまたぐ状態を一切持たない字句解析に絞った。
 //!
-//! **割り切り**: 行をまたぐブロックコメント（`/* … */` が次の行へ続く形）と
-//! 三重引用符は、その行の中だけで判定する。次の行は素の色に戻る。
-//! 行をまたぐ状態を持つと、上の行を編集するたびに下を全部塗り直すことになり、
-//! 大きなファイルで目に見えて重くなる。読みやすさの利得に見合わない。
+//! # 行をまたぐもの
+//!
+//! ブロックコメント（`/* … */`）と三重引用符は次の行へ続く。**行だけ見ても
+//! 決まらない**ので、行の入り口の状態を持ち回る（`State`）。
+//!
+//! 持ち回るのは**数バイトの状態 1 つだけ**で、行の中身は覚えない。
+//! 呼ぶ側は行ごとの入り口を控えておいて、編集された行から下だけ数え直す。
+//! 全部塗り直さずに済むのはそのため。
 //!
 //! 出力は**セル 1 つにつき 1 つ**の `Token`。呼ぶ側は色を引くだけで済み、
 //! 全角の桁ずれ（スペーサセル）をここから外へ漏らさない。
@@ -101,6 +105,19 @@ impl Lang {
 
     fn has_block_comment(self) -> bool {
         matches!(self, Lang::Rust | Lang::C | Lang::Js | Lang::Go)
+    }
+
+    /// ブロックコメントが入れ子になるか。**Rust だけ**。
+    ///
+    /// C で入れ子として数えると、`/* /* */` の 1 つ目で閉じないまま
+    /// 下の行が全部コメント色になる。
+    fn nests_block_comment(self) -> bool {
+        self == Lang::Rust
+    }
+
+    /// 三重引用符を持つか（`\"\"\"` / `'''`）。
+    fn has_triple_quote(self) -> bool {
+        self == Lang::Python
     }
 
     fn quotes(self) -> &'static [char] {
@@ -248,11 +265,39 @@ impl Lang {
     }
 }
 
+/// 行の入り口の状態。**行をまたぐものだけ**を覚える。
+///
+/// 中身（どこまで読んだか）は持たない。持つと、行を 1 つ編集するたびに
+/// 下の行の状態が全部変わって、結局全部塗り直すことになる。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum State {
+    #[default]
+    Normal,
+    /// `/* … */` の中。入れ子を数える言語があるので深さで持つ。
+    Block(u8),
+    /// 三重引用符の中（`\"\"\"` / `'''`）。どちらで開いたかを覚える。
+    Triple(char),
+}
+
 /// セル 1 つにつき 1 つの `Token` を返す。長さは `cells` と同じ。
+///
+/// 行の入り口が素の状態のとき用。行をまたぐものを見るなら
+/// `highlight_from` を使う。
 pub fn highlight(lang: Lang, cells: &[Cell]) -> Vec<Token> {
+    highlight_from(lang, cells, State::Normal).0
+}
+
+/// 入り口の状態から塗って、**出口の状態も返す**。
+pub fn highlight_from(lang: Lang, cells: &[Cell], state: State) -> (Vec<Token>, State) {
     let mut out = vec![Token::Text; cells.len()];
     if lang == Lang::None || cells.is_empty() {
-        return out;
+        // 空行はまたぐものを変えない（コメントの中の空行はコメントのまま）。
+        let carried = if lang == Lang::None {
+            State::Normal
+        } else {
+            state
+        };
+        return (out, carried);
     }
 
     // セル列 -> 文字列。スペーサ（全角の 2 セル目）は飛ばし、
@@ -289,7 +334,7 @@ pub fn highlight(lang: Lang, cells: &[Cell]) -> Vec<Token> {
                 *t = tok;
             }
         }
-        return out;
+        return (out, State::Normal);
     }
 
     let paint = |out: &mut Vec<Token>, from: usize, to: usize, tok: Token| {
@@ -304,10 +349,38 @@ pub fn highlight(lang: Lang, cells: &[Cell]) -> Vec<Token> {
 
     if lang == Lang::Markdown {
         markdown(&chars, &mut |f, t, k| paint(&mut out, f, t, k));
-        return out;
+        return (out, State::Normal);
     }
 
+    // 前の行から続いているものを先に閉じる。
     let mut i = 0usize;
+    let mut carried = state;
+    match carried {
+        State::Normal => {}
+        State::Block(depth) => {
+            let (end, left) = close_block(&chars, 0, depth, lang.nests_block_comment());
+            paint(&mut out, 0, end, Token::Comment);
+            if left > 0 {
+                // まだ閉じていない。**この行は全部コメント。**
+                return (out, State::Block(left));
+            }
+            carried = State::Normal;
+            i = end;
+        }
+        State::Triple(q) => match close_triple(&chars, 0, q) {
+            Some(end) => {
+                paint(&mut out, 0, end, Token::Str);
+                carried = State::Normal;
+                i = end;
+            }
+            None => {
+                paint(&mut out, 0, chars.len(), Token::Str);
+                return (out, State::Triple(q));
+            }
+        },
+    }
+    let _ = carried;
+
     while i < chars.len() {
         let rest: String = chars[i..].iter().collect();
 
@@ -317,12 +390,31 @@ pub fn highlight(lang: Lang, cells: &[Cell]) -> Vec<Token> {
             break;
         }
 
-        // ブロックコメント。閉じが無ければ行末まで（次の行へは持ち越さない）
+        // ブロックコメント。閉じが無ければ**次の行へ持ち越す**。
         if lang.has_block_comment() && rest.starts_with("/*") {
-            let end = find_pair(&chars, i + 2, '*', '/').unwrap_or(chars.len());
+            let (end, left) = close_block(&chars, i + 2, 1, lang.nests_block_comment());
             paint(&mut out, i, end, Token::Comment);
+            if left > 0 {
+                return (out, State::Block(left));
+            }
             i = end;
             continue;
+        }
+
+        // 三重引用符。閉じが無ければ**次の行へ持ち越す**。
+        if lang.has_triple_quote() && (rest.starts_with("\"\"\"") || rest.starts_with("'''")) {
+            let q = chars[i];
+            match close_triple(&chars, i + 3, q) {
+                Some(end) => {
+                    paint(&mut out, i, end, Token::Str);
+                    i = end;
+                    continue;
+                }
+                None => {
+                    paint(&mut out, i, chars.len(), Token::Str);
+                    return (out, State::Triple(q));
+                }
+            }
         }
 
         // 文字列。エスケープを読み飛ばす。閉じが無ければ行末まで
@@ -375,7 +467,51 @@ pub fn highlight(lang: Lang, cells: &[Cell]) -> Vec<Token> {
 
         i += 1;
     }
-    out
+    (out, State::Normal)
+}
+
+/// `/*` の中を読み進める。返すのは (終わった位置, 残った深さ)。
+///
+/// 残りが 0 でなければ、その行では閉じていない = 次の行へ続く。
+fn close_block(chars: &[char], from: usize, depth: u8, nests: bool) -> (usize, u8) {
+    let mut depth = depth;
+    let mut i = from;
+    while i < chars.len() {
+        if chars[i] == '*' && chars.get(i + 1) == Some(&'/') {
+            depth -= 1;
+            i += 2;
+            if depth == 0 {
+                return (i, 0);
+            }
+            continue;
+        }
+        if nests && chars[i] == '/' && chars.get(i + 1) == Some(&'*') {
+            depth = depth.saturating_add(1);
+            i += 2;
+            continue;
+        }
+        i += 1;
+    }
+    (chars.len(), depth)
+}
+
+/// 三重引用符の中を読み進める。
+///
+/// 閉じたらその直後の位置、閉じていなければ `None`。**行末で閉じた場合と
+/// 閉じずに行末へ着いた場合を、位置だけでは区別できない**（どちらも
+/// 行の長さになる）ので、閉じたかどうかを型で返す。
+fn close_triple(chars: &[char], from: usize, quote: char) -> Option<usize> {
+    let mut i = from;
+    while i < chars.len() {
+        if chars.get(i) == Some(&quote)
+            && chars.get(i + 1) == Some(&quote)
+            && chars.get(i + 2) == Some(&quote)
+        {
+            return Some(i + 3);
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Markdown だけは語ではなく**行の形**で決まる。
@@ -409,18 +545,6 @@ fn markdown(chars: &[char], paint: &mut impl FnMut(usize, usize, Token)) {
 
 fn is_ident(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
-}
-
-/// `a` `b` が並ぶ位置の**次**を返す（`*/` の終わり）。
-fn find_pair(chars: &[char], from: usize, a: char, b: char) -> Option<usize> {
-    let mut i = from;
-    while i + 1 < chars.len() {
-        if chars[i] == a && chars[i + 1] == b {
-            return Some(i + 2);
-        }
-        i += 1;
-    }
-    None
 }
 
 #[cfg(test)]
@@ -519,5 +643,101 @@ mod tests {
     fn plain_text_gets_no_colour_at_all() {
         let t = toks(Lang::None, "let x = 1; // c");
         assert!(t.iter().all(|k| *k == Token::Text));
+    }
+}
+
+#[cfg(test)]
+mod across_lines {
+    use super::*;
+    use tsg_term::AmbiguousWidth;
+
+    fn cells(s: &str) -> Vec<Cell> {
+        use crate::Buffer as _;
+        crate::file::FileBuffer::from_text(s, AmbiguousWidth::Narrow)
+            .cells(0)
+            .map(<[Cell]>::to_vec)
+            .unwrap_or_default()
+    }
+
+    fn run(lang: Lang, lines: &[&str]) -> Vec<Vec<Token>> {
+        let mut state = State::Normal;
+        lines
+            .iter()
+            .map(|l| {
+                let (t, next) = highlight_from(lang, &cells(l), state);
+                state = next;
+                t
+            })
+            .collect()
+    }
+
+    /// **開いたブロックコメントは次の行へ続く。**
+    ///
+    /// 行だけ見て判断していたころは、2 行目から素の色に戻っていた。
+    #[test]
+    fn a_block_comment_carries_to_the_next_line() {
+        let out = run(Lang::Rust, &["/* start", "middle", "end */ let x = 1;"]);
+        assert!(out[0].iter().all(|t| *t == Token::Comment), "1 行目");
+        assert!(out[1].iter().all(|t| *t == Token::Comment), "2 行目");
+        // 3 行目は閉じたあとが素に戻る
+        assert_eq!(out[2][0], Token::Comment, "閉じの手前がコメントでない");
+        assert!(
+            out[2].contains(&Token::Keyword),
+            "閉じたあとが素に戻っていない"
+        );
+    }
+
+    /// Rust のブロックコメントは**入れ子になる**。
+    #[test]
+    fn a_nested_block_comment_needs_both_closers() {
+        let out = run(
+            Lang::Rust,
+            &["/* a /* b", "still */ inner", "done */ let x = 1;"],
+        );
+        assert!(
+            out[1].iter().all(|t| *t == Token::Comment),
+            "内側で閉じている"
+        );
+        assert!(out[2].contains(&Token::Keyword), "外側で閉じていない");
+    }
+
+    /// C は入れ子にしない。**1 つ目の `*/` で閉じる。**
+    #[test]
+    fn c_closes_at_the_first_closer() {
+        let out = run(Lang::C, &["/* a /* b", "still */ int x = 1;"]);
+        assert!(out[1].contains(&Token::Keyword), "1 つ目で閉じていない");
+    }
+
+    /// Python の三重引用符も次の行へ続く。
+    #[test]
+    fn a_triple_quote_carries_to_the_next_line() {
+        let out = run(
+            Lang::Python,
+            &["x = \"\"\"start", "middle", "end\"\"\"", "if True:"],
+        );
+        assert!(
+            out[1].iter().all(|t| *t == Token::Str),
+            "2 行目が文字列でない"
+        );
+        assert!(
+            out[3].contains(&Token::Keyword),
+            "閉じたあとが素に戻っていない"
+        );
+    }
+
+    /// コメントの中の空行は**コメントのまま**（状態を落とさない）。
+    #[test]
+    fn an_empty_line_inside_a_comment_stays_inside() {
+        let out = run(Lang::Rust, &["/* a", "", "b */ let x = 1;"]);
+        assert!(out[2].contains(&Token::Keyword), "閉じられていない");
+    }
+
+    /// 行の中で開いて閉じたら、次の行へは持ち越さない。
+    #[test]
+    fn a_comment_closed_on_its_line_carries_nothing() {
+        let mut state = State::Normal;
+        let (_, next) = highlight_from(Lang::Rust, &cells("/* a */ let x = 1;"), state);
+        state = next;
+        assert_eq!(state, State::Normal);
     }
 }

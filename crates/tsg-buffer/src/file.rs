@@ -35,6 +35,12 @@ pub struct FileBuffer {
     pending: Vec<Splice>,
     /// 差分ではなく全文を渡し直す必要がある（取り消し / やり直しの後）。
     resync: bool,
+    /// 中身が変わるたびに 1 つ進む。
+    ///
+    /// **控えが古いかどうかを一目で見るため。** 構文の状態のように
+    /// 行をまたいで積み上げたものは、どこか 1 行でも変わると使えない。
+    /// 変更の道を数え上げて回るより、番号を 1 つ見るほうが取りこぼさない。
+    rev: u64,
 }
 
 /// 変更 1 つ分の置換。位置は `text()` が返す文字列の上のバイト。
@@ -101,6 +107,7 @@ impl FileBuffer {
             group_cursor: Pos::default(),
             pending: Vec::new(),
             resync: false,
+            rev: 0,
         }
     }
 
@@ -144,6 +151,11 @@ impl FileBuffer {
         out
     }
 
+    /// 中身の版。変わるたびに進む。
+    pub fn rev(&self) -> u64 {
+        self.rev
+    }
+
     pub fn line_count(&self) -> usize {
         self.lines.len()
     }
@@ -185,6 +197,7 @@ impl FileBuffer {
 
     /// 文字を差し込む。改行を含んでよい。返すのは差し込んだ後のカーソル位置。
     pub fn insert(&mut self, at: Pos, text: &str) -> Pos {
+        self.rev = self.rev.wrapping_add(1);
         self.checkpoint();
         let before = self.text();
         if self.lines.is_empty() {
@@ -215,6 +228,7 @@ impl FileBuffer {
 
     /// 範囲を消す。消したテキストを返す（ヤンクへ渡すため）。
     pub fn delete(&mut self, range: &Range) -> String {
+        self.rev = self.rev.wrapping_add(1);
         self.checkpoint();
         let before = self.text();
         let removed = crate::extract(self, range);
@@ -270,6 +284,7 @@ impl FileBuffer {
     /// 置き換えたテキストの最終行が次の行の頭にくっつく
     /// （`=` で JSON を整形したとき、閉じ括弧が次の行と繋がって出た）。
     pub fn replace(&mut self, range: &Range, text: &str) -> String {
+        self.rev = self.rev.wrapping_add(1);
         // delete と insert で 2 段にならないよう、単位はここで閉じる
         self.checkpoint();
         let removed = self.delete(range);
@@ -356,6 +371,7 @@ impl FileBuffer {
 
     /// 1 段戻す。戻ったらカーソルの行き先を返す。
     pub fn undo(&mut self) -> Option<Pos> {
+        self.rev = self.rev.wrapping_add(1);
         let group = self.undo.pop()?;
         let mut text = self.text();
         // 後ろに積んだものから戻す。前から戻すと 2 つ目以降の位置がずれる。
@@ -378,6 +394,7 @@ impl FileBuffer {
 
     /// 1 段やり直す。
     pub fn redo(&mut self) -> Option<Pos> {
+        self.rev = self.rev.wrapping_add(1);
         let group = self.redo.pop()?;
         let mut text = self.text();
         for s in &group.splices {

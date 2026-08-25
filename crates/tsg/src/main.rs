@@ -3882,6 +3882,25 @@ impl App {
         let preedit = self.preedit.clone();
         let (cols, rows) = (self.cols, self.rows);
 
+        // 行をまたぐ構文（ブロックコメント・三重引用符）は、その行だけ見ても
+        // 決まらない。**描く前に、見えている行の入り口の状態を揃えておく。**
+        // 描いている最中は描画器を握っているので、ここでしか触れない。
+        let syntax: std::collections::BTreeMap<u32, Vec<tsg_modal::SyntaxState>> = visible
+            .iter()
+            .filter_map(|id| {
+                let view = self.session.panes.get_mut(id)?;
+                let lang = view.lang();
+                if lang == tsg_modal::SyntaxLang::None {
+                    return None;
+                }
+                let (top, h) = (view.top, view.rect.h);
+                let states = (0..h)
+                    .map(|r| view.syntax_state(lang, top + r))
+                    .collect::<Vec<_>>();
+                Some((*id, states))
+            })
+            .collect();
+
         {
             let Some(renderer) = self.renderer.as_mut() else {
                 return;
@@ -4212,7 +4231,14 @@ impl App {
                         let Some(cells) = doc.cells(at(r)) else {
                             break;
                         };
-                        let syn = tsg_modal::highlight(lang, cells);
+                        // 行の入り口の状態から塗る。**上の行から続いている
+                        // コメントや文字列が、途中で素の色に戻らない。**
+                        let state = syntax
+                            .get(id)
+                            .and_then(|v| v.get(r))
+                            .copied()
+                            .unwrap_or_default();
+                        let syn = tsg_modal::highlight_from(lang, cells, state).0;
                         // 合字は**1 つの字形**なので、色が変わるところとカーソルの
                         // 居るところで run を切る。切らないと、途中で色を変えられず、
                         // カーソルの下の字が何だったか分からなくなる。
