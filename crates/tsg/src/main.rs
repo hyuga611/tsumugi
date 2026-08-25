@@ -37,7 +37,7 @@ use tsg_modal::{
 use tsg_mux::Client;
 use tsg_mux::protocol::{AgentState, ClientMsg, Dir, PROTOCOL_VERSION, ServerMsg};
 use tsg_render::Renderer;
-use tsg_term::{Attrs, InputOwner};
+use tsg_term::{Attrs, InputOwner, Underline};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
@@ -48,7 +48,7 @@ use winit::window::{Window, WindowId};
 use cli::{Cli, Mode as CliMode};
 use config::Config;
 use session::{GUTTER, PaneView, Rect, Session};
-use theme::Theme;
+use theme::{Rgba, Theme};
 
 /// クリア色。**`Color::Default` の解決先とクリア色を別々に持たせない。**
 /// 2 か所に書くと、テーマを変えたときに片方だけ古い色のまま残る。
@@ -1172,10 +1172,22 @@ impl App {
                         let dropped = view.term.take_dropped();
                         view.shift_up(dropped);
                         let clip = view.term.state.clipboard.take();
+                        let notify = view.term.take_notify();
                         // 端末が返した答え（DA1 / CPR など）を相手へ返す。
                         let replies = std::mem::take(&mut view.term.state.replies);
                         if let Some(text) = clip {
                             self.set_clipboard(&text);
+                        }
+                        // 中の道具からの呼び出し（OSC 9 / 777）。
+                        // **見ていないときに気づけるように**、窓を点滅させる。
+                        // 見ているなら下の行に出すだけでいい。
+                        if let Some(text) = notify {
+                            self.status_msg = text;
+                            if !self.focused
+                                && let Some(w) = &self.window
+                            {
+                                platform::attention(w.as_ref());
+                            }
                         }
                         if !replies.is_empty() {
                             self.send_msg(&ClientMsg::Input {
@@ -1343,13 +1355,20 @@ impl App {
         let mut out = Vec::new();
         let mut x = 0usize;
         for (n, t) in info.tabs.iter().enumerate() {
-            let title = self
-                .session
-                .panes
-                .get(&t.active_pane)
-                .map(|v| v.term.state.title.trim().to_string())
+            // 付けた名前が勝つ。**中の題名で上書きしない**
+            // （題名で区別が付かないから名前を付けている）。
+            let title = t
+                .name
+                .clone()
                 .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| format!("タブ{}", n + 1));
+                .or_else(|| {
+                    self.session
+                        .panes
+                        .get(&t.active_pane)
+                        .map(|v| v.term.state.title.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                })
+                .unwrap_or_else(|| t!(format!("タブ{}", n + 1), format!("tab {}", n + 1)));
             // 状態の印はタブ名の前。**名前を読む前に目に入る**位置にする。
             let mark = match self.tab_agent(t.id) {
                 Some(AgentState::Blocked) => "● ",
@@ -1724,6 +1743,28 @@ impl App {
             self.save_file(Some(path.to_string()));
             return true;
         }
+        // タブに名前を付ける。中の題名では区別が付かないときに要る。
+        if let Some(name) = q.strip_prefix("tabname").map(str::trim) {
+            self.palette.hide();
+            self.rename_tab(name);
+            return true;
+        }
+        // 置換。`s/古い/新しい/` は今の行、`%s/…/…/` は全体。
+        // 末尾の `g` で、その行のすべて。
+        if let Some(rest) = q.strip_prefix("%s").or_else(|| q.strip_prefix('s'))
+            && rest.starts_with('/')
+        {
+            let all = q.starts_with('%');
+            self.palette.hide();
+            self.substitute(rest, all);
+            return true;
+        }
+        // 行へ飛ぶ。`:123`。
+        if let Ok(line) = q.parse::<usize>() {
+            self.palette.hide();
+            self.goto_line(line);
+            return true;
+        }
         match q {
             "w" => {
                 self.palette.hide();
@@ -1743,6 +1784,113 @@ impl App {
             }
             _ => false,
         }
+    }
+
+    /// タブに名前を付ける（空で外す）。
+    fn rename_tab(&mut self, name: &str) {
+        let Some(tab) = self.session.info.as_ref().map(|i| i.active_tab) else {
+            return;
+        };
+        self.send_msg(&ClientMsg::RenameTab {
+            tab,
+            name: name.to_string(),
+        });
+        self.status_msg = if name.is_empty() {
+            t!("タブの名前を外しました", "tab name cleared").into()
+        } else {
+            t!(
+                format!("タブを「{name}」にしました"),
+                format!("tab renamed to {name}")
+            )
+        };
+    }
+
+    /// 行へ飛ぶ。範囲外なら端で止める（断るより、近いところへ着く）。
+    fn goto_line(&mut self, line: usize) {
+        let Some(view) = self.session.panes.get(&self.session.active) else {
+            return;
+        };
+        let buf = view.buffer();
+        let last = buf.line_count().saturating_sub(1);
+        let target = line.saturating_sub(1).min(last);
+        self.engine.set_cursor(Pos::new(target, 0), &buf);
+        self.status_msg.clear();
+    }
+
+    /// 置換。`/古い/新しい/` を受け取る（`s` / `%s` は呼ぶ側で判断済み）。
+    ///
+    /// **ファイルを開いているときだけ。** 端末の画面は書き換えるものでは
+    /// ないので、そこへ置換を掛けても意味が無い（`d` が表示から消すだけなのと同じ）。
+    fn substitute(&mut self, spec: &str, all_lines: bool) {
+        if !self.active_view().is_some_and(PaneView::editing) {
+            self.status_msg = t!(
+                "置換はファイルを開いているときだけです",
+                "substitute works on an open file only"
+            )
+            .into();
+            return;
+        }
+        // `/` で 3 つに割る。**区切りを含む文字列は `\/` で書く。**
+        let Some((from, to, flags)) = split_subst(spec) else {
+            self.status_msg = t!("書き方は s/古い/新しい/ です", "the form is s/old/new/").into();
+            return;
+        };
+        if from.is_empty() {
+            return;
+        }
+        let re = self.engine.search_regex;
+        let pattern = tsg_modal::Search::new(&from, re);
+        if pattern.bad_regex {
+            self.status_msg = t!(
+                format!("正規表現として読めません: {from}"),
+                format!("not a valid regular expression: {from}")
+            );
+            return;
+        }
+        let every = flags.contains('g');
+        let here = self.engine.cursor().line;
+        let pane = self.session.active;
+        let Some(file) = self
+            .session
+            .panes
+            .get_mut(&pane)
+            .and_then(|v| v.file.as_mut())
+        else {
+            return;
+        };
+
+        let lines: Vec<usize> = if all_lines {
+            (0..file.line_count()).collect()
+        } else {
+            vec![here]
+        };
+        let mut hits = 0usize;
+        file.begin_group(Pos::new(here, 0));
+        // **後ろから当てる。** 前から置き換えると、直したぶんだけ
+        // 後ろの位置がずれて、2 つ目から別のところを書き換える。
+        for line in lines.into_iter().rev() {
+            let text = file.line(line);
+            let mut ranges = pattern.ranges(&text);
+            if !every {
+                ranges.truncate(1);
+            }
+            for (b0, b1) in ranges.into_iter().rev() {
+                let c0 = text[..b0].chars().count();
+                let c1 = text[..b1].chars().count();
+                let range = Range::new(Pos::new(line, c0), Pos::new(line, c1), RangeKind::Char);
+                file.replace(&range, &to);
+                hits += 1;
+            }
+        }
+        self.push_file();
+        self.status_msg = if hits == 0 {
+            t!("見つかりません", "no match").into()
+        } else {
+            t!(
+                format!("{hits} 個置き換えました"),
+                format!("replaced {hits}")
+            )
+        };
     }
 
     fn invoke(&mut self, id: &'static str, event_loop: &ActiveEventLoop) {
@@ -3136,7 +3284,8 @@ impl App {
     /// 後ろへ後ろへ流れていって戻れなくなる。
     fn run_search(&mut self) {
         let q = self.palette.query.clone();
-        self.engine.search = (!q.is_empty()).then(|| q.clone());
+        let re = self.engine.search_regex;
+        self.engine.search = (!q.is_empty()).then(|| tsg_modal::Search::new(&q, re));
         let Some(from) = self.search_from else {
             return;
         };
@@ -3160,7 +3309,18 @@ impl App {
             Pos::new(from.line, from.col.saturating_sub(1))
         };
         let mut found_at = None;
-        match tsg_modal::find_match(&buf, seed, &q, back) {
+        let Some(search) = self.engine.search.clone() else {
+            return;
+        };
+        // **組めない正規表現は、そう言う。** 黙って素の文字列で探すと、
+        // 打ち間違いに気づけない。
+        if search.bad_regex {
+            self.status_msg = t!(
+                format!("正規表現として読めません: {q}"),
+                format!("not a valid regular expression: {q}")
+            );
+        }
+        match tsg_modal::find_match(&buf, seed, &search, back) {
             Some(p) => {
                 self.engine.set_cursor(p, &buf);
                 self.status_msg.clear();
@@ -3192,7 +3352,7 @@ impl App {
 
     /// いま探しているものが文書に何件あるか。
     fn search_hits(&self) -> usize {
-        let Some(q) = self.engine.search.as_deref() else {
+        let Some(q) = self.engine.search.as_ref() else {
             return 0;
         };
         let Some(view) = self.session.panes.get(&self.session.active) else {
@@ -3463,7 +3623,7 @@ impl App {
 
                     // 探しているものを光らせる。**選択より先に塗る**ので、
                     // 選んだところは選択の色が勝つ。
-                    if let Some(q) = search.as_deref() {
+                    if let Some(q) = search.as_ref() {
                         for r in 0..rect.h {
                             for (from, w) in tsg_modal::matches_in(&doc, at(r), q) {
                                 if from >= rect.w {
@@ -3599,8 +3759,11 @@ impl App {
                             }
 
                             let w = f32::from(cell.width.max(1));
-                            if cell.attrs.has(Attrs::UNDERLINE) {
-                                renderer.rect(x, y + 0.92, w, 0.06, fg);
+                            if cell.attrs.under != Underline::None {
+                                // 下線の色は指定があればそれ（SGR 58）。
+                                // **誤りの波線が字と同じ色だと意味が消える。**
+                                let uc = th.resolve(cell.attrs.ul_color).unwrap_or(fg);
+                                draw_underline(renderer, x, y, w, cell.attrs.under, uc);
                             }
                             if cell.attrs.has(Attrs::STRIKE) {
                                 renderer.rect(x, y + 0.52, w, 0.06, fg);
@@ -4419,6 +4582,79 @@ fn fold_label(buf: &dyn tsg_modal::Buffer, start: usize) -> String {
 /// ラベルでそれをやると、`crates` や `docs` のような**拡張子の無いフォルダに
 /// 振られず**、代わりに `10.0.26200.9168]` のような版番号に振られる。
 /// 開けるかどうかは、聞けば分かる。
+/// `/古い/新しい/フラグ` を割る。`\/` は区切りではなく `/` の字。
+///
+/// **区切りを含む文字列を置けないと使えない。** パスを置き換えるのは
+/// よくあることで、そこには必ず `/` が入っている。
+fn split_subst(spec: &str) -> Option<(String, String, String)> {
+    let mut parts: Vec<String> = vec![String::new()];
+    let mut chars = spec.strip_prefix('/')?.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.next() {
+                Some('/') => parts.last_mut()?.push('/'),
+                Some('n') => parts.last_mut()?.push('\n'),
+                Some('t') => parts.last_mut()?.push('\t'),
+                Some(other) => {
+                    parts.last_mut()?.push('\\');
+                    parts.last_mut()?.push(other);
+                }
+                None => parts.last_mut()?.push('\\'),
+            },
+            '/' if parts.len() < 3 => parts.push(String::new()),
+            _ => parts.last_mut()?.push(c),
+        }
+    }
+    let from = parts.first()?.clone();
+    let to = parts.get(1).cloned().unwrap_or_default();
+    let flags = parts.get(2).cloned().unwrap_or_default();
+    Some((from, to, flags))
+}
+
+/// 下線を引く。引き方で形が変わる。
+///
+/// **波線は「誤り」を意味する。** rustc も clang もそこに意味を乗せてくる
+/// ので、全部 1 本線に丸めると出力が嘘になる。
+fn draw_underline(r: &mut Renderer, x: f32, y: f32, w: f32, under: Underline, color: Rgba) {
+    const Y: f32 = 0.92;
+    const T: f32 = 0.06;
+    match under {
+        Underline::None => {}
+        Underline::Single => r.rect(x, y + Y, w, T, color),
+        Underline::Double => {
+            r.rect(x, y + Y - 0.08, w, T * 0.8, color);
+            r.rect(x, y + Y + 0.06, w, T * 0.8, color);
+        }
+        Underline::Curly => {
+            // 本物の曲線は引けない（矩形しか出せない）ので、上下に振る。
+            // **形が違うと分かれば足りる**ので、段の数を稼ぐより
+            // 1 段の高さを取る。
+            let step: f32 = 0.25;
+            let mut i = 0;
+            let mut at: f32 = 0.0;
+            while at < w {
+                let seg = step.min(w - at);
+                let up = if i % 2 == 0 { -0.05 } else { 0.05 };
+                r.rect(x + at, y + Y + up, seg, T, color);
+                at += seg;
+                i += 1;
+            }
+        }
+        Underline::Dotted | Underline::Dashed => {
+            let (on, off): (f32, f32) = if under == Underline::Dotted {
+                (0.12, 0.14)
+            } else {
+                (0.3, 0.2)
+            };
+            let mut at: f32 = 0.0;
+            while at < w {
+                r.rect(x + at, y + Y, on.min(w - at), T, color);
+                at += on + off;
+            }
+        }
+    }
+}
+
 fn worth_labelling(text: &str, cwd: Option<&str>) -> bool {
     if matches!(open_kind(text), Some(OpenKind::Url)) {
         return true;
@@ -5044,7 +5280,12 @@ impl ApplicationHandler for App {
             .with_title("tsumugi")
             .with_window_icon(icon)
             .with_transparent(self.cfg.transparent())
-            .with_inner_size(LogicalSize::new(1100.0, 700.0));
+            // 前回の大きさで開く。**毎回引き伸ばさせない。**
+            .with_inner_size(
+                config::last_size().map_or(LogicalSize::new(1100.0, 700.0), |(w, h)| {
+                    LogicalSize::new(w, h)
+                }),
+            );
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -5125,7 +5366,14 @@ impl ApplicationHandler for App {
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                // ドラッグの最後の 1 回を取りこぼさない。
+                if let Some(w) = &self.window {
+                    let size = w.inner_size().to_logical::<f64>(w.scale_factor());
+                    config::remember_size_now(size.width, size.height);
+                }
+                event_loop.exit();
+            }
 
             WindowEvent::Resized(size) => {
                 if let Some(r) = &mut self.renderer {
@@ -5133,6 +5381,10 @@ impl ApplicationHandler for App {
                 }
                 self.resize_window();
                 if let Some(w) = &self.window {
+                    // 次に開くときの大きさ。**動かすたびに覚える**ので、
+                    // どう終わっても最後の形が残る（落ちたときも）。
+                    let logical = size.to_logical::<f64>(w.scale_factor());
+                    config::remember_size(logical.width, logical.height);
                     w.request_redraw();
                 }
             }
@@ -5652,7 +5904,12 @@ mod tests {
     }
 
     fn attrs(fg: tsg_term::Color, bg: tsg_term::Color, flags: u8) -> Attrs {
-        Attrs { fg, bg, flags }
+        Attrs {
+            fg,
+            bg,
+            flags,
+            ..Attrs::default()
+        }
     }
 
     fn th() -> Theme {
@@ -5758,6 +6015,30 @@ mod tests {
         assert_eq!(open_kind("abc"), None, "3 桁ではハッシュと言えない");
     }
 
+    /// `s/古い/新しい/` を割る。
+    #[test]
+    fn a_substitution_splits_into_three() {
+        let (a, b, f) = split_subst("/foo/bar/").expect("割れない");
+        assert_eq!((a.as_str(), b.as_str(), f.as_str()), ("foo", "bar", ""));
+
+        let (a, b, f) = split_subst("/foo/bar/g").expect("割れない");
+        assert_eq!((a.as_str(), b.as_str(), f.as_str()), ("foo", "bar", "g"));
+    }
+
+    /// **区切りを含む文字列も置ける。** パスを置き換えるのはよくあること。
+    #[test]
+    fn an_escaped_slash_is_a_slash_not_a_separator() {
+        let (a, b, _) = split_subst(r"/src\/old/src\/new/").expect("割れない");
+        assert_eq!((a.as_str(), b.as_str()), ("src/old", "src/new"));
+    }
+
+    /// 終わりの `/` を書かなくても通す（`s/foo/bar` で足りる）。
+    #[test]
+    fn a_missing_final_slash_still_works() {
+        let (a, b, _) = split_subst("/foo/bar").expect("割れない");
+        assert_eq!((a.as_str(), b.as_str()), ("foo", "bar"));
+    }
+
     #[test]
     fn a_windows_drive_letter_is_not_a_line_number() {
         assert_eq!(strip_position(r"C:\dev\x.toml"), r"C:\dev\x.toml");
@@ -5845,6 +6126,7 @@ mod tests {
             layout: Layout::leaf(id),
             active_pane: id,
             zoom: None,
+            name: None,
         };
         let mut app = App::new(&cli::Cli::default(), Config::default());
         app.rows = 24;

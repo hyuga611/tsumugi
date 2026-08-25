@@ -285,6 +285,64 @@ pub fn take_first_run() -> bool {
     welcome_mark().is_none_or(|m| take_first_run_at(&m))
 }
 
+/// 前回の窓の大きさ。**次に開いたとき同じ大きさで出す。**
+///
+/// 毎回既定の大きさに戻る端末は、開くたびに窓を引き伸ばすことになる。
+/// 設定に書かせるものではない（書きたい人は書けるが、書かない人のほうが多い）。
+fn size_mark() -> Option<PathBuf> {
+    Some(path()?.with_file_name("window"))
+}
+
+/// 覚えておく大きさ（論理ピクセル）。
+///
+/// **ドラッグ中は書かない。** 窓の端を掴んで動かすと 1 秒に何十回も
+/// 呼ばれる。掴んでいる間ずっとファイルを書くのは、得るものに対して高い。
+/// 手を離したあとの最後の 1 回が残ればいい。
+pub fn remember_size(w: f64, h: f64) {
+    remember_size_inner(w, h, false);
+}
+
+/// 待たずに書く。閉じる直前に、ドラッグの最後の 1 回を取りこぼさないため。
+pub fn remember_size_now(w: f64, h: f64) {
+    remember_size_inner(w, h, true);
+}
+
+fn remember_size_inner(w: f64, h: f64, force: bool) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static LAST: AtomicU64 = AtomicU64::new(0);
+
+    // 畳んだ / 極端に小さいときは覚えない。次に開けなくなる。
+    if !(200.0..=20000.0).contains(&w) || !(150.0..=20000.0).contains(&h) {
+        return;
+    }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64);
+    let last = LAST.load(Ordering::Relaxed);
+    if !force && now.saturating_sub(last) < 500 {
+        return;
+    }
+    LAST.store(now, Ordering::Relaxed);
+
+    let Some(mark) = size_mark() else {
+        return;
+    };
+    if let Some(dir) = mark.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(mark, format!("{}x{}", w.round(), h.round()));
+}
+
+/// 前回の大きさ。無ければ既定。
+pub fn last_size() -> Option<(f64, f64)> {
+    let text = std::fs::read_to_string(size_mark()?).ok()?;
+    let (w, h) = text.trim().split_once('x')?;
+    let (w, h) = (w.parse::<f64>().ok()?, h.parse::<f64>().ok()?);
+    // 壊れた値で開かない。
+    (w >= 200.0 && h >= 150.0 && w <= 20000.0 && h <= 20000.0).then_some((w, h))
+}
+
 fn take_first_run_at(mark: &std::path::Path) -> bool {
     if mark.exists() {
         return false;

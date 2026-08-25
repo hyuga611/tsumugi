@@ -74,12 +74,58 @@ pub fn indexed_rgb(i: u8) -> [u8; 3] {
     }
 }
 
+/// 下線の引き方（SGR `4:n`）。
+///
+/// **コンパイラの出力が読めるかどうかがここで決まる。** rustc も clang も
+/// 誤りの位置を波線で指す。`4` としか読めないと、警告も誤りも同じ 1 本線に
+/// なって、色でしか区別が付かなくなる。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Underline {
+    #[default]
+    None,
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
+}
+
+impl Underline {
+    /// SGR の `4:n` の n。
+    pub fn from_style(n: u16) -> Self {
+        match n {
+            1 => Self::Single,
+            2 => Self::Double,
+            3 => Self::Curly,
+            4 => Self::Dotted,
+            5 => Self::Dashed,
+            _ => Self::None,
+        }
+    }
+
+    fn style(self) -> u16 {
+        match self {
+            Self::None => 0,
+            Self::Single => 1,
+            Self::Double => 2,
+            Self::Curly => 3,
+            Self::Dotted => 4,
+            Self::Dashed => 5,
+        }
+    }
+}
+
 /// 文字属性。ビットで持つ（`bitflags` を足すほどの規模ではない）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Attrs {
     pub fg: Color,
     pub bg: Color,
     pub flags: u8,
+    /// 下線の引き方。`UNDERLINE` の旗と**必ず同時に動く**
+    /// （旗だけ見る古い経路が嘘をつかないように）。
+    pub under: Underline,
+    /// 下線の色（SGR 58）。`Default` は文字と同じ色。
+    pub ul_color: Color,
 }
 
 impl Attrs {
@@ -104,6 +150,16 @@ impl Attrs {
         self.flags &= !flag;
     }
 
+    /// 下線を引き方ごと決める。旗も揃える。
+    pub fn set_underline(&mut self, under: Underline) {
+        self.under = under;
+        if under == Underline::None {
+            self.unset(Self::UNDERLINE);
+        } else {
+            self.set(Self::UNDERLINE);
+        }
+    }
+
     /// 消去したセルが引き継ぐもの。
     ///
     /// 背景色だけを持ち越す。xterm 以来の「背景で消す」挙動で、
@@ -113,6 +169,8 @@ impl Attrs {
             fg: Color::Default,
             bg: self.bg,
             flags: 0,
+            under: Underline::None,
+            ul_color: Color::Default,
         }
     }
 
@@ -146,8 +204,14 @@ impl Attrs {
                 out.push_str(&code.to_string());
             }
         }
+        // 下線は引き方まで書く。**1 本線に丸めない**（波線が消えると
+        // 誤りと警告が見分けられなくなる）。
+        if self.under != Underline::None && self.under != Underline::Single {
+            out.push_str(&format!(";4:{}", self.under.style()));
+        }
         push_color(&mut out, self.fg, 38);
         push_color(&mut out, self.bg, 48);
+        push_color(&mut out, self.ul_color, 58);
         out.push('m');
         out
     }
@@ -187,7 +251,7 @@ mod tests {
         let mut a = Attrs {
             fg: Color::Indexed(1),
             bg: Color::Indexed(4),
-            flags: 0,
+            ..Attrs::default()
         };
         assert_eq!(a.resolved(), (Color::Indexed(1), Color::Indexed(4)));
         a.set(Attrs::REVERSE);
@@ -201,6 +265,7 @@ mod tests {
             fg: Color::Indexed(3),
             bg: Color::Rgb(10, 20, 30),
             flags: Attrs::BOLD | Attrs::UNDERLINE,
+            ..Attrs::default()
         };
         let e = a.erased();
         assert_eq!(e.bg, Color::Rgb(10, 20, 30));
@@ -215,8 +280,24 @@ mod tests {
             fg: Color::Indexed(12),
             bg: Color::Rgb(1, 2, 3),
             flags: Attrs::BOLD | Attrs::UNDERLINE,
+            under: Underline::Single,
+            ..Attrs::default()
         };
         assert_eq!(a.sgr(), "\x1b[0;1;4;38;5;12;48;2;1;2;3m");
         assert_eq!(Attrs::default().sgr(), "\x1b[0m");
+    }
+
+    /// **引き方も色も往復する。** 波線が 1 本線に戻ると、
+    /// 再アタッチしただけで誤りの印が消える。
+    #[test]
+    fn a_curly_underline_survives_the_round_trip() {
+        let mut a = Attrs::default();
+        a.set_underline(Underline::Curly);
+        a.ul_color = Color::Rgb(255, 0, 0);
+        assert_eq!(a.sgr(), "[0;4;4:3;58;2;255;0;0m");
+        assert!(a.has(Attrs::UNDERLINE), "旗が揃っていない");
+
+        a.set_underline(Underline::None);
+        assert!(!a.has(Attrs::UNDERLINE), "消したのに旗が残っている");
     }
 }

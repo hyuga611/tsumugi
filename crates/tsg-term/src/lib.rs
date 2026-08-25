@@ -14,7 +14,7 @@ pub mod sixel;
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use vte::{Params, Perform};
 
-pub use attrs::{Attrs, Color};
+pub use attrs::{Attrs, Color, Underline};
 pub use grid::{
     AmbiguousWidth, Cell, Cursor, Grid, Line, ambiguous, char_width, set_ambiguous, width_of,
 };
@@ -111,6 +111,10 @@ pub struct TermState {
     /// `eza` `ls --hyperlink` `cargo` `bat` が既に出している。画面の字から
     /// パスらしきものを当てにいくのと違い、**相手が明示した行き先**なので確か。
     pub links: Vec<String>,
+    /// 中の道具からの呼び出し（OSC 9 / 777）。読んだら消える。
+    ///
+    /// **溜めない。** 知らせは今のことなので、古いものを積んでも意味が無い。
+    notify: Option<String>,
     /// OSC 52 で相手が置いたクリップボードの中身。ホストが取り出す。
     ///
     /// **読み出し（`?`）には答えない。** 答えると、画面に字を出しただけで
@@ -166,6 +170,7 @@ impl TermState {
             cwd: None,
             osc_log: Vec::new(),
             log_osc: false,
+            notify: None,
             images: Vec::new(),
             pending_image: None,
             sixel: None,
@@ -332,14 +337,19 @@ impl TermState {
                 1 => pen.set(Attrs::BOLD),
                 2 => pen.set(Attrs::DIM),
                 3 => pen.set(Attrs::ITALIC),
-                4 => pen.set(Attrs::UNDERLINE),
+                // `4` だけなら 1 本線。`4:3` のように引き方が付いてくることが
+                // あり、**そこにコンパイラの意味が乗っている**（波線＝誤り）。
+                4 => {
+                    let style = sub.get(1).copied().unwrap_or(1);
+                    pen.set_underline(Underline::from_style(style));
+                }
                 5 | 6 => pen.set(Attrs::BLINK),
                 7 => pen.set(Attrs::REVERSE),
                 8 => pen.set(Attrs::HIDDEN),
                 9 => pen.set(Attrs::STRIKE),
                 21 | 22 => pen.unset(Attrs::BOLD | Attrs::DIM),
                 23 => pen.unset(Attrs::ITALIC),
-                24 => pen.unset(Attrs::UNDERLINE),
+                24 => pen.set_underline(Underline::None),
                 25 => pen.unset(Attrs::BLINK),
                 27 => pen.unset(Attrs::REVERSE),
                 28 => pen.unset(Attrs::HIDDEN),
@@ -358,6 +368,12 @@ impl TermState {
                     }
                 }
                 49 => pen.bg = Color::Default,
+                58 => {
+                    if let Some(c) = extended_color(sub, &mut iter) {
+                        self.grid.pen.ul_color = c;
+                    }
+                }
+                59 => pen.ul_color = Color::Default,
                 90..=97 => pen.fg = Color::Indexed((code - 90 + 8) as u8),
                 100..=107 => pen.bg = Color::Indexed((code - 100 + 8) as u8),
                 _ => {}
@@ -708,6 +724,31 @@ impl Perform for TermState {
                     }
                 };
             }
+            // 呼び出し（OSC 9 / OSC 777）。**長い仕事が終わったと知らせる。**
+            //
+            // 窓を見ていないときに気づけないのが、並べて使うときの一番の穴。
+            // 中の道具が「終わったよ」と言えるようにしておく。
+            //
+            // `OSC 9 ; 本文` と `OSC 777 ; notify ; 見出し ; 本文` の 2 つ。
+            // 前者は ConEmu 由来、後者は urxvt 由来で、どちらも広く使われる。
+            b"9" | b"777" => {
+                let text = if kind == b"9" {
+                    params.get(1).map(|t| sanitize_osc_text(t, 256))
+                } else if params.get(1).is_some_and(|k| k == b"notify") {
+                    // 見出しと本文。片方しか無いこともある。
+                    let head = params.get(2).map(|t| sanitize_osc_text(t, 128));
+                    let body = params.get(3).map(|t| sanitize_osc_text(t, 256));
+                    match (head, body) {
+                        (Some(h), Some(b)) if !h.is_empty() && !b.is_empty() => {
+                            Some(format!("{h}: {b}"))
+                        }
+                        (h, b) => h.filter(|s| !s.is_empty()).or(b),
+                    }
+                } else {
+                    None
+                };
+                self.notify = text.filter(|t| !t.is_empty());
+            }
             // 前景 / 背景の問い合わせ。nvim はこれで明暗を決める。
             // **答えないと、暗い背景に暗い字を置かれる。**
             b"10" | b"11" => {
@@ -790,6 +831,11 @@ impl Terminal {
     /// 畳んだ範囲が別の行を指す。
     pub fn take_dropped(&mut self) -> usize {
         std::mem::take(&mut self.dropped)
+    }
+
+    /// 中の道具からの呼び出しを 1 つ取り出す（無ければ `None`）。
+    pub fn take_notify(&mut self) -> Option<String> {
+        self.state.notify.take()
     }
 
     /// 幅を変える。**印と絵の行番号も一緒に寄せる。**
@@ -1164,5 +1210,40 @@ mod tests {
         t.feed(b"\x1b]7;file://host/c/dev\x07");
         assert_eq!(t.state.title, "my title");
         assert_eq!(t.state.cwd.as_deref(), Some("file://host/c/dev"));
+    }
+
+    /// **中の道具が「終わったよ」と言える。** 窓を見ていないときに
+    /// 気づけないのが、並べて使うときの一番の穴。
+    #[test]
+    fn a_program_can_call_for_you() {
+        let mut t = term();
+        t.feed("]9;ビルドが終わりました".as_bytes());
+        assert_eq!(t.take_notify().as_deref(), Some("ビルドが終わりました"));
+        assert!(t.take_notify().is_none(), "2 回取れてしまう");
+
+        // urxvt 由来の形。見出しと本文。
+        t.feed(b"]777;notify;build;done");
+        assert_eq!(t.take_notify().as_deref(), Some("build: done"));
+
+        // `notify` 以外の 777 は知らない。**勝手に鳴らさない。**
+        t.feed(b"]777;something;else");
+        assert!(t.take_notify().is_none());
+    }
+
+    /// 下線の引き方（`4:n`）を読む。**波線が 1 本線に丸まらない。**
+    #[test]
+    fn an_underline_style_is_read_not_flattened() {
+        let mut t = term();
+        t.feed(b"[4:3;58;2;255;0;0mx");
+        let c = t.state.grid.document_line(0).expect("行が無い").cells[0].clone();
+        assert_eq!(c.attrs.under, Underline::Curly);
+        assert_eq!(c.attrs.ul_color, Color::Rgb(255, 0, 0));
+        assert!(c.attrs.has(Attrs::UNDERLINE), "旗が揃っていない");
+
+        // `4` だけなら 1 本線。`24` で消える。
+        t.feed(b"[0m[4my[24mz");
+        let line = &t.state.grid.document_line(0).expect("行が無い").cells;
+        assert_eq!(line[1].attrs.under, Underline::Single);
+        assert_eq!(line[2].attrs.under, Underline::None);
     }
 }

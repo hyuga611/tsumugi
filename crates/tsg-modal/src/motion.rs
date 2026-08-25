@@ -8,6 +8,8 @@ use tsg_buffer::{
     Buffer, Pos, clamp, first_non_blank, is_blank_line, last_col, next_col, prev_col,
 };
 
+use crate::search::Search;
+
 /// 画面の見え方。`H` `M` `L` とページ送りに必要。
 /// 描画クレートに依存しないよう、値として受け取る。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -391,21 +393,20 @@ fn line_and_cols(buf: &dyn Buffer, line: usize) -> (String, Vec<usize>) {
 ///
 /// 端で止まると「無い」のか「そこまで」なのかが区別できない。回るほうが、
 /// 打ち間違えたときにすぐ分かる。大小は区別しない（打つ側の負担を減らす）。
-pub fn find_match(buf: &dyn Buffer, from: Pos, query: &str, back: bool) -> Option<Pos> {
+pub fn find_match(buf: &dyn Buffer, from: Pos, search: &Search, back: bool) -> Option<Pos> {
     let n = buf.line_count();
-    if n == 0 || query.is_empty() {
+    if n == 0 || search.is_empty() {
         return None;
     }
-    let q = query.to_lowercase();
 
     let hit = |line: usize, before: Option<usize>, after: Option<usize>| -> Option<Pos> {
         let (text, cols) = line_and_cols(buf, line);
         let mut found: Option<usize> = None;
-        let mut at = 0usize;
-        while let Some(i) = text[at..].find(&q) {
-            let byte = at + i;
+        for (byte, _) in search.ranges(&text) {
             let idx = text[..byte].chars().count();
-            let col = *cols.get(idx)?;
+            let Some(col) = cols.get(idx).copied() else {
+                continue;
+            };
             let ok = match (before, after) {
                 (Some(b), _) => col < b,
                 (_, Some(a)) => col > a,
@@ -417,7 +418,6 @@ pub fn find_match(buf: &dyn Buffer, from: Pos, query: &str, back: bool) -> Optio
                     break; // 前から見て最初の 1 つ
                 }
             }
-            at = byte + q.len().max(1);
         }
         found.map(|col| Pos::new(line, col))
     };
@@ -448,35 +448,32 @@ pub fn find_match(buf: &dyn Buffer, from: Pos, query: &str, back: bool) -> Optio
 }
 
 /// その行の一致（開始桁, 桁数）。強調に使う。
-pub fn matches_in(buf: &dyn Buffer, line: usize, query: &str) -> Vec<(usize, usize)> {
-    if query.is_empty() {
+pub fn matches_in(buf: &dyn Buffer, line: usize, search: &Search) -> Vec<(usize, usize)> {
+    if search.is_empty() {
         return Vec::new();
     }
     let (text, cols) = line_and_cols(buf, line);
-    let q = query.to_lowercase();
     let mut out = Vec::new();
-    let mut at = 0usize;
-    while let Some(i) = text[at..].find(&q) {
-        let byte = at + i;
-        let idx = text[..byte].chars().count();
-        let end_idx = idx + q.chars().count();
-        if let Some(start) = cols.get(idx).copied() {
-            // 行末で終わるときの終端桁。**最後のセルが全角なら 2 桁**を
-            // 数える。`+1` で済ませると、全角で終わる一致の強調が 1 桁足りない。
-            let end = match cols.get(end_idx).copied() {
-                Some(e) => e,
-                None => {
-                    let last = cols.last().copied().unwrap_or(start);
-                    let width = buf
-                        .cells(line)
-                        .and_then(|c| c.get(last))
-                        .map_or(1usize, |c| usize::from(c.width).max(1));
-                    last + width
-                }
-            };
-            out.push((start, end.saturating_sub(start).max(1)));
-        }
-        at = byte + q.len().max(1);
+    for (from, to) in search.ranges(&text) {
+        let idx = text[..from].chars().count();
+        let end_idx = text[..to].chars().count();
+        let Some(start) = cols.get(idx).copied() else {
+            continue;
+        };
+        // 行末で終わるときの終端桁。**最後のセルが全角なら 2 桁**を
+        // 数える。`+1` で済ませると、全角で終わる一致の強調が 1 桁足りない。
+        let end = match cols.get(end_idx).copied() {
+            Some(e) => e,
+            None => {
+                let last = cols.last().copied().unwrap_or(start);
+                let width = buf
+                    .cells(line)
+                    .and_then(|c| c.get(last))
+                    .map_or(1usize, |c| usize::from(c.width).max(1));
+                last + width
+            }
+        };
+        out.push((start, end.saturating_sub(start).max(1)));
     }
     out
 }
@@ -489,7 +486,7 @@ pub fn apply(
     buf: &dyn Buffer,
     view: View,
     last_find: Option<(char, bool, bool)>,
-    search: Option<&str>,
+    search: Option<&Search>,
 ) -> Pos {
     let count = count.max(1);
     let last_line = buf.line_count().saturating_sub(1);
@@ -710,8 +707,12 @@ mod tests {
     fn a_match_is_reported_in_columns_not_characters() {
         let buf = crate::FileBuffer::from_text("あいうzzz", tsg_term::AmbiguousWidth::Wide);
         // 「あいう」で 6 桁ぶん進んだところに z がある
-        assert_eq!(matches_in(&buf, 0, "zzz"), vec![(6, 3)]);
-        let p = find_match(&buf, Pos::new(0, 0), "zzz", false).expect("見つからない");
+        assert_eq!(
+            matches_in(&buf, 0, &Search::new("zzz", false)),
+            vec![(6, 3)]
+        );
+        let p = find_match(&buf, Pos::new(0, 0), &Search::new("zzz", false), false)
+            .expect("見つからない");
         assert_eq!(p, Pos::new(0, 6));
     }
 
@@ -719,10 +720,12 @@ mod tests {
     fn searching_wraps_around_the_document() {
         let buf = crate::FileBuffer::from_text("aaa\nbbb\nccc", tsg_term::AmbiguousWidth::Narrow);
         // 末尾から前へ探すと先頭へ回る
-        let p = find_match(&buf, Pos::new(2, 0), "aaa", false).expect("回らなかった");
+        let p = find_match(&buf, Pos::new(2, 0), &Search::new("aaa", false), false)
+            .expect("回らなかった");
         assert_eq!(p.line, 0);
         // 先頭から後ろ向きに探すと末尾へ回る
-        let p = find_match(&buf, Pos::new(0, 0), "ccc", true).expect("回らなかった");
+        let p = find_match(&buf, Pos::new(0, 0), &Search::new("ccc", false), true)
+            .expect("回らなかった");
         assert_eq!(p.line, 2);
     }
 
@@ -730,7 +733,7 @@ mod tests {
     fn searching_ignores_case() {
         let buf = crate::FileBuffer::from_text("Hello World", tsg_term::AmbiguousWidth::Narrow);
         assert_eq!(
-            find_match(&buf, Pos::new(0, 0), "world", false),
+            find_match(&buf, Pos::new(0, 0), &Search::new("world", false), false),
             Some(Pos::new(0, 6))
         );
     }
@@ -738,10 +741,14 @@ mod tests {
     #[test]
     fn stepping_forward_then_back_returns_to_the_same_place() {
         let buf = crate::FileBuffer::from_text("x a x a x", tsg_term::AmbiguousWidth::Narrow);
-        let first = find_match(&buf, Pos::new(0, 0), "a", false).expect("1 つ目");
-        let second = find_match(&buf, first, "a", false).expect("2 つ目");
+        let first =
+            find_match(&buf, Pos::new(0, 0), &Search::new("a", false), false).expect("1 つ目");
+        let second = find_match(&buf, first, &Search::new("a", false), false).expect("2 つ目");
         assert_ne!(first, second);
-        assert_eq!(find_match(&buf, second, "a", true), Some(first));
+        assert_eq!(
+            find_match(&buf, second, &Search::new("a", false), true),
+            Some(first)
+        );
     }
 
     use super::*;

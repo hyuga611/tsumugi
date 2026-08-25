@@ -358,6 +358,12 @@ pub struct TabInfo {
     /// 分割比まで失う。出すものを選ぶだけにしてある。
     #[serde(default)]
     pub zoom: Option<u32>,
+    /// 人が付けた名前。無ければ中で走っているものの題名を出す。
+    ///
+    /// **付けた名前が勝つ。** タブに名前を付けるのは、中の題名では
+    /// 区別が付かないからで、あとから題名で上書きしたら意味が無い。
+    #[serde(default)]
+    pub name: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -457,6 +463,11 @@ pub enum ClientMsg {
     },
     ClosePane {
         pane: u32,
+    },
+    /// タブに名前を付ける（空なら外す）。
+    RenameTab {
+        tab: u32,
+        name: String,
     },
     /// 境界のドラッグ。`pane` の取り分を隣から `delta` だけ奪う。
     ResizeSplit {

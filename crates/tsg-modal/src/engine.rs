@@ -16,6 +16,7 @@ use crate::command::{
 };
 use crate::format;
 use crate::motion::{self, Motion, MotionKind, View};
+use crate::search::Search;
 use crate::t;
 use crate::textobj::{self, TextObject};
 
@@ -288,7 +289,12 @@ pub struct Engine {
     ///
     /// **エンジンが持つ。** 画面の側に置くと、ペインを切り替えた瞬間に
     /// `n` が何を指すのか分からなくなる。
-    pub search: Option<String>,
+    pub search: Option<Search>,
+    /// 次に開く探し窓を正規表現として読むか（`g/`）。
+    ///
+    /// **既定は素の文字列。** 端末で探すのはパスやエラー文で、`.` も `(` も
+    /// そのままの字として入っている（`search.rs`）。
+    pub search_regex: bool,
     view: View,
     help_visible: bool,
     pub registers: Registers,
@@ -314,6 +320,7 @@ impl Engine {
             pending: Pending::default(),
             last_find: None,
             search: None,
+            search_regex: false,
             view: View::default(),
             help_visible: false,
             registers: Registers::default(),
@@ -464,6 +471,14 @@ impl Engine {
                 }
                 Awaiting::GPrefix => {
                     return match c {
+                        // `g/` は正規表現として探す。`/` は打った通り。
+                        // **既定を入れ替えない。** 端末で探すのはパスや
+                        // エラー文で、`.` も `(` もそのままの字。
+                        '/' => {
+                            self.pending.clear();
+                            self.search_regex = true;
+                            Some(Command::OpenSearch { back: false })
+                        }
                         'g' => {
                             let n = self.pending.count.take();
                             match n {
@@ -645,8 +660,14 @@ impl Engine {
             '{' => self.motion_command(Motion::ParaBack, buf),
             '}' => self.motion_command(Motion::ParaFwd, buf),
             '%' => self.motion_command(Motion::MatchPair, buf),
-            '/' => Some(Command::OpenSearch { back: false }),
-            '?' => Some(Command::OpenSearch { back: true }),
+            '/' => {
+                self.search_regex = false;
+                Some(Command::OpenSearch { back: false })
+            }
+            '?' => {
+                self.search_regex = false;
+                Some(Command::OpenSearch { back: true })
+            }
             'n' => self.motion_command(Motion::SearchNext, buf),
             'N' => self.motion_command(Motion::SearchPrev, buf),
             'H' => self.motion_command(Motion::ScreenTop, buf),
@@ -775,7 +796,14 @@ impl Engine {
             "layout.equalize" => Command::Mux(MuxRequest::Equalize),
             "layout.sessions" => Command::Mux(MuxRequest::Sessions),
             "agent.next" => Command::Mux(MuxRequest::NextAgent),
-            "search.open" => Command::OpenSearch { back: false },
+            "search.open" => {
+                self.search_regex = false;
+                Command::OpenSearch { back: false }
+            }
+            "search.regex" => {
+                self.search_regex = true;
+                Command::OpenSearch { back: false }
+            }
             "hints" => Command::Mux(MuxRequest::Hints),
             "fold.toggle" => Command::Mux(MuxRequest::ToggleFold),
             "agent.broadcast" => Command::Mux(MuxRequest::Broadcast),
@@ -802,6 +830,11 @@ impl Engine {
             "edit.undo" => Command::History(HistoryAction::Undo),
             "edit.redo" => Command::History(HistoryAction::Redo),
             "file.open" => Command::Palette("e "),
+            // どれも入力欄へ書き足す形。**入り口を 2 つ作らない**
+            // （`:e` と同じ欄で受ける）。
+            "layout.tabname" => Command::Palette("tabname "),
+            "edit.substitute" => Command::Palette("s/"),
+            "motion.goto_line" => Command::Palette(""),
             "file.save" => Command::File(FileAction::Save),
             "file.close" => Command::File(FileAction::Close),
             "op.delete" | "op.change" | "op.format" | "op.pipe" => {
@@ -1048,7 +1081,7 @@ impl Engine {
             buf,
             self.view,
             self.last_find,
-            self.search.as_deref(),
+            self.search.as_ref(),
         );
 
         if let Some(op) = self.pending.operator.take() {
@@ -1106,7 +1139,7 @@ impl Engine {
                     buf,
                     self.view,
                     self.last_find,
-                    self.search.as_deref(),
+                    self.search.as_ref(),
                 );
                 self.cursor = target;
                 if self.mode == Mode::OperatorPending {
@@ -1140,7 +1173,7 @@ impl Engine {
                 vec![Effect::OpenSearch { back }]
             }
             Command::SetSearch(q) => {
-                self.search = (!q.is_empty()).then_some(q);
+                self.search = (!q.is_empty()).then(|| Search::new(&q, self.search_regex));
                 Vec::new()
             }
             Command::Palette(prefix) => {

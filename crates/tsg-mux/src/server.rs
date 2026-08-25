@@ -359,6 +359,7 @@ impl State {
                         .unwrap_or_else(|| layout.panes().first().copied().unwrap_or_default()),
                     layout,
                     zoom: None,
+                    name: t.name.clone(),
                 })
             })
             .collect();
@@ -405,6 +406,7 @@ impl State {
             layout: Layout::leaf(pane),
             active_pane: pane,
             zoom: None,
+            name: None,
         });
         self.active_tab = id;
         Ok(id)
@@ -653,6 +655,18 @@ impl State {
                 let info = self.info();
                 self.broadcast(&ServerMsg::Layout(info));
                 self.shape_changed();
+            }
+
+            ClientMsg::RenameTab { tab, name } => {
+                // 長すぎる名前はタブの並びを潰す。切り詰めて受ける
+                // （断るより、入るところまで入れたほうが使える）。
+                let name: String = name.trim().chars().take(32).collect();
+                if let Some(t) = self.tabs.iter_mut().find(|t| t.id == tab) {
+                    t.name = (!name.is_empty()).then_some(name);
+                    let info = self.info();
+                    self.broadcast(&ServerMsg::Layout(info));
+                    self.shape_changed();
+                }
             }
 
             ClientMsg::ClosePane { pane } => {
