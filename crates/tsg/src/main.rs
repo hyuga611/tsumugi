@@ -1289,7 +1289,12 @@ impl App {
                         view.file = None;
                         view.preview = None;
                         view.follow_tail = true;
+                        // **ファイルの誤りを端末の上に残さない。** 閉じたあとも
+                        // 波線が浮いたままになっていた（実機の絵で見つけた）。
+                        view.diagnostics.clear();
+                        view.syntax_at.clear();
                     }
+                    self.sync_error_lines();
                     self.status_msg = t!("端末に戻りました", "back to the terminal").into();
                     got = true;
                 }

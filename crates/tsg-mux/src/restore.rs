@@ -97,10 +97,15 @@ pub fn resume_command(command: &[String]) -> Vec<String> {
         return command.to_vec();
     };
     // `C:\...\claude.cmd` のような形でも拾えるように、名前だけを見る。
-    let name = std::path::Path::new(program)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or(program)
+    //
+    // **区切りは自分で見る。** `Path` は走っている OS の区切りしか知らないので、
+    // Unix で Windows の綴りを渡すと丸ごと 1 つの名前として扱われる
+    // （CI の macOS / Linux で落ちて気づいた）。控えを書いた側と読む側が
+    // 同じ OS でも、試験は両方で走る。
+    let base = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    let name = base
+        .rsplit_once('.')
+        .map_or(base, |(stem, _)| stem)
         .to_ascii_lowercase();
 
     // 既に「続きから」が付いているなら足さない。
