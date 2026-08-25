@@ -65,6 +65,13 @@ pub struct Theme {
     /// 記録中（マクロ）。
     pub rec_on: Rgba,
 
+    /// エージェントの状態の色。タブの印とステータスで同じ色を使う。
+    /// **返事待ちだけは目に飛び込む色**にする。人が動く番なのはそこだけ。
+    pub agent_working: Rgba,
+    pub agent_blocked: Rgba,
+    pub agent_done: Rgba,
+    pub agent_failed: Rgba,
+
     pub help_bg: Rgba,
     pub help_title: Rgba,
     pub help_body: Rgba,
@@ -178,6 +185,11 @@ impl Seed {
             syn_key: calm(s.ansi[13], 0.12),
 
             rec_on: s.ansi[9],
+
+            agent_working: calm(s.ansi[12], 0.10),
+            agent_blocked: s.ansi[11],
+            agent_done: calm(s.ansi[10], 0.10),
+            agent_failed: s.ansi[9],
 
             // 使い方の面は**沈める**。明るいテーマで白へ寄せると、既に白い背景と
             // 見分けが付かず、面として立たない。どちらの明暗でも暗い側へ動かす。
@@ -394,6 +406,10 @@ pub fn set_named(t: &mut Theme, key: &str, c: Rgba) -> bool {
         "gutter_mark" => &mut t.gut_mark,
         "hover" => &mut t.hover,
         "accent" => &mut t.accent,
+        "agent_working" => &mut t.agent_working,
+        "agent_blocked" => &mut t.agent_blocked,
+        "agent_done" => &mut t.agent_done,
+        "agent_failed" => &mut t.agent_failed,
         "mode_insert" => &mut t.mode_insert,
         "mode_normal" => &mut t.mode_normal,
         "mode_visual" => &mut t.mode_visual,

@@ -31,6 +31,17 @@ pub enum Mode {
     ShellIntegration(Option<String>),
     /// シェル統合を置いて rc に 1 行足す
     InstallShellIntegration(Option<String>),
+    /// エージェントが自分の状態を名乗る（hooks から呼ばれる）
+    AgentState(String),
+    /// どのペインのエージェントがどうなっているか
+    Agents,
+    /// その状態になるまで待つ（台本用）
+    Wait { until: String, timeout: u64 },
+    /// エージェントへ文を投げる。`--wait` を付けると返事待ちになるまで待つ
+    Prompt { text: String, wait: bool },
+    /// エージェントの hooks を入れる / 外す
+    InstallAgentHooks(Option<String>),
+    UninstallAgentHooks(Option<String>),
     /// スタートメニュー・PATH・右クリックメニューへ登録する
     Install,
     /// それを全部外す
@@ -56,6 +67,8 @@ pub struct Cli {
     pub theme: Option<String>,
     /// `--session` を明示されたか。`-e` のときの既定を変えるのに使う。
     pub session_given: bool,
+    /// 相手のペイン。書かなければ「いま選ばれているペイン」。
+    pub pane: Option<u32>,
 }
 
 impl Default for Cli {
@@ -71,6 +84,7 @@ impl Default for Cli {
             lang: None,
             theme: None,
             session_given: false,
+            pane: None,
         }
     }
 }
@@ -138,6 +152,21 @@ tsumugi (tsg) — ターミナルの画面を vim で編集できるドキュメ
 
   使い方の画面は初めて開いたときだけ全画面で出る。あとは F1 か、
   下の「? 使い方」から。
+
+AI エージェントを並べて使うなら:
+  何本も走らせると「どれが返事待ちか」を目で探す時間が仕事の大半になる。
+  エージェント自身に名乗らせて、タブの印・下の「返事待ち N」・Space a で消す。
+
+    tsg --install-agent-hooks              # Claude Code / Codex に配線する
+    Space a                                # 次の返事待ちへ飛ぶ
+    Space f                                # 画面に出てきたファイルの一覧
+    [a  ]a                                 # 前 / 次の発話へ
+
+  台本から回すこともできる:
+
+    tsg --prompt \"テストを直して\" --wait  # 投げて、返事待ちになるまで待つ
+    tsg --wait --until done --timeout 600  # 終わるまで待つ
+    tsg --agents                           # session<TAB>pane<TAB>state
 
 シェル統合（強く推奨）:
   プロンプトの位置と終了コードを OSC 133 で知らせる設定。これが無いと
@@ -225,6 +254,48 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Cli {
             "--tap" => cli.mode = Mode::Tap,
             "--list" => cli.mode = Mode::List,
             "--rpc" => cli.mode = Mode::Rpc,
+            "--pane" => {
+                cli.pane = next_value(&args, &mut i).and_then(|v| v.parse().ok());
+            }
+            "--agents" => cli.mode = Mode::Agents,
+            "--agent-state" => {
+                let v = next_value(&args, &mut i).unwrap_or_default();
+                cli.mode = Mode::AgentState(v);
+            }
+            "--install-agent-hooks" => {
+                cli.mode = Mode::InstallAgentHooks(next_value(&args, &mut i));
+            }
+            "--uninstall-agent-hooks" => {
+                cli.mode = Mode::UninstallAgentHooks(next_value(&args, &mut i));
+            }
+            "--until" => {
+                let until = next_value(&args, &mut i).unwrap_or_else(|| "blocked".into());
+                match &mut cli.mode {
+                    Mode::Wait { until: u, .. } => *u = until,
+                    Mode::Prompt { wait, .. } => *wait = true,
+                    _ => cli.mode = Mode::Wait { until, timeout: 0 },
+                }
+            }
+            "--timeout" => {
+                let t = next_value(&args, &mut i).and_then(|v| v.parse().ok()).unwrap_or(0);
+                if let Mode::Wait { timeout, .. } = &mut cli.mode {
+                    *timeout = t;
+                }
+            }
+            "--wait" => match &mut cli.mode {
+                Mode::Prompt { wait, .. } => *wait = true,
+                Mode::Wait { .. } => {}
+                _ => {
+                    cli.mode = Mode::Wait {
+                        until: "blocked".into(),
+                        timeout: 0,
+                    }
+                }
+            },
+            "--prompt" => {
+                let text = next_value(&args, &mut i).unwrap_or_default();
+                cli.mode = Mode::Prompt { text, wait: false };
+            }
             "--capture" => {
                 cli.mode = Mode::Capture(next_value(&args, &mut i).and_then(|v| v.parse().ok()));
             }

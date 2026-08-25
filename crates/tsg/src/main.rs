@@ -11,6 +11,7 @@
 //! ことだけ。モーダルの判断は `tsg-modal` にしかない。
 
 mod cli;
+mod agent_hooks;
 mod config;
 mod input;
 mod mouse;
@@ -23,6 +24,7 @@ mod session;
 mod theme;
 mod shell;
 
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -33,7 +35,7 @@ use tsg_modal::{
     Buffer, Effect, Engine, KeyInput, KeyOutcome, Mode, Pos, Range, RangeKind, View, t,
 };
 use tsg_mux::Client;
-use tsg_mux::protocol::{ClientMsg, Dir, PROTOCOL_VERSION, ServerMsg};
+use tsg_mux::protocol::{AgentState, ClientMsg, Dir, PROTOCOL_VERSION, ServerMsg};
 use tsg_render::Renderer;
 use tsg_term::{Attrs, InputOwner};
 use winit::application::ApplicationHandler;
@@ -69,6 +71,11 @@ struct App {
     session_name: String,
     /// 使い方の画面をどこまで送ったか。低いウィンドウでも最後まで読める。
     help_scroll: usize,
+    /// 前に見たエージェントの状態。**変わった瞬間**にだけ知らせるために持つ。
+    /// 状態そのものはサーバが持っているので、ここは通知のための控え。
+    agent_seen: BTreeMap<u32, AgentState>,
+    /// ウィンドウが前に居るか。裏に居るときだけタスクバーを光らせる。
+    focused: bool,
     session: Session,
     engine: Engine,
     clipboard: Option<arboard::Clipboard>,
@@ -122,6 +129,8 @@ impl App {
             client: None,
             session_name: cli.session.clone(),
             help_scroll: 0,
+            agent_seen: BTreeMap::new(),
+            focused: true,
             session: Session::default(),
             engine: Engine::new(),
             theme: cfg.theme,
@@ -363,6 +372,14 @@ impl App {
                 self.show_sessions();
                 None
             }
+            MuxRequest::NextAgent => {
+                self.jump_to_waiting_agent();
+                None
+            }
+            MuxRequest::PaneFiles => {
+                self.show_paths();
+                None
+            }
             MuxRequest::Detach => {
                 // プロセスもファイルも生かしたままウィンドウを閉じる。
                 self.send_msg(&ClientMsg::Detach);
@@ -391,7 +408,11 @@ impl App {
         }
         self.menu.hide();
         self.palette.hide();
-        self.picker.show(t!("セッション（Enter で切り替え）", "Sessions (Enter to switch)"), names);
+        self.picker.show(
+            t!("セッション（Enter で切り替え）", "Sessions (Enter to switch)"),
+            names,
+            overlay::PickKind::Session,
+        );
     }
 
     /// 別のセッションへ乗り換える。**今のセッションは殺さない**（デタッチ）。
@@ -903,6 +924,7 @@ impl App {
                         self.session.active = fallback;
                     }
                     self.sync_layout();
+                    self.notice_agent_changes();
                 }
                 ServerMsg::Snapshot { pane, lines, .. } => {
                     let area = self.area();
@@ -1133,7 +1155,15 @@ impl App {
                 .map(|v| v.term.state.title.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| format!("タブ{}", n + 1));
-            let label = format!(" {} {} ", n + 1, truncate_width(&title, 18));
+            // 状態の印はタブ名の前。**名前を読む前に目に入る**位置にする。
+            let mark = match self.tab_agent(t.id) {
+                Some(AgentState::Blocked) => "● ",
+                Some(AgentState::Failed) => "✕ ",
+                Some(AgentState::Done) => "✓ ",
+                Some(AgentState::Working) => "◍ ",
+                _ => "",
+            };
+            let label = format!(" {} {}{} ", n + 1, mark, truncate_width(&title, 18));
             let w = display_width(&label);
             if x + w > self.cols {
                 break;
@@ -1142,6 +1172,198 @@ impl App {
             x += w;
         }
         out
+    }
+
+    /// このペインに出てきたファイルパスを集めて一覧にする。
+    ///
+    /// エージェントは「どのファイルを読んで、どこを直したか」を字で言う。
+    /// **その字はもう画面に在る**ので、集めて並べれば、触られたファイルの
+    /// 一覧になる。エージェントごとの出力の形に依存しないのが要点で、
+    /// `Read(...)` のような書式を覚え込ませるとその日のうちに古くなる。
+    fn show_paths(&mut self) {
+        let Some(view) = self.active_view() else {
+            return;
+        };
+        let buf = view.buffer();
+        let mut seen: Vec<String> = Vec::new();
+        for line in 0..buf.line_count() {
+            let Some(cells) = buf.cells(line) else {
+                continue;
+            };
+            let text: String = cells.iter().map(|c| c.text.as_str()).collect();
+            for word in text.split_whitespace() {
+                // 前後の飾り（引用符・括弧・句読点）を落としてから見る。
+                let w = word.trim_matches(|c: char| {
+                    "\"'`（）()[]{}<>、。,;:！!？?".contains(c)
+                });
+                if !matches!(open_kind(w), Some(OpenKind::Path)) {
+                    continue;
+                }
+                let w = w.to_string();
+                if !seen.contains(&w) {
+                    seen.push(w);
+                }
+            }
+        }
+        if seen.is_empty() {
+            self.status_msg = t!(
+                "この画面にファイルパスはありません",
+                "no file paths on this screen"
+            )
+            .into();
+            return;
+        }
+        self.picker.show(
+            t!(
+                "この画面に出てきたファイル（Enter で開く）",
+                "Files on this screen (Enter to open)"
+            ),
+            seen,
+            overlay::PickKind::Path,
+        );
+    }
+
+    /// 状態が変わったら知らせる。**変わった瞬間だけ**。
+    ///
+    /// ずっと返事待ちのペインを見るたびに光らせても、すぐ無視するようになる。
+    /// 窓が前に居るときは何もしない（タブの印を見れば分かる）。
+    fn notice_agent_changes(&mut self) {
+        let Some(info) = self.session.info.as_ref() else {
+            return;
+        };
+        let now: Vec<(u32, Option<AgentState>)> = info
+            .panes
+            .iter()
+            .map(|p| (p.id, self.agent_state(p.id)))
+            .collect();
+        let mut call = false;
+        for (id, state) in now {
+            let Some(state) = state else {
+                self.agent_seen.remove(&id);
+                continue;
+            };
+            let before = self.agent_seen.insert(id, state);
+            if before != Some(state) && state.wants_you() {
+                call = true;
+            }
+        }
+        // 開いているペインが消えたぶんを落とす
+        let live: Vec<u32> = self
+            .session
+            .info
+            .as_ref()
+            .map(|i| i.panes.iter().map(|p| p.id).collect())
+            .unwrap_or_default();
+        self.agent_seen.retain(|id, _| live.contains(id));
+
+        if call
+            && !self.focused
+            && let Some(w) = &self.window
+        {
+            platform::attention(w.as_ref());
+        }
+    }
+
+    /// 次の「人の番」のエージェントへ飛ぶ。別のタブに居れば、そのタブごと。
+    ///
+    /// **探すのを人にやらせない。** 3 本並べて放っておくと、どれが止まって
+    /// いるのかを毎回目で探すことになる。それが要らないのがこの端末の理由。
+    fn jump_to_waiting_agent(&mut self) {
+        let waiting = self.panes_wanting_you();
+        if waiting.is_empty() {
+            self.status_msg = t!(
+                "返事を待っているエージェントはありません",
+                "no agent is waiting for you"
+            )
+            .into();
+            return;
+        }
+        // いま居るところより後ろを先に見る（何度も押すと順に回る）。
+        let here = self.session.active;
+        let next = waiting
+            .iter()
+            .copied()
+            .find(|p| *p > here)
+            .unwrap_or(waiting[0]);
+
+        // 別のタブなら、タブごと移る。
+        if let Some(info) = self.session.info.as_ref()
+            && let Some(tab) = info
+                .tabs
+                .iter()
+                .find(|t| t.layout.panes().contains(&next))
+            && tab.id != info.active_tab
+        {
+            let id = tab.id;
+            self.send_msg(&ClientMsg::SelectTab { tab: id });
+        }
+        self.session.active = next;
+        self.snap_to_live_tail();
+        let state = self.agent_state(next);
+        self.status_msg = match state {
+            Some(AgentState::Blocked) => t!("返事待ち", "waiting for you").into(),
+            Some(AgentState::Failed) => t!("失敗して止まっています", "stopped with an error").into(),
+            _ => t!("終わっています", "finished").into(),
+        };
+    }
+
+    /// そのペインのエージェントの状態。
+    ///
+    /// **名乗ったものが最優先。** 画面を読んで当てにいくと、エージェントが
+    /// 出力の形を変えた日に黙って壊れる。名乗らないペイン（ただのシェル）は
+    /// シェル統合（OSC 133）から分かる範囲だけを見る。どちらも無ければ `None`。
+    fn agent_state(&self, pane: u32) -> Option<AgentState> {
+        if let Some(s) = self
+            .session
+            .info
+            .as_ref()
+            .and_then(|i| i.panes.iter().find(|p| p.id == pane))
+            .and_then(|p| p.agent)
+        {
+            return Some(s);
+        }
+        let view = self.session.panes.get(&pane)?;
+        let last = view.term.state.marks.blocks().pop()?;
+        if last.is_running() {
+            return Some(AgentState::Working);
+        }
+        None
+    }
+
+    /// 人の番になっているペイン。タブの印・ジャンプ・通知が全部これを見る。
+    fn panes_wanting_you(&self) -> Vec<u32> {
+        let Some(info) = self.session.info.as_ref() else {
+            return Vec::new();
+        };
+        info.panes
+            .iter()
+            .filter(|p| self.agent_state(p.id).is_some_and(AgentState::wants_you))
+            .map(|p| p.id)
+            .collect()
+    }
+
+    /// タブに出す印。**一番強い状態を出す。** 3 つ並んでいて 1 つが返事待ちなら、
+    /// そのタブは返事待ちとして見えないと意味がない。
+    fn tab_agent(&self, tab: u32) -> Option<AgentState> {
+        let info = self.session.info.as_ref()?;
+        let t = info.tabs.iter().find(|t| t.id == tab)?;
+        let mut best: Option<AgentState> = None;
+        for pane in t.layout.panes() {
+            let Some(s) = self.agent_state(pane) else {
+                continue;
+            };
+            let rank = |a: AgentState| match a {
+                AgentState::Failed => 4,
+                AgentState::Blocked => 3,
+                AgentState::Done => 2,
+                AgentState::Working => 1,
+                AgentState::Idle => 0,
+            };
+            if best.is_none_or(|b| rank(s) > rank(b)) {
+                best = Some(s);
+            }
+        }
+        best
     }
 
     /// 🔴 マウスの所有者。`concept.md` の所有権モデル。判断は `tsg-term` にしか無い。
@@ -1285,8 +1507,12 @@ impl App {
         match action {
             overlay::Action::Run(id) => self.invoke(id, event_loop),
             overlay::Action::Pick(name) => {
+                let kind = self.picker.kind;
                 self.picker.hide();
-                self.switch_session(&name);
+                match kind {
+                    overlay::PickKind::Session => self.switch_session(&name),
+                    overlay::PickKind::Path => self.open_file(&name),
+                }
             }
             overlay::Action::Close => {
                 self.menu.hide();
@@ -1543,6 +1769,18 @@ impl App {
             // キーを覚えていない人が、モードを行き来する唯一の手段になる。
             (format!("  {}  ", self.engine.mode().label()), StatusTarget::Mode),
         ];
+        // 人の番になっているエージェントが居れば、その数を出す。
+        // **押すとそこへ飛ぶ。** 数を見せるだけだと、探すのは結局手作業になる。
+        let waiting = self.panes_wanting_you();
+        if !waiting.is_empty() {
+            // ⚑ は Consolas にも MS ゴシックにも無い（実機で空白になった）。
+            // 記号だけに頼らず、言葉を添える。
+            out.push((
+                format!(" ● {} {} ", t!("返事待ち", "waiting"), waiting.len()),
+                StatusTarget::AgentNext,
+            ));
+        }
+
         // ファイルを開いているあいだだけ、戻る道を常に出しておく。
         // **ここが無いと帰れない。** `:q` も右クリックメニューも知らない人には、
         // エディタになったペインが行き止まりに見える（実機で行き止まった）。
@@ -1589,6 +1827,10 @@ impl App {
             }
             StatusTarget::CloseFile => {
                 self.invoke("file.close", event_loop);
+                return;
+            }
+            StatusTarget::AgentNext => {
+                self.jump_to_waiting_agent();
                 return;
             }
             StatusTarget::Macro => {
@@ -2367,16 +2609,42 @@ impl App {
             return;
         }
         let spans = self.tab_spans();
+        // 印だけは状態の色で塗り直す。字の形（●✕✓◍）だけだと、
+        // 並んだときにどれが人待ちなのかが一瞬で分からない。
+        let marks: Vec<Option<[f32; 4]>> = spans
+            .iter()
+            .map(|(_, _, id, ..)| self.tab_agent(*id).map(|a| Self::agent_color(&th, a)))
+            .collect();
         let cols = self.cols;
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
         renderer.rect(0.0, 0.0, cols as f32, 1.0, th.status_bg);
-        for (x, w, _, label, active) in spans {
+        for (i, (x, w, _, label, active)) in spans.iter().enumerate() {
+            let (x, w, active) = (*x, *w, *active);
             if active {
                 renderer.rect(x as f32, 0.0, w as f32, 1.0, th.tab_active);
             }
-            renderer.text(x as f32, 0.0, &label, if active { th.fg } else { th.dim }, true);
+            renderer.text(x as f32, 0.0, label, if active { th.fg } else { th.dim }, true);
+            // 「 1 ● 名前 」の ● は 3 桁目から（番号が 2 桁になっても 1 桁ずれるだけ）。
+            if let Some(Some(c)) = marks.get(i) {
+                let head: String = label.chars().take_while(|c| *c != '●' && *c != '✕' && *c != '✓' && *c != '◍').collect();
+                let mark: String = label.chars().skip(head.chars().count()).take(1).collect();
+                if !mark.is_empty() {
+                    renderer.text((x + display_width(&head)) as f32, 0.0, &mark, *c, true);
+                }
+            }
+        }
+    }
+
+    /// 状態の色。タブの印とステータスで同じものを使う。
+    fn agent_color(th: &Theme, a: AgentState) -> [f32; 4] {
+        match a {
+            AgentState::Working => th.agent_working,
+            AgentState::Blocked => th.agent_blocked,
+            AgentState::Done => th.agent_done,
+            AgentState::Failed => th.agent_failed,
+            AgentState::Idle => th.dim,
         }
     }
 
@@ -2641,6 +2909,9 @@ impl App {
                 }
                 StatusTarget::CloseFile => {
                     renderer.text(x as f32, status_row, label, th.accent, true);
+                }
+                StatusTarget::AgentNext => {
+                    renderer.text(x as f32, status_row, label, th.agent_blocked, true);
                 }
                 _ => renderer.text(x as f32, status_row, label, th.status_fg, true),
             }
@@ -3085,6 +3356,8 @@ enum StatusTarget {
     Ownership,
     /// エディタを閉じて端末へ戻る
     CloseFile,
+    /// 次の「人の番」のエージェントへ飛ぶ
+    AgentNext,
 }
 
 /// ボタンの並びから当たりを引く。列の計算を描画と共有するのが要点。
@@ -3246,6 +3519,30 @@ fn help_lines() -> Vec<HelpLine> {
             t!("エディタを閉じて、元のシェルへ戻る", "close the editor and go back to the shell"),
         ),
         (":w  /  :q", t!("保存 / 端末へ戻る", "save / back to the shell")),
+    ] {
+        v.push(Pair(a, b));
+    }
+    v.push(Blank);
+    v.push(Title(t!(
+        "■ AI エージェントを並べて使うなら",
+        "■ Running AI agents side by side"
+    )));
+    for (a, b) in [
+        (
+            t!("下の ● 返事待ち", "the ● waiting count"),
+            t!("待っているエージェントの数。押すとそこへ飛ぶ", "agents waiting for you; click to jump"),
+        ),
+        (
+            t!("タブの ● ✓ ✕ ◍", "● ✓ ✕ ◍ on a tab"),
+            t!("返事待ち / 終わった / 失敗 / 動いている", "waiting / done / failed / working"),
+        ),
+        ("Space a", t!("次の返事待ちへ飛ぶ", "jump to the next agent waiting")),
+        ("Space f", t!("画面に出てきたファイルの一覧", "files mentioned on this screen")),
+        ("[a  ]a", t!("前 / 次の発話へ", "previous / next agent message")),
+        (
+            t!("（先に一度だけ）", "(once, up front)"),
+            "tsg --install-agent-hooks",
+        ),
     ] {
         v.push(Pair(a, b));
     }
@@ -3483,6 +3780,13 @@ impl ApplicationHandler for App {
                 }
             }
 
+            WindowEvent::Focused(on) => {
+                self.focused = on;
+                if on && let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+
             WindowEvent::RedrawRequested => self.draw(),
 
             _ => {}
@@ -3692,6 +3996,25 @@ fn main() -> Result<()> {
         cli::Mode::ShellIntegration(name) => return print_shell_integration(name.as_deref()),
         cli::Mode::InstallShellIntegration(name) => {
             return install_shell_integration(name.as_deref());
+        }
+        cli::Mode::Agents => return rpc::agents(&cli.session),
+        cli::Mode::AgentState(state) => {
+            return rpc::set_agent_state(&cli.session, state, cli.pane);
+        }
+        cli::Mode::Wait { until, timeout } => {
+            // 終了コードで答える。台本が `if tsg --wait --until blocked` と書ける。
+            let ok = rpc::wait(&cli.session, until, *timeout, cli.pane)?;
+            std::process::exit(i32::from(!ok) * 2);
+        }
+        cli::Mode::Prompt { text, wait } => {
+            let ok = rpc::prompt(&cli.session, text, cli.pane, *wait)?;
+            std::process::exit(i32::from(!ok) * 2);
+        }
+        cli::Mode::InstallAgentHooks(name) => {
+            return report_install(agent_hooks::install(name.as_deref()));
+        }
+        cli::Mode::UninstallAgentHooks(name) => {
+            return report_install(agent_hooks::uninstall(name.as_deref()));
         }
         cli::Mode::Run | cli::Mode::Diagnose => {}
     }

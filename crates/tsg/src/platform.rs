@@ -47,6 +47,28 @@ mod imp {
         }
     }
 
+    /// タスクバーのボタンを点滅させて呼ぶ。
+    ///
+    /// **窓が前に居るときは何もしない。** 見ている人にちらつかせても
+    /// 用が無いどころか邪魔になる。裏に回っているときだけ呼ぶ意味がある。
+    pub fn attention<W: HasWindowHandle>(window: &W) {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            FLASHW_ALL, FLASHW_TIMERNOFG, FLASHWINFO, FlashWindowEx,
+        };
+        let Some(hwnd) = hwnd_of(window) else {
+            return;
+        };
+        let info = FLASHWINFO {
+            cbSize: size_of::<FLASHWINFO>() as u32,
+            hwnd,
+            // TIMERNOFG: 前に出るまで点滅し続ける。見るまで消えないのが要点。
+            dwFlags: FLASHW_ALL | FLASHW_TIMERNOFG,
+            uCount: 0,
+            dwTimeout: 0,
+        };
+        unsafe { FlashWindowEx(&info) };
+    }
+
     /// ウィンドウの見た目を OS 側で整える。効かない環境では黙って何も起きない。
     pub fn decorate<W: HasWindowHandle>(window: &W, blur: bool) {
         let Some(hwnd) = hwnd_of(window) else {
@@ -100,6 +122,9 @@ mod imp {
     /// macOS / Linux のぼかしはコンポジタ側の仕事。
     /// ウィンドウを透過にするところまでは winit が担う。
     pub fn decorate<W: HasWindowHandle>(_window: &W, _blur: bool) {}
+
+    /// 注意を引く。winit の `request_user_attention` が担うので、ここは空。
+    pub fn attention<W: HasWindowHandle>(_window: &W) {}
 }
 
-pub use imp::{attach_parent_console, decorate, ui_language};
+pub use imp::{attach_parent_console, attention, decorate, ui_language};

@@ -23,7 +23,7 @@ use interprocess::local_socket::traits::ListenerExt as _;
 
 use crate::endpoint::Endpoint;
 use tsg_pty::{CommandBuilder, PtySession};
-use tsg_term::{AmbiguousWidth, Terminal};
+use tsg_term::Terminal;
 
 use crate::protocol::*;
 
@@ -63,6 +63,9 @@ struct Pane {
     alive: bool,
     /// エディタとして開いているファイル。**ここに置くから閉じても消えない。**
     file: Option<ServerFile>,
+    /// エージェントが名乗った状態。**サーバが持つ**ので、窓を閉じても
+    /// 開き直せば「どれが返事待ちか」が残っている。
+    agent: Option<AgentState>,
 }
 
 /// サーバが預かるファイル。
@@ -126,6 +129,7 @@ impl State {
                     cols: p.cols,
                     rows: p.rows,
                     alive: p.alive,
+                    agent: p.agent,
                 })
                 .collect(),
         }
@@ -203,12 +207,13 @@ impl State {
                 id,
                 pty,
                 writer,
-                term: Terminal::new(cols as usize, rows as usize, AmbiguousWidth::Wide),
+                term: Terminal::new(cols as usize, rows as usize, tsg_term::ambiguous()),
                 cols,
                 rows,
                 title: program,
                 alive: true,
                 file: None,
+                agent: None,
             },
         );
         Ok(id)
@@ -362,6 +367,19 @@ impl State {
                     if let Some(msg) = self.file_state(pane) {
                         self.send_to(id, &msg);
                     }
+                }
+            }
+
+            ClientMsg::SetAgentState { pane, state } => {
+                // ペインの指定が無ければ、いま選ばれているところ。
+                // hooks は自分がどのペインに居るか知らないので、これが既定。
+                let target = pane.or_else(|| self.active_pane());
+                if let Some(p) = target.and_then(|id| self.panes.get_mut(&id))
+                    && p.agent != Some(state)
+                {
+                    p.agent = Some(state);
+                    let info = self.info();
+                    self.broadcast(&ServerMsg::Layout(info));
                 }
             }
 

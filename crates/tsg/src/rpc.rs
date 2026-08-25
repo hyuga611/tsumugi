@@ -25,6 +25,7 @@ use std::io::{BufRead, Write};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use tsg_mux::protocol::AgentState;
 use tsg_mux::{Client, ClientMsg, PROTOCOL_VERSION, ServerMsg, SessionInfo};
 
 /// 窓を持たないクライアントが名乗る大きさ。
@@ -271,6 +272,118 @@ pub fn escape_bytes(bytes: &[u8]) -> String {
     out
 }
 
+// ---------------------------------------------------------------------------
+// エージェント
+// ---------------------------------------------------------------------------
+//
+// **推測しない。** 画面を読んでエージェントの状態を当てにいくと、
+// 相手が出力の形を変えた日に黙って壊れる。名乗ってもらう口を開けて、
+// hooks から呼ばせる（`--install-agent-hooks`）。
+
+/// 自分の状態を名乗る。hooks から 1 行で呼ばれる。
+///
+/// **失敗しても 0 で返す。** これはエージェントのフックの中で走るので、
+/// tsumugi が居ないところで動かしたときに相手のセッションを壊してはいけない。
+pub fn set_agent_state(session: &str, state: &str, pane: Option<u32>) -> Result<()> {
+    let Some(state) = AgentState::parse(state) else {
+        bail!("状態 '{state}' を知りません（working / blocked / done / failed / idle）");
+    };
+    let Ok((mut client, _)) = attach(session) else {
+        // 走っていないセッションへの報告は、黙って捨てる。
+        return Ok(());
+    };
+    client.send(&ClientMsg::SetAgentState { pane, state })?;
+    std::thread::sleep(Duration::from_millis(120));
+    let _ = client.send(&ClientMsg::Detach);
+    Ok(())
+}
+
+/// どのペインがどうなっているか。`session<TAB>pane<TAB>state` を 1 行ずつ。
+///
+/// `--list` の「1 行 1 セッション」を壊さないよう、別の口にしてある。
+pub fn agents(session: &str) -> Result<()> {
+    let (_client, info) = attach(session)?;
+    let mut out = std::io::stdout().lock();
+    for p in &info.panes {
+        let Some(state) = p.agent else {
+            continue;
+        };
+        writeln!(out, "{}\t{}\t{}", info.name, p.id, state.name())?;
+    }
+    Ok(())
+}
+
+/// その状態になるまで待つ。
+///
+/// 返り値は終了コードで返す（0 = なった / 2 = 時間切れ）。
+/// 台本が `if tsg --wait --until blocked; then ...` と書けることが目的。
+pub fn wait(session: &str, until: &str, timeout: u64, pane: Option<u32>) -> Result<bool> {
+    let Some(want) = AgentState::parse(until) else {
+        bail!("状態 '{until}' を知りません（working / blocked / done / failed / idle）");
+    };
+    let (client, info) = attach(session)?;
+    let matches = |i: &SessionInfo| {
+        i.panes
+            .iter()
+            .filter(|p| pane.is_none_or(|w| w == p.id))
+            .any(|p| p.agent == Some(want))
+    };
+    // 待ち始めた時点でもう条件を満たしているなら、待たない。
+    if matches(&info) {
+        return Ok(true);
+    }
+    let deadline = (timeout > 0).then(|| std::time::Instant::now() + Duration::from_secs(timeout));
+    loop {
+        if let Some(d) = deadline
+            && std::time::Instant::now() >= d
+        {
+            return Ok(false);
+        }
+        match client.recv_timeout(Duration::from_millis(500)) {
+            Some(ServerMsg::Layout(i)) if matches(&i) => return Ok(true),
+            Some(_) | None => {}
+        }
+    }
+}
+
+/// エージェントへ文を投げる。`--wait` を付けると、返事待ちに戻るまで待つ。
+///
+/// **投げた直後は `working` として扱う。** そうしないと、投げる前から
+/// `blocked` だったペインを見て「もう返ってきた」と即座に判断してしまう。
+pub fn prompt(session: &str, text: &str, pane: Option<u32>, and_wait: bool) -> Result<bool> {
+    let (mut client, info) = attach(session)?;
+    let target = pane.unwrap_or_else(|| active_pane(&info));
+    let bytes = format!("{}\r", text.replace(r"\n", "\r").replace(r"\e", "\x1b"));
+    client.send(&ClientMsg::SetAgentState {
+        pane: Some(target),
+        state: AgentState::Working,
+    })?;
+    client.send(&ClientMsg::Input {
+        pane: target,
+        data: tsg_mux::encode_bytes(bytes.as_bytes()),
+    })?;
+    if !and_wait {
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = client.send(&ClientMsg::Detach);
+        eprintln!("ペイン {target} へ投げました");
+        return Ok(true);
+    }
+    eprintln!("ペイン {target} へ投げました。返事を待っています…");
+    loop {
+        if let Some(ServerMsg::Layout(i)) = client.recv_timeout(Duration::from_millis(500)) {
+            let done = i
+                .panes
+                .iter()
+                .find(|p| p.id == target)
+                .and_then(|p| p.agent)
+                .is_some_and(AgentState::wants_you);
+            if done {
+                return Ok(true);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,3 +423,4 @@ mod tests {
         assert_eq!(NO_SIZE, (0, 0));
     }
 }
+

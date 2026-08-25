@@ -11,7 +11,7 @@
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -282,6 +282,57 @@ pub struct PaneInfo {
     pub cols: u16,
     pub rows: u16,
     pub alive: bool,
+    /// このペインで走っている AI エージェントが自分で名乗った状態。
+    ///
+    /// **推測ではなく報告。** 画面を読んで当てにいくと、エージェントが
+    /// 出力の形を変えた日に黙って壊れる。名乗らないものは `None` のままにして、
+    /// シェル統合（OSC 133）から分かる範囲だけをクライアント側で補う。
+    #[serde(default)]
+    pub agent: Option<AgentState>,
+}
+
+/// エージェントが何をしているか。`tsg --agent-state` と hooks から入る。
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentState {
+    /// 動いている
+    Working,
+    /// **人の返事を待っている。** 一番大事な状態。これを見つけるために作る
+    Blocked,
+    /// 終わった
+    Done,
+    /// 終わったが失敗した
+    Failed,
+    /// 何もしていない
+    Idle,
+}
+
+impl AgentState {
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s.to_ascii_lowercase().as_str() {
+            "working" | "busy" | "running" => Self::Working,
+            "blocked" | "waiting" | "input" => Self::Blocked,
+            "done" | "finished" | "complete" => Self::Done,
+            "failed" | "error" => Self::Failed,
+            "idle" | "none" => Self::Idle,
+            _ => return None,
+        })
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Working => "working",
+            Self::Blocked => "blocked",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Idle => "idle",
+        }
+    }
+
+    /// 人が手を出す番か。ジャンプと通知はこれを見る。
+    pub fn wants_you(self) -> bool {
+        matches!(self, Self::Blocked | Self::Done | Self::Failed)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -326,6 +377,14 @@ pub enum ClientMsg {
         /// シェルの代わりに走らせるもの（`-e`）。
         #[serde(default)]
         command: Option<Vec<String>>,
+    },
+    /// エージェントが自分の状態を名乗る（`tsg --agent-state` と hooks）。
+    ///
+    /// `pane` を書かなければ、そのタブでいま選ばれているペイン。
+    SetAgentState {
+        #[serde(default)]
+        pane: Option<u32>,
+        state: AgentState,
     },
     /// キー入力。`data` は base64。
     Input {

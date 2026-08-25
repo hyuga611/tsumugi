@@ -151,6 +151,16 @@ pub enum MuxRequest {
     Detach,
     /// セッションごと終了する。中のシェルも死ぬ。
     Shutdown,
+    /// この画面に出てきたファイルの一覧（`Space f`）。
+    ///
+    /// エージェントは触ったファイルを字で言う。**その字はもう画面に在る**ので、
+    /// 集めて並べるだけで「何を触られたか」の一覧になる。
+    PaneFiles,
+    /// 次の「人の番」のエージェントへ飛ぶ（`Space a`）。
+    ///
+    /// AI エージェントを何本も並べて放っておくと、**どれが止まって返事を
+    /// 待っているのかを目で探す時間**が仕事の大半になる。それを消す。
+    NextAgent,
 }
 
 /// ファイルバッファへの操作。実体を持つのはホスト（`tsg`）だけ。
@@ -445,6 +455,14 @@ pub const REGISTRY: &[CommandSpec] = &[
         in_palette: true,
     },
     CommandSpec {
+        id: "motion.agent",
+        title: "前 / 次のエージェントの発話へ",
+        title_en: "Previous / next agent message",
+        keys: &["[a", "]a"],
+        mouse: MousePath::Palette,
+        in_palette: true,
+    },
+    CommandSpec {
         id: "motion.match",
         title: "対応括弧へ",
         title_en: "Jump to the matching bracket",
@@ -625,6 +643,22 @@ pub const REGISTRY: &[CommandSpec] = &[
         title: "セッションの一覧（切り替え）",
         title_en: "Sessions (switch)",
         keys: &["Space S"],
+        mouse: MousePath::Menu("セッション"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "agent.files",
+        title: "この画面に出てきたファイルの一覧",
+        title_en: "Files mentioned on this screen",
+        keys: &["Space f"],
+        mouse: MousePath::Menu("ファイル"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "agent.next",
+        title: "返事を待っているエージェントへ飛ぶ",
+        title_en: "Jump to the agent waiting for you",
+        keys: &["Space a"],
         mouse: MousePath::Menu("セッション"),
         in_palette: true,
     },

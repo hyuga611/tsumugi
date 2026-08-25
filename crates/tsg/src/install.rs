@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 
 /// 入れたもの / 外したものの記録。そのまま画面に出す。
+#[derive(Default)]
 pub struct Report {
     pub done: Vec<String>,
     pub notes: Vec<String>,

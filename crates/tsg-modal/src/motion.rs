@@ -55,7 +55,23 @@ pub enum Motion {
     PrevError,
     /// `]e` 次の失敗したコマンドへ
     NextError,
+
+    // ---- AI エージェント固有 ----
+    //
+    // OSC 133 は出ない（エージェントは TUI の中で描いていて、シェルの
+    // プロンプトを出さない）。なので**行頭の印**を手がかりにする。
+    // Claude Code の `⏺`、Codex の `•` のような、発話の頭に置かれる記号。
+    /// `[a` 前の発話へ
+    PrevAgentBlock,
+    /// `]a` 次の発話へ
+    NextAgentBlock,
 }
+
+/// エージェントが自分の発話の頭に置く印。
+///
+/// **形が変わったら効かなくなる**が、効かなくても壊れない（動かないだけ）。
+/// 画面から状態を当てにいくのとは違い、間違った答えを返す余地がない。
+pub const AGENT_BULLETS: &[char] = &['⏺', '●', '◯', '✻', '✽', '❯', '▪', '·'];
 
 /// オペレータが範囲を組むときの解釈。vim と同じ3種。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,7 +93,7 @@ impl Motion {
             }
             Up | Down | DocStart | DocEnd | ToLine(_) | ScreenTop | ScreenMiddle | ScreenBottom
             | HalfPageDown | HalfPageUp | PageDown | PageUp | PrevPrompt | NextPrompt
-            | PrevError | NextError => MotionKind::Linewise,
+            | PrevError | NextError | PrevAgentBlock | NextAgentBlock => MotionKind::Linewise,
             _ => MotionKind::Exclusive,
         }
     }
@@ -351,6 +367,20 @@ pub fn apply(
             .collect()
     };
 
+    // 発話の頭。行頭（空白は飛ばす）が印で始まる行。
+    let agent_lines = || -> Vec<usize> {
+        (0..=last_line)
+            .filter(|l| {
+                buf.cells(*l)
+                    .unwrap_or(&[])
+                    .iter()
+                    .map(|c| c.text.chars().next().unwrap_or(' '))
+                    .find(|c| !c.is_whitespace())
+                    .is_some_and(|c| AGENT_BULLETS.contains(&c))
+            })
+            .collect()
+    };
+
     let target = match motion {
         Motion::Left => {
             let mut p = from;
@@ -386,6 +416,29 @@ pub fn apply(
         }
         Motion::NextPrompt | Motion::NextError => {
             let lines = prompts(matches!(motion, Motion::NextError));
+            let mut p = from.line;
+            for _ in 0..count {
+                match lines.iter().find(|l| **l > p) {
+                    Some(l) => p = *l,
+                    None => break,
+                }
+            }
+            Pos::new(p, 0)
+        }
+
+        Motion::PrevAgentBlock => {
+            let lines = agent_lines();
+            let mut p = from.line;
+            for _ in 0..count {
+                match lines.iter().rev().find(|l| **l < p) {
+                    Some(l) => p = *l,
+                    None => break,
+                }
+            }
+            Pos::new(p, 0)
+        }
+        Motion::NextAgentBlock => {
+            let lines = agent_lines();
             let mut p = from.line;
             for _ in 0..count {
                 match lines.iter().find(|l| **l > p) {

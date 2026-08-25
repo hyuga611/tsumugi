@@ -397,13 +397,26 @@ pub struct Picker {
     pub title: String,
     pub items: Vec<String>,
     pub selected: usize,
+    /// 選んだあと何をするか。**選ぶ一覧と行き先を 1 つにしておく**ので、
+    /// 呼び出し側が「いまはセッションの一覧のはず」と覚えておかなくていい。
+    pub kind: PickKind,
     offset: usize,
 }
 
+/// 選んだものの扱い。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PickKind {
+    #[default]
+    Session,
+    /// ファイルパス。選んだらそのペインで開く。
+    Path,
+}
+
 impl Picker {
-    pub fn show(&mut self, title: &str, items: Vec<String>) {
+    pub fn show(&mut self, title: &str, items: Vec<String>, kind: PickKind) {
         self.title = title.to_string();
         self.items = items;
+        self.kind = kind;
         self.selected = 0;
         self.offset = 0;
         self.open = true;
@@ -473,7 +486,7 @@ mod tests {
     #[test]
     fn the_picker_returns_the_name_that_was_chosen() {
         let mut p = Picker::default();
-        p.show("セッション", vec!["default".into(), "作業:1".into()]);
+        p.show("セッション", vec!["default".into(), "作業:1".into()], PickKind::Session);
         p.move_by(1);
         assert_eq!(p.accept(), Action::Pick("作業:1".into()));
         assert_eq!(p.click(0), Action::Pick("default".into()));
@@ -653,7 +666,7 @@ mod tests {
     #[test]
     fn the_picker_keeps_the_selection_inside_the_window() {
         let mut p = Picker::default();
-        p.show("s", (0..30).map(|i| format!("s{i}")).collect());
+        p.show("s", (0..30).map(|i| format!("s{i}")).collect(), PickKind::Session);
         for _ in 0..25 {
             p.move_by(1);
             let sel = p.selected;

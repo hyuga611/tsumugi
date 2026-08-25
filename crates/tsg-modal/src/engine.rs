@@ -462,6 +462,8 @@ impl Engine {
                         (']', true) => Motion::NextPrompt,
                         ('e', false) => Motion::PrevError,
                         ('e', true) => Motion::NextError,
+                        ('a', false) => Motion::PrevAgentBlock,
+                        ('a', true) => Motion::NextAgentBlock,
                         _ => {
                             self.pending.clear();
                             return None;
@@ -736,6 +738,12 @@ impl Engine {
             "layout.zoom" => Command::Mux(MuxRequest::Zoom),
             "layout.equalize" => Command::Mux(MuxRequest::Equalize),
             "layout.sessions" => Command::Mux(MuxRequest::Sessions),
+            "agent.next" => Command::Mux(MuxRequest::NextAgent),
+            "agent.files" => Command::Mux(MuxRequest::PaneFiles),
+            "motion.agent" => Command::Move {
+                motion: Motion::NextAgentBlock,
+                count: 1,
+            },
             // 向きが要るものは、キーで打ったのと同じ待ち状態にはできない
             // （配置モードの語彙なので）。既定の向きで 1 回動かす。
             "layout.swap" => Command::Mux(MuxRequest::Swap(FocusDir::Right)),
