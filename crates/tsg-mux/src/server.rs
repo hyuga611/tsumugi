@@ -1178,6 +1178,14 @@ fn accept_loop(
             }
             Err(_) => continue,
         };
+        // **受けた口は待つ側へ戻す。** BSD 系（macOS）では、待たない受け方を
+        // した listener から受けた口が「待たない」を引き継ぐ。そのまま読むと
+        // 中身が来ていないだけで終わったものとして扱われ、返事が返らなくなる
+        // （CI の macOS で往復が丸ごと落ちて気づいた。Linux では起きない）。
+        if polling {
+            use interprocess::local_socket::traits::Stream as _;
+            let _ = stream.set_nonblocking(false);
+        }
         let Ok(write_half) = stream.try_clone() else {
             continue;
         };
