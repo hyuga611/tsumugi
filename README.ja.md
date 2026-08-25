@@ -12,6 +12,13 @@ Rust 製。いまのところ **Windows**。macOS と Linux はビルドは通�
 
 ![tsumugi](assets/demo.gif)
 
+| | |
+|---|---|
+| ![エディタ](assets/en/editor.png) | ![差分](assets/en/diff.png) |
+| 行番号・構文強調・言語サーバの波線 | 左がシェル、右が `git diff` |
+| ![エージェント](assets/en/agents.png) | ![Markdown](assets/en/md.png) |
+| タブにエージェントの状態。下の行が「待っている数」 | Markdown をその場で読む形に |
+
 ## なぜもう 1 つ端末を作るのか
 
 **1. スクロールバックはログではなく文書。** `j` `k` `w` `[[` `]]` で歩き、

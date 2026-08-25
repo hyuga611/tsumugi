@@ -13,6 +13,13 @@ Rust. Windows today; macOS and Linux build but are **not yet tested** (see
 
 ![tsumugi](assets/demo.gif)
 
+| | |
+|---|---|
+| ![editor](assets/en/editor.png) | ![diff](assets/en/diff.png) |
+| Line numbers, syntax highlighting, and squiggles from the language server | The shell on the left, `git diff` on the right |
+| ![agents](assets/en/agents.png) | ![markdown](assets/en/md.png) |
+| Named tabs carry each agent's state; the bar counts who is waiting for you | Markdown rendered in place |
+
 ## Why another terminal
 
 **1. The scrollback is a document, not a log.** Move with `j` `k` `w` `[[` `]]`,
