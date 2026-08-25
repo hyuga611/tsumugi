@@ -141,8 +141,35 @@ mod imp {
         Ok(base)
     }
 
+    /// Unix ドメインソケットのパスに使える長さ。
+    ///
+    /// `sockaddr_un.sun_path` は 104（macOS）〜108（Linux）バイトしかない。
+    /// **macOS の一時ディレクトリはこれだけで 50 バイトを超える**ので、
+    /// 素直に繋ぐと少し長い名前で必ず溢れる（実際に CI で溢れた）。
+    const SUN_PATH_MAX: usize = 100;
+
     pub fn endpoint(session: &str) -> Result<Endpoint> {
-        let path = dir()?.join(format!("{}.sock", slug(session)));
+        let base = dir()?;
+        let mut file = format!("{}.sock", slug(session));
+        // 入り切らなければ、名前を縮めてハッシュで区別する。
+        // **潰した名前で衝突させない**ため、ハッシュは元の名前から取る。
+        let room = SUN_PATH_MAX.saturating_sub(base.as_os_str().len() + 1);
+        if file.len() > room {
+            let h = super::fnv1a(session);
+            let tail = format!("-{h:08x}.sock");
+            let head = room.saturating_sub(tail.len());
+            let mut short: String = slug(session).chars().take(head).collect();
+            short.push_str(&tail);
+            file = short;
+        }
+        let path = base.join(file);
+        if path.as_os_str().len() > SUN_PATH_MAX {
+            bail!(
+                "ソケットの置き場所が長すぎます（{} 文字）: {}",
+                path.as_os_str().len(),
+                path.display()
+            );
+        }
         Ok(Endpoint {
             display: path.display().to_string(),
             path,
@@ -241,6 +268,24 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
+    /// **`sun_path` は 104 バイトしかない。** macOS の一時ディレクトリは
+    /// それだけで 50 バイトを超えるので、少し長い名前で必ず溢れる。
+    /// 溢れる前に縮めることと、縮めても別のセッションと混ざらないこと。
+    #[cfg(unix)]
+    #[test]
+    fn a_long_session_name_still_fits_in_sun_path() {
+        let long = "a".repeat(200);
+        let a = imp::endpoint(&long).expect("作れない");
+        assert!(
+            a.path.as_os_str().len() <= 100,
+            "長すぎる: {}",
+            a.path.display()
+        );
+        // 頭が同じでも、別の名前は別の口になる
+        let b = imp::endpoint(&format!("{long}b")).expect("作れない");
+        assert_ne!(a.path, b.path, "潰した名前が衝突した");
+    }
+
     use super::*;
 
     #[test]
