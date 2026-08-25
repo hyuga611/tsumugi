@@ -364,6 +364,14 @@ pub const REGISTRY: &[CommandSpec] = &[
         in_palette: true,
     },
     CommandSpec {
+        id: "ui.opacity",
+        title: "透け具合を変える（:opacity 0.6）",
+        title_en: "Change how see-through it is (:opacity 0.6)",
+        keys: &[":opacity"],
+        mouse: MousePath::Menu("表示"),
+        in_palette: true,
+    },
+    CommandSpec {
         id: "ui.theme.yogiri",
         title: "配色: 夜霧（暗い / 既定）",
         title_en: "Theme: Yogiri (dark, default)",

@@ -24,6 +24,12 @@ use crate::textobj::{self, TextObject};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum KeyInput {
     Char(char),
+    /// 矢印キー。
+    ///
+    /// **入力モードでも要る。** 通常モードでは `h j k l` に読み替えれば
+    /// 済むが、入力モードでその読み替えをすると「h」という字が入ってしまう。
+    /// かといって捨てると、打っている途中に一歩も動けない（実機で踏んだ）。
+    Arrow(Arrow),
     Esc,
     Enter,
     Backspace,
@@ -31,6 +37,26 @@ pub enum KeyInput {
     Ctrl(char),
     /// F1..F12
     Function(u8),
+}
+
+/// 矢印の向き。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Arrow {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+impl Arrow {
+    fn motion(self) -> Motion {
+        match self {
+            Self::Left => Motion::Left,
+            Self::Right => Motion::Right,
+            Self::Up => Motion::Up,
+            Self::Down => Motion::Down,
+        }
+    }
 }
 
 /// エンジンが起こした変化。ホストがこれを見て実際の副作用を行う。
@@ -431,6 +457,17 @@ impl Engine {
                 KeyInput::Esc | KeyInput::Ctrl('\\') => {
                     KeyOutcome::Handled(self.execute(Command::EnterNormal, buf))
                 }
+                // ファイルを開いているなら、矢印はカーソルを動かす。
+                // **端末では素通しする**（シェルの履歴と行編集はそちらの仕事）。
+                KeyInput::Arrow(a) if buf.kind() == BufferKind::File => {
+                    KeyOutcome::Handled(self.execute(
+                        Command::Move {
+                            motion: a.motion(),
+                            count: 1,
+                        },
+                        buf,
+                    ))
+                }
                 _ => KeyOutcome::PassThrough,
             };
         }
@@ -736,6 +773,7 @@ impl Engine {
             last_find: self.last_find,
             search: self.search.as_ref(),
             error_lines: &self.error_lines,
+            inserting: self.mode == Mode::Insert,
         }
     }
 
@@ -813,6 +851,7 @@ impl Engine {
         let cmd = match id {
             "ui.help" => Command::ToggleHelp,
             "ui.config" => Command::OpenConfig,
+            "ui.opacity" => Command::Palette("opacity "),
             "ui.theme.yogiri" => Command::SetTheme("yogiri"),
             "ui.theme.sumi" => Command::SetTheme("sumi"),
             "ui.theme.hakuji" => Command::SetTheme("hakuji"),
@@ -1170,7 +1209,10 @@ impl Engine {
                 vec![Effect::CursorMoved(target)]
             }
             Command::SetCursor(pos) => {
-                self.cursor = clamp(buf, pos);
+                // **モードに合った丸め方をする。** 通常モードの丸め方だと、
+                // 行末の後ろをクリックしても最後の字へ引き戻される
+                // （入力モードでそこを指したいのに指せない）。
+                self.set_cursor(pos, buf);
                 vec![Effect::CursorMoved(self.cursor)]
             }
             Command::Select { range } => {
@@ -2628,6 +2670,109 @@ mod tests {
         h.engine.set_cursor(Pos::new(0, 0), &h.file);
         h.keys("o");
         assert_eq!(h.file.line(1), "");
+    }
+
+    /// **入力モードで行末の 1 つ先へ行ける。**
+    ///
+    /// 行末に足すには「最後の字の後ろ」に立てないといけない。通常モードの
+    /// 数え方（最後の字の上まで）で止めると、行の終わりに 1 文字も足せない。
+    #[test]
+    fn the_caret_can_stand_after_the_last_character() {
+        let mut h = FileHarness::new("opacity = 0.85\n");
+        h.engine.mode = Mode::Insert;
+        h.engine.set_cursor(Pos::new(0, 13), &h.file); // `5` の上
+        assert_eq!(h.engine.mode(), Mode::Insert, "入力モードになっていない");
+        assert_eq!(
+            h.file.cells(0).map(|c| c.len()),
+            Some(14),
+            "行の長さが想定と違う"
+        );
+        // モーション単体で見る（エンジンの経路と切り分ける）
+        let direct = motion::apply(
+            Motion::Right,
+            Pos::new(0, 13),
+            1,
+            &h.file,
+            &motion::Ctx {
+                inserting: true,
+                ..motion::Ctx::default()
+            },
+        );
+        assert_eq!(direct, Pos::new(0, 14), "モーション単体で行けていない");
+        let fx = h.engine.execute(
+            Command::Move {
+                motion: Motion::Right,
+                count: 1,
+            },
+            &h.file,
+        );
+        let _ = fx;
+        assert_eq!(
+            h.engine.cursor(),
+            Pos::new(0, 14),
+            "行末の 1 つ先へ行けない"
+        );
+    }
+
+    /// **入力モードでも矢印でカーソルが動く。**
+    ///
+    /// 通常モードの読み替え（矢印→`h j k l`）を入力モードでやると
+    /// 「h」という字が入ってしまう。かといって捨てると一歩も動けない。
+    #[test]
+    fn arrows_move_the_caret_while_typing() {
+        let mut h = FileHarness::new(
+            "abc
+def
+",
+        );
+        h.engine.mode = Mode::Insert;
+        h.engine.set_cursor(Pos::new(0, 1), &h.file);
+
+        h.engine.key(KeyInput::Arrow(Arrow::Right), &h.file);
+        assert_eq!(h.engine.cursor(), Pos::new(0, 2), "右へ動いていない");
+        h.engine.key(KeyInput::Arrow(Arrow::Down), &h.file);
+        assert_eq!(h.engine.cursor().line, 1, "下へ動いていない");
+        h.engine.key(KeyInput::Arrow(Arrow::Left), &h.file);
+        assert_eq!(h.engine.cursor(), Pos::new(1, 1), "左へ動いていない");
+
+        // 字は 1 つも入らない
+        assert_eq!(
+            h.file.text(),
+            "abc
+def
+",
+            "矢印で字が入っている"
+        );
+    }
+
+    /// クリックで行末の後ろを指しても、最後の字へ引き戻されない。
+    #[test]
+    fn clicking_past_the_end_lands_after_the_last_character() {
+        let mut h = FileHarness::new("opacity = 0.85\n");
+        h.engine.mode = Mode::Insert;
+        h.engine
+            .execute(Command::SetCursor(Pos::new(0, 40)), &h.file);
+        assert_eq!(
+            h.engine.cursor(),
+            Pos::new(0, 14),
+            "行末の後ろを指したのに引き戻されている"
+        );
+    }
+
+    /// 通常モードでは今までどおり最後の字の上で止まる。
+    #[test]
+    fn normal_mode_still_stops_on_the_last_character() {
+        let mut h = FileHarness::new("opacity = 0.85\n");
+        h.engine.mode = Mode::Normal;
+        h.engine.set_cursor(Pos::new(0, 13), &h.file);
+        h.engine.execute(
+            Command::Move {
+                motion: Motion::Right,
+                count: 1,
+            },
+            &h.file,
+        );
+        assert_eq!(h.engine.cursor(), Pos::new(0, 13));
     }
 }
 

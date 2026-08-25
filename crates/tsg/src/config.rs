@@ -265,9 +265,11 @@ pub fn template() -> String {
 # 書けるものの一覧は tsg --help にもあります。
 
 [window]
-# 背景の不透明度。1.0 で不透明。
+# 背景の不透明度。**小さいほど透けます**（1.0 で不透明・0.2 まで下げられます）。
+# 打ちながら試すなら `:opacity 0.6` のように打つと、その場で変わります
+# （config に書くまで覚えません）。
 # opacity = {opacity}
-# 背景をぼかす（Windows 11 / macOS）。
+# 背景をぼかす（Windows 11 / macOS）。**切ると、より素通しに見えます。**
 # blur = {blur}
 
 [font]

@@ -5,7 +5,8 @@
 //! 出力を正規表現で当てにいかない（`concept.md`）。
 
 use tsg_buffer::{
-    Buffer, Pos, clamp, first_non_blank, is_blank_line, last_col, next_col, prev_col,
+    Buffer, Pos, clamp, clamp_insert, first_non_blank, is_blank_line, last_col, line_width,
+    next_col, prev_col,
 };
 
 use crate::search::Search;
@@ -496,6 +497,12 @@ pub struct Ctx<'a> {
     /// **端末には無い**（あちらは OSC 133 の失敗したコマンドが誤り）ので、
     /// ファイルを開いているときだけ入る。
     pub error_lines: &'a [usize],
+    /// 入力モードか。
+    ///
+    /// **カーソルの止まる場所が変わる。** 通常モードは「字の上」に居るので
+    /// 最後の字まで。入力モードは「字と字の間」に居るので、行末の 1 つ先が要る。
+    /// ここが無いと、行の終わりに 1 文字も足せない（実機で踏んだ）。
+    pub inserting: bool,
 }
 
 pub fn apply(motion: Motion, from: Pos, count: usize, buf: &dyn Buffer, ctx: &Ctx<'_>) -> Pos {
@@ -504,6 +511,7 @@ pub fn apply(motion: Motion, from: Pos, count: usize, buf: &dyn Buffer, ctx: &Ct
         last_find,
         search,
         error_lines,
+        inserting: _,
     } = *ctx;
     let count = count.max(1);
     let last_line = buf.line_count().saturating_sub(1);
@@ -556,11 +564,21 @@ pub fn apply(motion: Motion, from: Pos, count: usize, buf: &dyn Buffer, ctx: &Ct
             p
         }
         Motion::Right => {
-            let end = last_col(buf, from.line);
+            // 入力モードは**行末の 1 つ先**まで行ける。`next_col` は
+            // 「次のセル」しか返さないので、最後のセルからその先へは
+            // 自分で進める（そこにセルは無い）。
+            let end = if ctx.inserting {
+                line_width(buf, from.line)
+            } else {
+                last_col(buf, from.line)
+            };
             let mut p = from;
             for _ in 0..count {
                 match next_col(buf, p.line, p.col) {
                     Some(c) if c <= end => p = Pos::new(p.line, c),
+                    _ if ctx.inserting && p.col < end => {
+                        p = Pos::new(p.line, end);
+                    }
                     _ => break,
                 }
             }
@@ -724,7 +742,14 @@ pub fn apply(motion: Motion, from: Pos, count: usize, buf: &dyn Buffer, ctx: &Ct
         Motion::PageUp => Pos::new(from.line.saturating_sub(page * count), from.col),
     };
 
-    clamp(buf, target)
+    // **丸め方はモードで変わる。** 入力モードのカーソルは字と字の間に居るので、
+    // 行末の 1 つ先が要る。通常モードの丸め方をここで掛けると、右へ動かしても
+    // 最後の字へ引き戻されて、行の終わりに 1 文字も足せない（実機で踏んだ）。
+    if ctx.inserting {
+        clamp_insert(buf, target)
+    } else {
+        clamp(buf, target)
+    }
 }
 
 #[cfg(test)]

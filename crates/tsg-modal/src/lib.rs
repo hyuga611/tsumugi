@@ -21,7 +21,9 @@ pub use command::{
     Command, CommandSpec, FileAction, HistoryAction, InsertAt, Mode, MousePath, REGISTRY,
     VisualKind,
 };
-pub use engine::{Effect, Engine, KeyInput, KeyOutcome, Macros, Marks, RegisterValue, Registers};
+pub use engine::{
+    Arrow, Effect, Engine, KeyInput, KeyOutcome, Macros, Marks, RegisterValue, Registers,
+};
 pub use keymap::{Keymap, When as KeyWhen, parse_key};
 pub use motion::{Motion, MotionKind, View, find_match, matches_in};
 pub use search::Search;

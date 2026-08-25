@@ -743,6 +743,15 @@ impl App {
             KeyInput::Backspace => (Key::Named(NamedKey::Backspace), None),
             KeyInput::Tab => (Key::Named(NamedKey::Tab), None),
             KeyInput::Esc => (Key::Named(NamedKey::Escape), None),
+            KeyInput::Arrow(a) => (
+                Key::Named(match a {
+                    tsg_modal::Arrow::Left => NamedKey::ArrowLeft,
+                    tsg_modal::Arrow::Right => NamedKey::ArrowRight,
+                    tsg_modal::Arrow::Up => NamedKey::ArrowUp,
+                    tsg_modal::Arrow::Down => NamedKey::ArrowDown,
+                }),
+                None,
+            ),
             KeyInput::Ctrl(_) | KeyInput::Function(_) => return,
         };
         if self.active_view().is_some_and(PaneView::editing) {
@@ -1950,6 +1959,13 @@ impl App {
             self.goto_line(line);
             return true;
         }
+        // 透け具合をその場で変える。**打ちながら見て決められる**ように。
+        // 設定に書くまでは覚えない（次に開くと config の値に戻る）。
+        if let Some(v) = q.strip_prefix("opacity").map(str::trim) {
+            self.set_opacity(v);
+            self.palette.hide();
+            return true;
+        }
         match q {
             "w" => {
                 self.palette.hide();
@@ -2182,6 +2198,32 @@ impl App {
         };
         self.pending_jump = Some((full.clone(), at.saturating_sub(1), 0));
         self.open_file(&full);
+    }
+
+    /// 透け具合を変えて、その場で反映する。
+    ///
+    /// **書き換えるのは今の窓だけ。** 設定ファイルには触らない（人が書いた
+    /// ものを道具が勝手に書き換えない）。残したい値は config に書いてもらう。
+    fn set_opacity(&mut self, text: &str) {
+        let Ok(v) = text.parse::<f32>() else {
+            self.status_msg = t!(
+                format!("数で書いてください（0.2〜1.0）: {text}"),
+                format!("give me a number between 0.2 and 1.0: {text}")
+            );
+            return;
+        };
+        let v = v.clamp(0.2, 1.0);
+        self.cfg.opacity = v;
+        if let Some(r) = self.renderer.as_mut() {
+            r.background = background_of(&self.theme, v);
+        }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+        self.status_msg = t!(
+            format!("不透明度 {v:.2}（残すなら config.toml に opacity = {v:.2}）"),
+            format!("opacity {v:.2} (write opacity = {v:.2} in config.toml to keep it)")
+        );
     }
 
     /// タブに名前を付ける（空で外す）。
@@ -5063,6 +5105,12 @@ fn to_key_input(key: &Key, mods: ModifiersState, mode: Mode) -> Option<KeyInput>
         Key::Named(NamedKey::ArrowDown) if mode != Mode::Insert => Some(KeyInput::Char('j')),
         Key::Named(NamedKey::ArrowUp) if mode != Mode::Insert => Some(KeyInput::Char('k')),
         Key::Named(NamedKey::ArrowRight) if mode != Mode::Insert => Some(KeyInput::Char('l')),
+        // 入力モードの矢印。**捨てない。** 捨てると、打っている途中に
+        // 一歩も動けないうえ、端末ではシェルの履歴も効かなくなる。
+        Key::Named(NamedKey::ArrowLeft) => Some(KeyInput::Arrow(tsg_modal::Arrow::Left)),
+        Key::Named(NamedKey::ArrowDown) => Some(KeyInput::Arrow(tsg_modal::Arrow::Down)),
+        Key::Named(NamedKey::ArrowUp) => Some(KeyInput::Arrow(tsg_modal::Arrow::Up)),
+        Key::Named(NamedKey::ArrowRight) => Some(KeyInput::Arrow(tsg_modal::Arrow::Right)),
         Key::Character(s) => {
             let c = s.chars().next()?;
             if mods.control_key() {
@@ -6997,8 +7045,14 @@ diff --git a/f.txt b/f.txt
         assert!(cut.ends_with('\u{2026}'));
     }
 
+    /// 矢印は、通常モードではモーション、入力モードでは矢印そのもの。
+    ///
+    /// **入力モードで `None` を返してはいけない。** 呼ぶ側はそこで打ち切るので、
+    /// PTY へも届かず、ファイルのカーソルも動かない＝キーが死ぬ。
+    /// （以前はここで `None` を返していて、入力モードの矢印が
+    /// エディタでもシェルでも効かなかった。実機の指摘で見つかった）
     #[test]
-    fn arrows_are_motions_outside_insert_but_not_inside() {
+    fn arrows_are_motions_outside_insert_and_arrows_inside() {
         let none = ModifiersState::empty();
         assert_eq!(
             to_key_input(&Key::Named(NamedKey::ArrowDown), none, Mode::Normal),
@@ -7006,8 +7060,8 @@ diff --git a/f.txt b/f.txt
         );
         assert_eq!(
             to_key_input(&Key::Named(NamedKey::ArrowDown), none, Mode::Insert),
-            None,
-            "Insert では素のキーとして PTY へ送るのでここでは拾わない"
+            Some(KeyInput::Arrow(tsg_modal::Arrow::Down)),
+            "入力モードの矢印が捨てられている"
         );
     }
 
