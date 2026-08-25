@@ -3398,8 +3398,11 @@ impl ApplicationHandler for App {
 
         self.sync_ime();
         // 起動しただけで何をすればいいか分からない、を起こさない。
-        // TODO(M5): 設定ができたら「初回のみ」にする。
-        self.engine.set_help_visible(true);
+        // **初回だけ。** 毎回出すと、読み終えた人には邪魔なだけになる。
+        // 二度目からは `F1` と下の `? 使い方` から出す。
+        if config::take_first_run() {
+            self.engine.set_help_visible(true);
+        }
         window.request_redraw();
     }
 

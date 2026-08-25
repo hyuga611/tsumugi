@@ -178,6 +178,33 @@ pub fn template() -> String {
     )
 }
 
+/// 使い方を一度でも出したか、の目印。
+///
+/// **設定と同じところに置く。** 実行時の一時領域だと再起動のたびに
+/// 「初回」へ戻り、毎回全画面で出てしまう。
+fn welcome_mark() -> Option<PathBuf> {
+    Some(path()?.with_file_name("welcomed"))
+}
+
+/// 初回なら真を返し、**同時に目印を残す**。
+///
+/// 置き場所が分からない / 書けない環境では、いつも真になる（今までと同じ）。
+/// 出ないより、出すぎるほうがまし。
+pub fn take_first_run() -> bool {
+    welcome_mark().is_none_or(|m| take_first_run_at(&m))
+}
+
+fn take_first_run_at(mark: &std::path::Path) -> bool {
+    if mark.exists() {
+        return false;
+    }
+    if let Some(dir) = mark.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(mark, "");
+    true
+}
+
 impl Config {
     /// 設定ファイルを読む。無ければ既定。壊れていれば既定＋警告。
     pub fn load() -> (Self, Option<String>) {
@@ -293,6 +320,17 @@ mod tests {
 
     fn warning(s: &str) -> Option<String> {
         Config::from_file(&toml::from_str::<File>(s).expect("読めない")).1
+    }
+
+    /// 使い方は**初回だけ**。2 度目からは出ない。
+    #[test]
+    fn the_welcome_screen_shows_once() {
+        let mark = std::env::temp_dir().join("tsumugi-welcome-test-mark");
+        let _ = std::fs::remove_file(&mark);
+        assert!(take_first_run_at(&mark), "初回に出ない");
+        assert!(!take_first_run_at(&mark), "2 度目にも出る");
+        assert!(!take_first_run_at(&mark), "3 度目にも出る");
+        let _ = std::fs::remove_file(&mark);
     }
 
     /// 雛形は**そのままで読めて、既定と同じ**でなければならない。
