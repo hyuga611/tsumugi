@@ -714,7 +714,9 @@ mod tests {
     /// Claude Code を tsumugi の中で動かして実際に踏んだ。
     #[test]
     fn the_characters_tuis_draw_boxes_with_are_one_cell_wide() {
-        for cp in [0x2500u32, 0x2502, 0x256d, 0x2588, 0x25cf, 0x2022, 0x00b7, 0x2190] {
+        for cp in [
+            0x2500u32, 0x2502, 0x256d, 0x2588, 0x25cf, 0x2022, 0x00b7, 0x2190,
+        ] {
             let c = char::from_u32(cp).unwrap();
             assert_eq!(char_width(c, AmbiguousWidth::Narrow), 1, "U+{cp:04X}");
             assert_eq!(char_width(c, AmbiguousWidth::Wide), 2, "U+{cp:04X}");

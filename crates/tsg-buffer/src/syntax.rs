@@ -122,11 +122,46 @@ impl Lang {
                 "super", "trait", "true", "type", "unsafe", "use", "where", "while",
             ],
             Lang::C => &[
-                "auto", "break", "case", "char", "class", "const", "continue", "default", "do",
-                "double", "else", "enum", "extern", "float", "for", "goto", "if", "int", "long",
-                "namespace", "new", "public", "private", "protected", "return", "short", "signed",
-                "sizeof", "static", "struct", "switch", "template", "typedef", "union", "unsigned",
-                "using", "virtual", "void", "volatile", "while",
+                "auto",
+                "break",
+                "case",
+                "char",
+                "class",
+                "const",
+                "continue",
+                "default",
+                "do",
+                "double",
+                "else",
+                "enum",
+                "extern",
+                "float",
+                "for",
+                "goto",
+                "if",
+                "int",
+                "long",
+                "namespace",
+                "new",
+                "public",
+                "private",
+                "protected",
+                "return",
+                "short",
+                "signed",
+                "sizeof",
+                "static",
+                "struct",
+                "switch",
+                "template",
+                "typedef",
+                "union",
+                "unsigned",
+                "using",
+                "virtual",
+                "void",
+                "volatile",
+                "while",
             ],
             Lang::Python => &[
                 "and", "as", "assert", "async", "await", "break", "class", "continue", "def",
@@ -135,16 +170,72 @@ impl Lang {
                 "return", "True", "try", "while", "with", "yield",
             ],
             Lang::Js => &[
-                "async", "await", "break", "case", "catch", "class", "const", "continue",
-                "default", "delete", "do", "else", "export", "extends", "false", "finally", "for",
-                "from", "function", "if", "import", "in", "instanceof", "let", "new", "null",
-                "of", "return", "super", "switch", "this", "throw", "true", "try", "typeof", "var",
-                "void", "while", "yield",
+                "async",
+                "await",
+                "break",
+                "case",
+                "catch",
+                "class",
+                "const",
+                "continue",
+                "default",
+                "delete",
+                "do",
+                "else",
+                "export",
+                "extends",
+                "false",
+                "finally",
+                "for",
+                "from",
+                "function",
+                "if",
+                "import",
+                "in",
+                "instanceof",
+                "let",
+                "new",
+                "null",
+                "of",
+                "return",
+                "super",
+                "switch",
+                "this",
+                "throw",
+                "true",
+                "try",
+                "typeof",
+                "var",
+                "void",
+                "while",
+                "yield",
             ],
             Lang::Go => &[
-                "break", "case", "chan", "const", "continue", "default", "defer", "else",
-                "fallthrough", "for", "func", "go", "goto", "if", "import", "interface", "map",
-                "package", "range", "return", "select", "struct", "switch", "type", "var",
+                "break",
+                "case",
+                "chan",
+                "const",
+                "continue",
+                "default",
+                "defer",
+                "else",
+                "fallthrough",
+                "for",
+                "func",
+                "go",
+                "goto",
+                "if",
+                "import",
+                "interface",
+                "map",
+                "package",
+                "range",
+                "return",
+                "select",
+                "struct",
+                "switch",
+                "type",
+                "var",
             ],
             Lang::Shell => &[
                 "case", "do", "done", "elif", "else", "esac", "export", "fi", "for", "function",
@@ -221,11 +312,7 @@ pub fn highlight(lang: Lang, cells: &[Cell]) -> Vec<Token> {
         let rest: String = chars[i..].iter().collect();
 
         // 行コメント: ここから行末まで
-        if lang
-            .line_comment()
-            .iter()
-            .any(|p| rest.starts_with(p))
-        {
+        if lang.line_comment().iter().any(|p| rest.starts_with(p)) {
             paint(&mut out, i, chars.len(), Token::Comment);
             break;
         }
@@ -411,7 +498,11 @@ mod tests {
     fn json_is_guessed_only_from_an_obvious_start() {
         assert_eq!(Lang::sniff("  {\"a\": 1}"), Lang::Json);
         assert_eq!(Lang::sniff("[1,2]"), Lang::Json);
-        assert_eq!(Lang::sniff("hello"), Lang::None, "当てずっぽうで色を付けない");
+        assert_eq!(
+            Lang::sniff("hello"),
+            Lang::None,
+            "当てずっぽうで色を付けない"
+        );
     }
 
     #[test]

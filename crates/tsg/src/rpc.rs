@@ -441,7 +441,10 @@ pub fn broadcast(session: &str, text: &str, and_wait: bool) -> Result<bool> {
         eprintln!("{} 個のペインへ投げました", targets.len());
         return Ok(true);
     }
-    eprintln!("{} 個のペインへ投げました。返事を待っています…", targets.len());
+    eprintln!(
+        "{} 個のペインへ投げました。返事を待っています…",
+        targets.len()
+    );
     loop {
         if let Some(ServerMsg::Layout(i)) = client.recv_timeout(Duration::from_millis(500)) {
             let done = targets.iter().all(|id| {
@@ -613,4 +616,3 @@ mod tests {
         assert_eq!(NO_SIZE, (0, 0));
     }
 }
-

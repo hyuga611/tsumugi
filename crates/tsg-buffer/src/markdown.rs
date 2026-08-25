@@ -86,9 +86,11 @@ pub fn render(text: &str, width: usize) -> String {
         }
 
         // 引用
-        if let Some(rest) = line.trim_start().strip_prefix("> ").or_else(|| {
-            (line.trim() == ">").then_some("")
-        }) {
+        if let Some(rest) = line
+            .trim_start()
+            .strip_prefix("> ")
+            .or_else(|| (line.trim() == ">").then_some(""))
+        {
             for chunk in wrap(&inline_in(rest, &mut bold), width.saturating_sub(2)) {
                 out.push_str(&format!("{DIM}│{RESET} {ITALIC}{chunk}{RESET}\r\n"));
             }
@@ -138,7 +140,9 @@ fn fence_of(line: &str) -> Option<&str> {
 fn is_rule(line: &str) -> bool {
     let t = line.trim();
     t.len() >= 3
-        && (t.chars().all(|c| c == '-') || t.chars().all(|c| c == '*') || t.chars().all(|c| c == '_'))
+        && (t.chars().all(|c| c == '-')
+            || t.chars().all(|c| c == '*')
+            || t.chars().all(|c| c == '_'))
 }
 
 fn heading_of(line: &str) -> Option<(usize, &str)> {
@@ -219,7 +223,10 @@ fn table(rows: &[String], width: usize) -> String {
             // 区切りも本文と同じ幅で切る。ここを忘れると、桁の広い表で
             // 線だけが窓からはみ出す（実際の README で出た）。
             let line: Vec<String> = w.iter().map(|n| "─".repeat(n + 2)).collect();
-            out.push_str(&format!("{DIM}{}{RESET}\r\n", truncate(&line.join("┼"), width)));
+            out.push_str(&format!(
+                "{DIM}{}{RESET}\r\n",
+                truncate(&line.join("┼"), width)
+            ));
             continue;
         }
         let head = r == 0;
@@ -391,7 +398,8 @@ fn truncate(s: &str, width: usize) -> String {
 ///
 /// これが無いと「〜を保持」で改行して次の行が「）。」から始まる。
 /// 日本語を読むための端末で、ここを落とすわけにいかない。
-const NO_LINE_START: &str = "）」』】〕｝】、。・？！ぁぃぅぇぉっゃゅょゎヵヶァィゥェォッャュョヮ々ー):;,.?!";
+const NO_LINE_START: &str =
+    "）」』】〕｝】、。・？！ぁぃぅぇぉっゃゅょゎヵヶァィゥェォッャュョヮ々ー):;,.?!";
 
 fn cannot_start_a_line(c: char) -> bool {
     NO_LINE_START.contains(c)
@@ -544,10 +552,7 @@ mod tests {
     fn a_link_keeps_its_url_so_you_can_still_open_it() {
         let got = plain(&render("[ここ](https://example.com) を見て\n", 60));
         assert!(got.contains("ここ"), "{got}");
-        assert!(
-            got.contains("https://example.com"),
-            "URL を捨てた: {got}"
-        );
+        assert!(got.contains("https://example.com"), "URL を捨てた: {got}");
         assert!(!got.contains(']'), "記法が残っている: {got}");
     }
 
@@ -579,7 +584,10 @@ mod tests {
     /// マークダウンの説明を書いた文書が読めなくなる。
     #[test]
     fn a_code_block_is_left_alone() {
-        let got = plain(&render("```\n# これは見出しではない\n- これも印にしない\n```\n", 40));
+        let got = plain(&render(
+            "```\n# これは見出しではない\n- これも印にしない\n```\n",
+            40,
+        ));
         assert!(got.contains("# これは見出しではない"), "{got}");
         assert!(got.contains("- これも印にしない"), "{got}");
     }
@@ -587,8 +595,13 @@ mod tests {
     /// 幅は 20 桁で下限を切る。狭すぎる窓でも、そこで折り返して読めなくしない。
     #[test]
     fn a_very_narrow_pane_still_gets_a_readable_width() {
-        for line in plain(&render("あいうえおかきくけこさしすせそ
-", 4)).lines() {
+        for line in plain(&render(
+            "あいうえおかきくけこさしすせそ
+",
+            4,
+        ))
+        .lines()
+        {
             assert!(display_len(line) <= 20, "{line:?} が下限の 20 桁を超えた");
         }
     }
@@ -597,8 +610,7 @@ mod tests {
     /// ならない。** 実際に読む文書で崩れないことを見る。
     #[test]
     fn the_real_readme_renders_without_overflowing() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../README.md");
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md");
         let Ok(src) = std::fs::read_to_string(&path) else {
             return; // 配布物にはついてこない
         };

@@ -703,9 +703,7 @@ mod tests {
                 Layout::Leaf { .. } => true,
                 Layout::Split {
                     children, weights, ..
-                } => {
-                    weights.iter().all(|w| *w == WEIGHT_UNIT) && children.iter().all(all_equal)
-                }
+                } => weights.iter().all(|w| *w == WEIGHT_UNIT) && children.iter().all(all_equal),
             }
         }
         assert!(all_equal(&l), "入れ子の下まで揃っていない");
@@ -716,14 +714,21 @@ mod tests {
         let mut l = Layout::leaf(1);
         l.split(1, 2, Dir::Horizontal);
         l.split(1, 3, Dir::Horizontal);
-        let Layout::Split { weights, children, .. } = &l else {
+        let Layout::Split {
+            weights, children, ..
+        } = &l
+        else {
             panic!("分割になっていない")
         };
         assert_eq!(children.len(), 3);
         assert_eq!(weights.len(), children.len(), "重みと子の数がずれている");
         // 割ったのは 1。無関係な 2 の取り分は動かない。
         assert_eq!(weights[2], WEIGHT_UNIT, "割っていないペインまで縮んでいる");
-        assert_eq!(weights[0] + weights[1], WEIGHT_UNIT, "1 の取り分が増減している");
+        assert_eq!(
+            weights[0] + weights[1],
+            WEIGHT_UNIT,
+            "1 の取り分が増減している"
+        );
     }
 
     #[test]
@@ -759,7 +764,10 @@ mod tests {
         l.split(1, 2, Dir::Horizontal);
         l.split(1, 3, Dir::Horizontal);
         l.remove(1);
-        let Layout::Split { children, weights, .. } = &l else {
+        let Layout::Split {
+            children, weights, ..
+        } = &l
+        else {
             panic!("2 枚残っているはず")
         };
         assert_eq!(children.len(), 2);
@@ -771,7 +779,10 @@ mod tests {
         // 版 1 のスナップショットや手書き JSON を落とさない
         let json = r#"{"k":"split","dir":"horizontal","children":[{"k":"leaf","pane":1},{"k":"leaf","pane":2}]}"#;
         let l: Layout = serde_json::from_str(json).expect("重み無しが読めない");
-        let Layout::Split { children, weights, .. } = &l else {
+        let Layout::Split {
+            children, weights, ..
+        } = &l
+        else {
             panic!()
         };
         assert_eq!(weights_for(children, weights), vec![WEIGHT_UNIT; 2]);

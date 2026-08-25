@@ -194,7 +194,11 @@ impl Seed {
             mode_normal: band(s.ansi[2], 0.48),
             mode_visual: band(s.ansi[3], 0.42),
             mode_layout: band(s.ansi[5], 0.48),
-            mode_pending: mix(s.bg, if s.dark { WHITE } else { BLACK }, if s.dark { 0.30 } else { 0.62 }),
+            mode_pending: mix(
+                s.bg,
+                if s.dark { WHITE } else { BLACK },
+                if s.dark { 0.30 } else { 0.62 },
+            ),
             mode_fg: if s.dark { WHITE } else { mix(s.bg, WHITE, 0.6) },
 
             syn_comment: mix(calm(s.ansi[2], 0.45), dim, 0.55),
@@ -272,11 +276,7 @@ pub const DEFAULT_THEME: &str = "夜霧";
 
 /// 名前で引ける組み込みテーマ。日本語名と英語名のどちらでも引ける
 /// （設定ファイルを英語環境で書く人が居る）。
-pub const BUILTIN: &[(&str, &str)] = &[
-    ("夜霧", "yogiri"),
-    ("墨", "sumi"),
-    ("白磁", "hakuji"),
-];
+pub const BUILTIN: &[(&str, &str)] = &[("夜霧", "yogiri"), ("墨", "sumi"), ("白磁", "hakuji")];
 
 pub fn names() -> Vec<&'static str> {
     BUILTIN.iter().map(|(ja, _)| *ja).collect()
@@ -489,7 +489,10 @@ mod tests {
         for (ja, en) in BUILTIN {
             assert!(builtin(ja).is_some(), "{ja} が引けない");
             assert!(builtin(en).is_some(), "{en} が引けない");
-            assert!(builtin(&en.to_uppercase()).is_some(), "{en} は大文字で引けない");
+            assert!(
+                builtin(&en.to_uppercase()).is_some(),
+                "{en} は大文字で引けない"
+            );
         }
         assert!(builtin("そんな名前は無い").is_none());
     }
@@ -570,7 +573,10 @@ mod tests {
         assert!(set_named(&mut t, "ansi5", [0.0, 1.0, 0.0, 1.0]));
         assert_eq!(t.ansi[5], [0.0, 1.0, 0.0, 1.0]);
         assert!(!set_named(&mut t, "ansi16", [0.0; 4]), "16 番は無い");
-        assert!(!set_named(&mut t, "backgruond", [0.0; 4]), "綴り違いが通っている");
+        assert!(
+            !set_named(&mut t, "backgruond", [0.0; 4]),
+            "綴り違いが通っている"
+        );
     }
 
     /// 16 以降のインデックス色はテーマで動かさない。アプリが
@@ -581,7 +587,11 @@ mod tests {
         let b = builtin("白磁").expect("引けない");
         for i in [16u8, 100, 208, 240] {
             let c = tsg_term::Color::Indexed(i);
-            assert_eq!(a.resolve(c), b.resolve(c), "拡張パレット {i} がテーマで動いた");
+            assert_eq!(
+                a.resolve(c),
+                b.resolve(c),
+                "拡張パレット {i} がテーマで動いた"
+            );
         }
         // 0-15 は逆に、テーマごとに違わないとテーマの意味が無い。
         assert_ne!(

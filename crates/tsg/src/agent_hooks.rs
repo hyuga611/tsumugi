@@ -183,8 +183,8 @@ fn read_json(path: &std::path::Path) -> Result<Value> {
     if !path.exists() {
         return Ok(json!({}));
     }
-    let text =
-        std::fs::read_to_string(path).with_context(|| format!("{} を読めません", path.display()))?;
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("{} を読めません", path.display()))?;
     if text.trim().is_empty() {
         return Ok(json!({}));
     }
@@ -292,7 +292,11 @@ mod tests {
                 ]
             }
         });
-        assert!(add_hook(&mut root, "SessionStart", "tsg --agent-state idle"));
+        assert!(add_hook(
+            &mut root,
+            "SessionStart",
+            "tsg --agent-state idle"
+        ));
         let got: Vec<&str> = commands_of(&root, "SessionStart").collect();
         assert_eq!(got, vec!["narai-start", "tsg --agent-state idle"]);
         assert_eq!(root["model"], "opus", "無関係な設定を触った");

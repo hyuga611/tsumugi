@@ -443,7 +443,11 @@ fn error_block(buf: &dyn Buffer, at: Pos, around: bool) -> Option<Range> {
 // ---- パス・URL・ハッシュ・数値 ---------------------------------------------
 
 fn is_path_char(c: char) -> bool {
-    c.is_alphanumeric() || matches!(c, '/' | '\\' | '.' | '_' | '-' | '~' | '+' | '@' | '#' | '%')
+    c.is_alphanumeric()
+        || matches!(
+            c,
+            '/' | '\\' | '.' | '_' | '-' | '~' | '+' | '@' | '#' | '%'
+        )
 }
 
 /// `foo` を拾わないための最低条件。区切りを含むか、拡張子らしき尻尾を持つこと。
@@ -501,8 +505,28 @@ fn is_url_char(c: char) -> bool {
     c.is_alphanumeric()
         || matches!(
             c,
-            '-' | '.' | '_' | '~' | ':' | '/' | '?' | '#' | '[' | ']' | '@'
-                | '!' | '$' | '&' | '\'' | '(' | ')' | '*' | '+' | ',' | ';' | '=' | '%'
+            '-' | '.'
+                | '_'
+                | '~'
+                | ':'
+                | '/'
+                | '?'
+                | '#'
+                | '['
+                | ']'
+                | '@'
+                | '!'
+                | '$'
+                | '&'
+                | '\''
+                | '('
+                | ')'
+                | '*'
+                | '+'
+                | ','
+                | ';'
+                | '='
+                | '%'
         )
 }
 
@@ -536,9 +560,7 @@ fn url(buf: &dyn Buffer, at: Pos, around: bool) -> Option<Range> {
         let mut s = a;
         let mut t = e;
         let wraps = [('(', ')'), ('[', ']'), ('<', '>'), ('"', '"'), ('\'', '\'')];
-        if let Some((_, r)) = wraps
-            .iter()
-            .find(|(l, _)| s > 0 && scan.chars[s - 1] == *l)
+        if let Some((_, r)) = wraps.iter().find(|(l, _)| s > 0 && scan.chars[s - 1] == *l)
             && scan.get(t + 1) == Some(*r)
         {
             s -= 1;
@@ -557,7 +579,9 @@ fn looks_like_hash(s: &str) -> bool {
         let parts: Vec<&str> = s.split('-').collect();
         return parts.len() == 5
             && [8, 4, 4, 4, 12] == parts.iter().map(|p| p.len()).collect::<Vec<_>>()[..]
-            && parts.iter().all(|p| p.chars().all(|c| c.is_ascii_hexdigit()));
+            && parts
+                .iter()
+                .all(|p| p.chars().all(|c| c.is_ascii_hexdigit()));
     }
     n >= 7
         && s.chars().all(|c| c.is_ascii_hexdigit())
@@ -593,7 +617,11 @@ fn number(buf: &dyn Buffer, at: Pos, around: bool) -> Option<Range> {
     {
         b += 1;
     }
-    let a = if a > 0 && scan.chars[a - 1] == '-' { a - 1 } else { a };
+    let a = if a > 0 && scan.chars[a - 1] == '-' {
+        a - 1
+    } else {
+        a
+    };
 
     if around {
         let mut e = b;
@@ -658,7 +686,10 @@ mod tests {
     #[test]
     fn word_stops_at_punctuation() {
         let f = Fixture::new("foo.bar baz");
-        assert_eq!(obj(&f, 0, "foo", TextObject::Word { big: false }, false), "foo");
+        assert_eq!(
+            obj(&f, 0, "foo", TextObject::Word { big: false }, false),
+            "foo"
+        );
         assert_eq!(
             obj(&f, 0, "foo", TextObject::Word { big: true }, false),
             "foo.bar"
@@ -668,20 +699,29 @@ mod tests {
     #[test]
     fn aw_takes_the_trailing_space() {
         let f = Fixture::new("foo bar");
-        assert_eq!(obj(&f, 0, "foo", TextObject::Word { big: false }, true), "foo ");
+        assert_eq!(
+            obj(&f, 0, "foo", TextObject::Word { big: false }, true),
+            "foo "
+        );
     }
 
     #[test]
     fn quotes_and_brackets() {
         let f = Fixture::new("say \"hello world\" now");
-        assert_eq!(obj(&f, 0, "hello", TextObject::Quote('"'), false), "hello world");
+        assert_eq!(
+            obj(&f, 0, "hello", TextObject::Quote('"'), false),
+            "hello world"
+        );
         assert_eq!(
             obj(&f, 0, "hello", TextObject::Quote('"'), true),
             "\"hello world\""
         );
 
         let g = Fixture::new("call(a, b(c), d)");
-        assert_eq!(obj(&g, 0, "a,", TextObject::Bracket('('), false), "a, b(c), d");
+        assert_eq!(
+            obj(&g, 0, "a,", TextObject::Bracket('('), false),
+            "a, b(c), d"
+        );
         assert_eq!(obj(&g, 0, "c)", TextObject::Bracket('('), false), "c");
     }
 
@@ -698,7 +738,10 @@ mod tests {
     fn if_stops_before_the_line_number_and_af_takes_it() {
         let f = Fixture::new("error at src/main.rs:42:8 in build");
         assert_eq!(obj(&f, 0, "src", TextObject::Path, false), "src/main.rs");
-        assert_eq!(obj(&f, 0, "src", TextObject::Path, true), "src/main.rs:42:8");
+        assert_eq!(
+            obj(&f, 0, "src", TextObject::Path, true),
+            "src/main.rs:42:8"
+        );
     }
 
     #[test]
@@ -739,7 +782,8 @@ mod tests {
 
     #[test]
     fn hash_needs_to_look_like_one() {
-        let f = Fixture::new("commit 3f9a2c1b8e4 by 550e8400-e29b-41d4-a716-446655440000 and deadbeef");
+        let f =
+            Fixture::new("commit 3f9a2c1b8e4 by 550e8400-e29b-41d4-a716-446655440000 and deadbeef");
         assert_eq!(obj(&f, 0, "3f9a", TextObject::Hash, false), "3f9a2c1b8e4");
         assert_eq!(
             obj(&f, 0, "550e", TextObject::Hash, false),
@@ -779,8 +823,12 @@ mod tests {
         // OSC 133 の `D` は出力を書き終えた**次の行**で来る。そのまま終端に使うと
         // 次のプロンプト行まで飲む。実機でガターをクリックして踏んだ回帰。
         let mut term = Terminal::new(60, 20, AmbiguousWidth::Wide);
-        term.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07first\r\n\x1b]133;C\x07out-1\r\n\x1b]133;D;0\x07");
-        term.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07second\r\n\x1b]133;C\x07out-2\r\n\x1b]133;D;0\x07");
+        term.feed(
+            b"\x1b]133;A\x07$ \x1b]133;B\x07first\r\n\x1b]133;C\x07out-1\r\n\x1b]133;D;0\x07",
+        );
+        term.feed(
+            b"\x1b]133;A\x07$ \x1b]133;B\x07second\r\n\x1b]133;C\x07out-2\r\n\x1b]133;D;0\x07",
+        );
         let f = Fixture { term };
 
         let r = range_of(&f.buf(), Pos::new(1, 0), TextObject::CommandBlock, true).unwrap();
@@ -805,7 +853,10 @@ mod tests {
         let f = session();
         let r = range_of(&f.buf(), Pos::new(1, 0), TextObject::CommandBlock, true).unwrap();
         let text = got(&f, r);
-        assert!(text.starts_with("$ cargo build"), "プロンプト行から始まらない: {text:?}");
+        assert!(
+            text.starts_with("$ cargo build"),
+            "プロンプト行から始まらない: {text:?}"
+        );
         assert!(text.contains("error: boom"), "出力が入っていない: {text:?}");
     }
 

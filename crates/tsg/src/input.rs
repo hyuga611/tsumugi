@@ -7,7 +7,12 @@
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 /// 押されたキーを、Insert モードで PTY へ送るバイト列に変換する。
-pub fn encode(key: &Key, text: Option<&str>, mods: ModifiersState, app_cursor: bool) -> Option<Vec<u8>> {
+pub fn encode(
+    key: &Key,
+    text: Option<&str>,
+    mods: ModifiersState,
+    app_cursor: bool,
+) -> Option<Vec<u8>> {
     let ctrl = mods.control_key();
     let alt = mods.alt_key();
 

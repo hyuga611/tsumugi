@@ -203,7 +203,10 @@ pub enum Command {
     EnterVisual(VisualKind),
 
     /// カーソル移動。
-    Move { motion: Motion, count: usize },
+    Move {
+        motion: Motion,
+        count: usize,
+    },
 
     /// 範囲が確定したオペレータの適用。
     ///
@@ -223,7 +226,9 @@ pub enum Command {
     /// テキストオブジェクト（`vif`）とマウス（ドラッグ・ダブルクリック）が
     /// 合流する点。`Apply` が「範囲＋動詞」の合流点なのに対し、
     /// こちらは「範囲だけ」の合流点になる。
-    Select { range: Range },
+    Select {
+        range: Range,
+    },
 
     /// 表示だけを動かす（ホイール）。
     Scroll(isize),
@@ -231,7 +236,9 @@ pub enum Command {
     /// コマンドパレットを開く。`prefix` を入れた状態から始める。
     Palette(&'static str),
     /// 検索の入力を開く。`back` なら後ろ向き（`?`）。
-    OpenSearch { back: bool },
+    OpenSearch {
+        back: bool,
+    },
     /// 探す文字列を決める。空なら消す。
     SetSearch(String),
 
@@ -245,10 +252,15 @@ pub enum Command {
     SetMark(char),
 
     /// `` `a `` / `'a` — 印へ飛ぶ。`exact` が偽なら行頭まで（`'`）。
-    JumpMark { name: char, exact: bool },
+    JumpMark {
+        name: char,
+        exact: bool,
+    },
 
     /// `p` / `P` — レジスタの中身を貼る。
-    Paste { before: bool },
+    Paste {
+        before: bool,
+    },
 
     /// `q{a}` で記録開始、`None` で終了。
     MacroRecord(Option<char>),
@@ -416,7 +428,9 @@ pub const REGISTRY: &[CommandSpec] = &[
         id: "motion.basic",
         title: "カーソル移動",
         title_en: "Move the cursor",
-        keys: &["h", "j", "k", "l", "w", "b", "e", "0", "^", "$", "gg", "G", "{", "}"],
+        keys: &[
+            "h", "j", "k", "l", "w", "b", "e", "0", "^", "$", "gg", "G", "{", "}",
+        ],
         mouse: MousePath::Direct("クリック"),
         in_palette: false,
     },
@@ -947,11 +961,7 @@ mod tests {
     fn keyboard_only_exclusions_state_a_reason() {
         for spec in REGISTRY {
             if let MousePath::KeyboardOnly(reason) = spec.mouse {
-                assert!(
-                    reason.len() > 10,
-                    "{} の除外理由が実質空です",
-                    spec.id
-                );
+                assert!(reason.len() > 10, "{} の除外理由が実質空です", spec.id);
             }
         }
     }

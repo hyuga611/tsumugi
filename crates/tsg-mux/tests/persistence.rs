@@ -39,7 +39,10 @@ fn attach(client: &mut Client) -> u32 {
 
     match msg {
         ServerMsg::Attached { session, .. } => {
-            assert!(!session.panes.is_empty(), "アタッチでペインが作られていない");
+            assert!(
+                !session.panes.is_empty(),
+                "アタッチでペインが作られていない"
+            );
             session.panes[0].id
         }
         _ => unreachable!(),

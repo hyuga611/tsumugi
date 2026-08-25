@@ -10,19 +10,19 @@
 //! ここの責務は「OS イベントを `KeyInput` / `Command` に翻訳し、`Effect` を実行する」
 //! ことだけ。モーダルの判断は `tsg-modal` にしかない。
 
-mod cli;
 mod agent_hooks;
+mod cli;
 mod config;
 mod input;
+mod install;
 mod mouse;
 mod overlay;
 mod platform;
-mod install;
 mod reload;
 mod rpc;
 mod session;
-mod theme;
 mod shell;
+mod theme;
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -47,16 +47,14 @@ use winit::window::{Window, WindowId};
 
 use cli::{Cli, Mode as CliMode};
 use config::Config;
-use theme::Theme;
 use session::{GUTTER, PaneView, Rect, Session};
+use theme::Theme;
 
 /// クリア色。**`Color::Default` の解決先とクリア色を別々に持たせない。**
 /// 2 か所に書くと、テーマを変えたときに片方だけ古い色のまま残る。
 fn background_of(th: &Theme, opacity: f32) -> [f32; 4] {
     [th.bg[0], th.bg[1], th.bg[2], opacity]
 }
-
-
 
 struct App {
     window: Option<Arc<Window>>,
@@ -194,9 +192,7 @@ impl App {
     }
 
     fn text_rows(&self) -> usize {
-        self.rows
-            .saturating_sub(1 + self.tab_rows())
-            .max(1)
+        self.rows.saturating_sub(1 + self.tab_rows()).max(1)
     }
 
     fn area(&self) -> Rect {
@@ -294,8 +290,10 @@ impl App {
                     // `!` は挿入するだけ。Enter は押さない（modal-spec.md §7）。
                     self.snap_to_live_tail();
                     self.send_input(text.as_bytes());
-                    self.status_msg = t!(format!("プロンプトへ {} 文字を送りました", text.chars().count()),
-                        format!("sent {} characters to the prompt", text.chars().count()));
+                    self.status_msg = t!(
+                        format!("プロンプトへ {} 文字を送りました", text.chars().count()),
+                        format!("sent {} characters to the prompt", text.chars().count())
+                    );
                 }
                 Effect::Scrolled(delta) => self.scroll_by(delta),
                 Effect::Message(msg) => self.status_msg = msg,
@@ -469,7 +467,10 @@ impl App {
         self.menu.hide();
         self.palette.hide();
         self.picker.show(
-            t!("セッション（Enter で切り替え）", "Sessions (Enter to switch)"),
+            t!(
+                "セッション（Enter で切り替え）",
+                "Sessions (Enter to switch)"
+            ),
             names,
             overlay::PickKind::Session,
         );
@@ -478,7 +479,10 @@ impl App {
     /// 別のセッションへ乗り換える。**今のセッションは殺さない**（デタッチ）。
     fn switch_session(&mut self, name: &str) {
         if name == self.session_name {
-            self.status_msg = t!(format!("すでに {name} にいます"), format!("already in {name}"));
+            self.status_msg = t!(
+                format!("すでに {name} にいます"),
+                format!("already in {name}")
+            );
             return;
         }
         self.send_msg(&ClientMsg::Detach);
@@ -496,9 +500,17 @@ impl App {
                     cwd: self.cwd.clone(),
                     command: None,
                 });
-                self.status_msg = t!(format!("{name} に移りました"), format!("switched to {name}"));
+                self.status_msg = t!(
+                    format!("{name} に移りました"),
+                    format!("switched to {name}")
+                );
             }
-            Err(e) => self.status_msg = t!(format!("{name} へ繋げません: {e:#}"), format!("cannot reach {name}: {e:#}")),
+            Err(e) => {
+                self.status_msg = t!(
+                    format!("{name} へ繋げません: {e:#}"),
+                    format!("cannot reach {name}: {e:#}")
+                )
+            }
         }
     }
 
@@ -620,7 +632,8 @@ impl App {
         let app_cursor = self
             .active_view()
             .is_some_and(|v| v.term.state.modes.app_cursor_keys);
-        if let Some(bytes) = input::encode(&key, text.as_deref(), ModifiersState::empty(), app_cursor)
+        if let Some(bytes) =
+            input::encode(&key, text.as_deref(), ModifiersState::empty(), app_cursor)
         {
             self.send_input(&bytes);
         }
@@ -648,7 +661,10 @@ impl App {
 
         match pipe_through(command, &input, cwd.as_deref()) {
             Ok(output) if output.trim().is_empty() => {
-                self.status_msg = t!(format!("{command} は何も返しませんでした"), format!("{command} returned nothing"));
+                self.status_msg = t!(
+                    format!("{command} は何も返しませんでした"),
+                    format!("{command} returned nothing")
+                );
             }
             Ok(output) => {
                 let pane = self.session.active;
@@ -659,7 +675,12 @@ impl App {
                     text: output,
                 });
             }
-            Err(e) => self.status_msg = t!(format!("{command} を実行できません: {e}"), format!("cannot run {command}: {e}")),
+            Err(e) => {
+                self.status_msg = t!(
+                    format!("{command} を実行できません: {e}"),
+                    format!("cannot run {command}: {e}")
+                )
+            }
         }
     }
 
@@ -792,7 +813,11 @@ impl App {
             .get(&pane)
             .is_none_or(|v| v.file.is_none())
         {
-            self.status_msg = t!("このペインはファイルではありません", "this pane is not a file").into();
+            self.status_msg = t!(
+                "このペインはファイルではありません",
+                "this pane is not a file"
+            )
+            .into();
             return;
         }
         // 先に今の中身を渡してから書かせる（取りこぼしを作らない）
@@ -810,7 +835,11 @@ impl App {
             .and_then(|v| v.file.as_ref())
             .is_some_and(|f| f.dirty);
         if dirty && !force {
-            self.status_msg = t!("保存していません（:w で保存、:q! で捨てる）", "unsaved (:w to save, :q! to discard)").into();
+            self.status_msg = t!(
+                "保存していません（:w で保存、:q! で捨てる）",
+                "unsaved (:w to save, :q! to discard)"
+            )
+            .into();
             return;
         }
         self.send_msg(&ClientMsg::CloseFile { pane });
@@ -835,8 +864,10 @@ impl App {
     /// 代わりに「一度警告した」ことだけを覚える。警告して二度と閉じられない、が一番困る。
     fn warn_unsaved(&mut self) {
         let names = self.unsaved().join(" ");
-        self.status_msg = t!(format!("保存していません: {names}（:w で保存、もう一度で破棄）"),
-            format!("unsaved: {names} (:w to save, or repeat to discard)"));
+        self.status_msg = t!(
+            format!("保存していません: {names}（:w で保存、もう一度で破棄）"),
+            format!("unsaved: {names} (:w to save, or repeat to discard)")
+        );
         self.quit_warned = true;
     }
 
@@ -847,7 +878,10 @@ impl App {
         if let Some(cb) = &mut self.clipboard
             && let Err(e) = cb.set_text(text.to_string())
         {
-            self.status_msg = t!(format!("クリップボードへ書けません: {e}"), format!("cannot write to the clipboard: {e}"));
+            self.status_msg = t!(
+                format!("クリップボードへ書けません: {e}"),
+                format!("cannot write to the clipboard: {e}")
+            );
         }
     }
 
@@ -928,7 +962,10 @@ impl App {
         if let Some(c) = &mut self.client
             && let Err(e) = c.send(msg)
         {
-            self.status_msg = t!(format!("サーバへ送れません: {e}"), format!("cannot reach the server: {e}"));
+            self.status_msg = t!(
+                format!("サーバへ送れません: {e}"),
+                format!("cannot reach the server: {e}")
+            );
         }
     }
 
@@ -1054,7 +1091,8 @@ impl App {
                     self.engine.set_cursor(Pos::default(), &buf);
                     self.session.active = pane;
                     got = true;
-                    self.status_msg = t!(format!("{title} を開きました"), format!("opened {title}"));
+                    self.status_msg =
+                        t!(format!("{title} を開きました"), format!("opened {title}"));
                 }
                 ServerMsg::FileSaved { pane, path } => {
                     if let Some(f) = self
@@ -1125,7 +1163,10 @@ impl App {
                     if let Some(v) = self.session.panes.get_mut(&pane) {
                         v.alive = false;
                     }
-                    self.status_msg = t!(format!("ペイン {pane} のシェルが終了しました"), format!("the shell in pane {pane} exited"));
+                    self.status_msg = t!(
+                        format!("ペイン {pane} のシェルが終了しました"),
+                        format!("the shell in pane {pane} exited")
+                    );
                 }
                 ServerMsg::Pong => {}
                 ServerMsg::Error { message } => self.status_msg = message,
@@ -1162,7 +1203,6 @@ impl App {
         }
         self.sync_previews();
     }
-
 
     // ---- マウス -----------------------------------------------------------
     //
@@ -1219,7 +1259,10 @@ impl App {
                 tsg_modal::Command::JumpMark { name, exact: true },
                 event_loop,
             );
-            self.status_msg = t!(format!("マーク {name} へ飛びました"), format!("jumped to mark {name}"));
+            self.status_msg = t!(
+                format!("マーク {name} へ飛びました"),
+                format!("jumped to mark {name}")
+            );
             return;
         }
         let clicks = self.clicks.press((usize::MAX, pos.line), Instant::now());
@@ -1240,7 +1283,11 @@ impl App {
             Some(range) => {
                 self.dispatch(tsg_modal::Command::Select { range }, event_loop);
                 self.status_msg = if clicks >= 2 {
-                    t!("出力だけを選びました（y でコピー）", "selected the output (y to copy)").into()
+                    t!(
+                        "出力だけを選びました（y でコピー）",
+                        "selected the output (y to copy)"
+                    )
+                    .into()
                 } else {
                     t!(
                         "コマンドと出力を選びました（y でコピー）",
@@ -1249,7 +1296,13 @@ impl App {
                     .into()
                 };
             }
-            None => self.status_msg = t!("この行にコマンドブロックがありません", "no command block on this line").into(),
+            None => {
+                self.status_msg = t!(
+                    "この行にコマンドブロックがありません",
+                    "no command block on this line"
+                )
+                .into()
+            }
         }
     }
 
@@ -1370,9 +1423,7 @@ impl App {
             let text: String = cells.iter().map(|c| c.text.as_str()).collect();
             for word in text.split_whitespace() {
                 // 前後の飾り（引用符・括弧・句読点）を落としてから見る。
-                let w = word.trim_matches(|c: char| {
-                    "\"'`（）()[]{}<>、。,;:！!？?".contains(c)
-                });
+                let w = word.trim_matches(|c: char| "\"'`（）()[]{}<>、。,;:！!？?".contains(c));
                 if !matches!(open_kind(w), Some(OpenKind::Path)) {
                     continue;
                 }
@@ -1461,10 +1512,7 @@ impl App {
 
         // 別のタブなら、タブごと移る。
         if let Some(info) = self.session.info.as_ref()
-            && let Some(tab) = info
-                .tabs
-                .iter()
-                .find(|t| t.layout.panes().contains(&next))
+            && let Some(tab) = info.tabs.iter().find(|t| t.layout.panes().contains(&next))
             && tab.id != info.active_tab
         {
             let id = tab.id;
@@ -1475,7 +1523,9 @@ impl App {
         let state = self.agent_state(next);
         self.status_msg = match state {
             Some(AgentState::Blocked) => t!("返事待ち", "waiting for you").into(),
-            Some(AgentState::Failed) => t!("失敗して止まっています", "stopped with an error").into(),
+            Some(AgentState::Failed) => {
+                t!("失敗して止まっています", "stopped with an error").into()
+            }
             _ => t!("終わっています", "finished").into(),
         };
     }
@@ -1556,7 +1606,10 @@ impl App {
         let Some(view) = self.active_view() else {
             return false;
         };
-        let (tracking, encoding) = (view.term.state.modes.mouse, view.term.state.modes.mouse_encoding);
+        let (tracking, encoding) = (
+            view.term.state.modes.mouse,
+            view.term.state.modes.mouse_encoding,
+        );
         let rect = view.rect;
         let bits = mouse::modifier_bits(
             self.mods.shift_key(),
@@ -1769,7 +1822,11 @@ impl App {
         if button == MouseButton::Left
             && let Some((pane, dir)) = self.session.divider_at(col, row)
         {
-            if self.clicks.press((usize::MAX - 1, row * 4096 + col), Instant::now()) >= 2 {
+            if self
+                .clicks
+                .press((usize::MAX - 1, row * 4096 + col), Instant::now())
+                >= 2
+            {
                 self.run_mux(MuxRequest::Equalize, event_loop);
                 self.status_msg = t!("分割比をそろえました", "splits evened out").into();
                 return;
@@ -1873,8 +1930,15 @@ impl App {
         let text = tsg_modal::extract(&buf, &range);
         match open_kind(&text) {
             Some(OpenKind::Url) => match open_in_os(&text) {
-                Ok(()) => self.status_msg = t!(format!("{text} を開きました"), format!("opened {text}")),
-                Err(e) => self.status_msg = t!(format!("{text} を開けません: {e}"), format!("cannot open {text}: {e}")),
+                Ok(()) => {
+                    self.status_msg = t!(format!("{text} を開きました"), format!("opened {text}"))
+                }
+                Err(e) => {
+                    self.status_msg = t!(
+                        format!("{text} を開けません: {e}"),
+                        format!("cannot open {text}: {e}")
+                    )
+                }
             },
             Some(OpenKind::Path) => {
                 let path = strip_position(&text).trim_matches('"').to_string();
@@ -1884,7 +1948,11 @@ impl App {
                 self.snap_to_live_tail();
                 self.send_input(format!("git show {text}").as_bytes());
                 self.dispatch_insert();
-                self.status_msg = t!("プロンプトへ置きました（Enter は自分で）", "put on the prompt (press Enter yourself)").into();
+                self.status_msg = t!(
+                    "プロンプトへ置きました（Enter は自分で）",
+                    "put on the prompt (press Enter yourself)"
+                )
+                .into();
             }
             None => {
                 // ラベルは「在るもの」に振るので、拡張子の無いフォルダが
@@ -2021,7 +2089,10 @@ impl App {
             (macro_label, StatusTarget::Macro),
             // モードの帯もボタン。押すと入力 ⇄ 読むが切り替わる。
             // キーを覚えていない人が、モードを行き来する唯一の手段になる。
-            (format!("  {}  ", self.engine.mode().label()), StatusTarget::Mode),
+            (
+                format!("  {}  ", self.engine.mode().label()),
+                StatusTarget::Mode,
+            ),
         ];
         // 人の番になっているエージェントが居れば、その数を出す。
         // **押すとそこへ飛ぶ。** 数を見せるだけだと、探すのは結局手作業になる。
@@ -2128,7 +2199,11 @@ impl App {
             v.term.state.pins.key = Some(InputOwner::Tsumugi);
         }
         self.dispatch(tsg_modal::Command::EnterNormal, event_loop);
-        self.status_msg = t!("入力の所有権を tsumugi に固定しました", "input is pinned to tsumugi now").into();
+        self.status_msg = t!(
+            "入力の所有権を tsumugi に固定しました",
+            "input is pinned to tsumugi now"
+        )
+        .into();
     }
 
     fn on_mouse_release(&mut self, button: MouseButton) {
@@ -2162,7 +2237,10 @@ impl App {
                 .is_some_and(|i| i.tabs.get(to).is_some_and(|t| t.id != dragged))
         {
             self.send_msg(&ClientMsg::MoveTab { tab: dragged, to });
-            self.status_msg = t!(format!("タブを {} 番目へ動かしました", to + 1), format!("moved the tab to position {}", to + 1));
+            self.status_msg = t!(
+                format!("タブを {} 番目へ動かしました", to + 1),
+                format!("moved the tab to position {}", to + 1)
+            );
         }
 
         if self.mouse_goes_to_child() {
@@ -2302,7 +2380,10 @@ impl App {
                 let size = r.font_size();
                 self.cfg.font_size = size;
                 self.resize_window();
-                self.status_msg = t!(format!("文字の大きさ {size:.0}px"), format!("font size {size:.0}px"));
+                self.status_msg = t!(
+                    format!("文字の大きさ {size:.0}px"),
+                    format!("font size {size:.0}px")
+                );
             }
             return;
         }
@@ -2863,7 +2944,8 @@ impl App {
                 let mut start = 0usize;
                 let mut word = String::new();
                 let flush = |word: &mut String, start: usize, hints: &mut Vec<Hint>| {
-                    let trimmed = word.trim_matches(|c: char| "\"'`（）()[]{}<>、。,;:!?".contains(c));
+                    let trimmed =
+                        word.trim_matches(|c: char| "\"'`（）()[]{}<>、。,;:!?".contains(c));
                     if !trimmed.is_empty() && worth_labelling(trimmed, cwd.as_deref()) {
                         hints.push(Hint {
                             pane: id,
@@ -2930,7 +3012,10 @@ impl App {
             self.hints.clear();
             self.hint_typed.clear();
             self.session.active = h.pane;
-            self.status_msg = t!(format!("{} を開きます", h.text), format!("opening {}", h.text));
+            self.status_msg = t!(
+                format!("{} を開きます", h.text),
+                format!("opening {}", h.text)
+            );
             self.open_at(h.pane, Pos::new(h.line, h.col));
             return;
         }
@@ -2960,7 +3045,10 @@ impl App {
             self.status_msg.clear();
             return;
         }
-        let back = matches!(self.palette.kind, overlay::PaletteKind::Search { back: true });
+        let back = matches!(
+            self.palette.kind,
+            overlay::PaletteKind::Search { back: true }
+        );
         // 出発点そのものも一致し得るので、1 つ手前から探し始める。
         let seed = if back {
             Pos::new(from.line, from.col + 1)
@@ -3075,7 +3163,11 @@ impl App {
                     };
                     let rect = view.rect;
                     let is_active = *id == active;
-                    let divider = if is_active { th.divider_active } else { th.divider };
+                    let divider = if is_active {
+                        th.divider_active
+                    } else {
+                        th.divider
+                    };
 
                     if rect.x > 0 {
                         renderer.rect(
@@ -3130,7 +3222,11 @@ impl App {
                             (rect.y + r) as f32,
                             w,
                             1.0,
-                            if is_active { color } else { th.fade(color, 0.45) },
+                            if is_active {
+                                color
+                            } else {
+                                th.fade(color, 0.45)
+                            },
                         );
                     }
 
@@ -3224,9 +3320,7 @@ impl App {
                         }
                     }
 
-                    if is_active
-                        && let Some(range) = selection
-                    {
+                    if is_active && let Some(range) = selection {
                         for r in 0..rect.h {
                             if let Some((from, to)) = selection_span(&range, at(r), rect.w) {
                                 let w = (to + 1).saturating_sub(from) as f32;
@@ -3330,12 +3424,7 @@ impl App {
                                 && fg == run_fg
                                 && run_at + run.chars().count() == c;
                             if !continues && !run.is_empty() {
-                                renderer.glyph_run(
-                                    (rect.x + run_at) as f32,
-                                    y,
-                                    &run,
-                                    run_fg,
-                                );
+                                renderer.glyph_run((rect.x + run_at) as f32, y, &run, run_fg);
                                 run.clear();
                             }
                             if joinable {
@@ -3425,10 +3514,19 @@ impl App {
             if active {
                 renderer.rect(x as f32, 0.0, w as f32, 1.0, th.tab_active);
             }
-            renderer.text(x as f32, 0.0, label, if active { th.fg } else { th.dim }, true);
+            renderer.text(
+                x as f32,
+                0.0,
+                label,
+                if active { th.fg } else { th.dim },
+                true,
+            );
             // 「 1 ● 名前 」の ● は 3 桁目から（番号が 2 桁になっても 1 桁ずれるだけ）。
             if let Some(Some(c)) = marks.get(i) {
-                let head: String = label.chars().take_while(|c| *c != '●' && *c != '✕' && *c != '✓' && *c != '◍').collect();
+                let head: String = label
+                    .chars()
+                    .take_while(|c| *c != '●' && *c != '✕' && *c != '✓' && *c != '◍')
+                    .collect();
                 let mark: String = label.chars().skip(head.chars().count()).take(1).collect();
                 if !mark.is_empty() {
                     renderer.text((x + display_width(&head)) as f32, 0.0, &mark, *c, true);
@@ -3438,9 +3536,9 @@ impl App {
     }
 
     /// 次に飛ぶ先。**何度も押すと順に回る**ように、いま居るところより後ろを先に見る。
-///
-/// 3 本が同時に返事待ちのとき、押すたびに同じ 1 本へ戻るのでは
-/// 「探す手間を消す」という目的を果たさない。
+    ///
+    /// 3 本が同時に返事待ちのとき、押すたびに同じ 1 本へ戻るのでは
+    /// 「探す手間を消す」という目的を果たさない。
     fn next_waiting(waiting: &[u32], here: u32) -> Option<u32> {
         waiting
             .iter()
@@ -3449,7 +3547,7 @@ impl App {
             .or_else(|| waiting.first().copied())
     }
 
-/// 状態の色。タブの印とステータスで同じものを使う。
+    /// 状態の色。タブの印とステータスで同じものを使う。
     fn agent_color(th: &Theme, a: AgentState) -> [f32; 4] {
         match a {
             AgentState::Working => th.agent_working,
@@ -3549,9 +3647,8 @@ impl App {
                 } else {
                     rect.x + h.col
                 };
-                (row < rect.h && h.col < rect.w).then(|| {
-                    (x, rect.y + row, h.label.clone(), !typed.is_empty())
-                })
+                (row < rect.h && h.col < rect.w)
+                    .then(|| (x, rect.y + row, h.label.clone(), !typed.is_empty()))
             })
             .collect();
         let Some(r) = self.renderer.as_mut() else {
@@ -3623,7 +3720,13 @@ impl App {
             r.text(x as f32, y as f32, "▲", th.accent, true);
         }
         if below > 0 {
-            r.text(x as f32, (y + h).saturating_sub(1) as f32, "▼", th.accent, true);
+            r.text(
+                x as f32,
+                (y + h).saturating_sub(1) as f32,
+                "▼",
+                th.accent,
+                true,
+            );
         }
     }
 
@@ -3637,7 +3740,10 @@ impl App {
         let w = self.palette_width();
         // 検索は入力欄 1 行だけ。一覧を出すと、探している画面が隠れる。
         if self.palette.searching() {
-            let back = matches!(self.palette.kind, overlay::PaletteKind::Search { back: true });
+            let back = matches!(
+                self.palette.kind,
+                overlay::PaletteKind::Search { back: true }
+            );
             let head = if back { "?" } else { "/" };
             let line = format!("{head} {}", self.palette.query);
             let hits = self.search_hits();
@@ -3665,8 +3771,11 @@ impl App {
         let query = format!(": {}", self.palette.query);
         let q = self.palette.query.trim_start();
         let hint = if self.pending_pipe.is_some() {
-            t!("通すコマンドを書いて Enter（例: sort / jq . / findstr x）",
-                "type a command and press Enter (sort / jq . / findstr x)").to_string()
+            t!(
+                "通すコマンドを書いて Enter（例: sort / jq . / findstr x）",
+                "type a command and press Enter (sort / jq . / findstr x)"
+            )
+            .to_string()
         } else if q.starts_with("e ") {
             t!("Enter でそのファイルを開きます", "Enter opens that file").to_string()
         } else if matches!(q, "w" | "q" | "q!" | "wq") || q.starts_with("w ") {
@@ -3680,13 +3789,7 @@ impl App {
         let rows: Vec<(String, String, bool)> = view
             .iter()
             .enumerate()
-            .map(|(i, it)| {
-                (
-                    it.title.to_string(),
-                    it.keys.clone(),
-                    start + i == selected,
-                )
-            })
+            .map(|(i, it)| (it.title.to_string(), it.keys.clone(), start + i == selected))
             .collect();
         let below = total.saturating_sub(start + shown);
 
@@ -3714,7 +3817,13 @@ impl App {
             r.text((x + 2) as f32, ry, title, th.fg, true);
             if !keys.is_empty() {
                 let kw = display_width(keys);
-                r.text((x + w).saturating_sub(kw + 1) as f32, ry, keys, th.dim, true);
+                r.text(
+                    (x + w).saturating_sub(kw + 1) as f32,
+                    ry,
+                    keys,
+                    th.dim,
+                    true,
+                );
             }
         }
         // 上下に隠れている件数。**「ほか N 件」だけだと下に降りられると思えない**ので、
@@ -3772,7 +3881,10 @@ impl App {
             r.text(
                 (x + 1) as f32,
                 (y + 1) as f32,
-                t!("走っているセッションがありません", "no sessions are running"),
+                t!(
+                    "走っているセッションがありません",
+                    "no sessions are running"
+                ),
                 th.dim,
                 true,
             );
@@ -3785,7 +3897,13 @@ impl App {
             }
             r.text((x + 2) as f32, ry, name, th.fg, true);
             if *current {
-                r.text((x + w).saturating_sub(6) as f32, ry, t!("今ここ", "here"), th.dim, true);
+                r.text(
+                    (x + w).saturating_sub(6) as f32,
+                    ry,
+                    t!("今ここ", "here"),
+                    th.dim,
+                    true,
+                );
             }
         }
     }
@@ -3941,9 +4059,7 @@ impl App {
                 r.set_font_size(self.cfg.font_size);
             }
         }
-        if blur_changed
-            && let Some(w) = &self.window
-        {
+        if blur_changed && let Some(w) = &self.window {
             platform::decorate(w.as_ref(), self.cfg.blur);
         }
         if font_changed {
@@ -4003,12 +4119,7 @@ impl App {
     /// 何も無い部分だけ古い背景のまま残る。
     fn apply_theme(&mut self, name: &str) {
         if !self.cfg.set_theme(name) {
-            self.status_msg = t!(
-                "その配色は知りません: ",
-                "no such theme: "
-            )
-            .to_string()
-                + name;
+            self.status_msg = t!("その配色は知りません: ", "no such theme: ").to_string() + name;
             return;
         }
         self.theme = self.cfg.theme;
@@ -4016,11 +4127,7 @@ impl App {
         if let Some(r) = self.renderer.as_mut() {
             r.background = background_of(&self.theme, self.cfg.opacity);
         }
-        self.status_msg = format!(
-            "{}{}",
-            t!("配色: ", "theme: "),
-            self.cfg.theme_name
-        );
+        self.status_msg = format!("{}{}", t!("配色: ", "theme: "), self.cfg.theme_name);
         if let Some(w) = &self.window {
             w.request_redraw();
         }
@@ -4102,9 +4209,7 @@ fn to_key_input(key: &Key, mods: ModifiersState, mode: Mode) -> Option<KeyInput>
 }
 
 fn display_width(s: &str) -> usize {
-    s.chars()
-        .map(tsg_term::width_of)
-        .sum()
+    s.chars().map(tsg_term::width_of).sum()
 }
 
 /// モード別に「いま押せるキー」を返す。
@@ -4133,10 +4238,7 @@ fn fold_label(buf: &dyn tsg_modal::Buffer, start: usize) -> String {
         && let Some(cmd) = b.command_line
     {
         let text = tsg_modal::line_text(buf, cmd);
-        let from = text
-            .char_indices()
-            .nth(b.command_col)
-            .map_or(0, |(i, _)| i);
+        let from = text.char_indices().nth(b.command_col).map_or(0, |(i, _)| i);
         return text[from..].trim().to_string();
     }
     String::new()
@@ -4198,11 +4300,11 @@ fn open_kind(text: &str) -> Option<OpenKind> {
     let head = strip_position(t);
     let looks_path = head.contains('/')
         || head.contains('\\')
-        || head
-            .rsplit_once('.')
-            .is_some_and(|(name, ext)| {
-                !name.is_empty() && (1..=6).contains(&ext.len()) && ext.chars().all(char::is_alphanumeric)
-            });
+        || head.rsplit_once('.').is_some_and(|(name, ext)| {
+            !name.is_empty()
+                && (1..=6).contains(&ext.len())
+                && ext.chars().all(char::is_alphanumeric)
+        });
     if looks_path {
         return Some(OpenKind::Path);
     }
@@ -4355,9 +4457,21 @@ fn rgb8(c: [f32; 4]) -> (u8, u8, u8) {
 fn panel(r: &mut Renderer, th: &Theme, x: usize, y: usize, w: usize, h: usize) {
     r.rect(x as f32, y as f32, w as f32, h as f32, th.panel_bg);
     r.rect(x as f32, y as f32, w as f32, 0.06, th.panel_edge);
-    r.rect(x as f32, (y + h) as f32 - 0.06, w as f32, 0.06, th.panel_edge);
+    r.rect(
+        x as f32,
+        (y + h) as f32 - 0.06,
+        w as f32,
+        0.06,
+        th.panel_edge,
+    );
     r.rect(x as f32, y as f32, 0.06, h as f32, th.panel_edge);
-    r.rect((x + w) as f32 - 0.06, y as f32, 0.06, h as f32, th.panel_edge);
+    r.rect(
+        (x + w) as f32 - 0.06,
+        y as f32,
+        0.06,
+        h as f32,
+        th.panel_edge,
+    );
 }
 
 /// 左クリック 1 回が何をするか。
@@ -4502,15 +4616,24 @@ fn help_lines() -> Vec<HelpLine> {
     for (a, b) in [
         (
             t!("クリック", "click"),
-            t!("そこにカーソルを置く（過去の出力なら読むモードへ）", "put the cursor there"),
+            t!(
+                "そこにカーソルを置く（過去の出力なら読むモードへ）",
+                "put the cursor there"
+            ),
         ),
         (
             t!("ダブルクリック", "double-click"),
-            t!("語・パス・URL をまるごと選ぶ", "select a word, path or URL as one"),
+            t!(
+                "語・パス・URL をまるごと選ぶ",
+                "select a word, path or URL as one"
+            ),
         ),
         (
             t!("ドラッグ", "drag"),
-            t!("範囲を選ぶ（そのあと右クリック）", "select a range, then right-click"),
+            t!(
+                "範囲を選ぶ（そのあと右クリック）",
+                "select a range, then right-click"
+            ),
         ),
         (
             t!("右クリック", "right-click"),
@@ -4518,7 +4641,10 @@ fn help_lines() -> Vec<HelpLine> {
         ),
         (
             t!("左のふち", "left edge"),
-            t!("コマンドとその出力をまるごと選ぶ（赤は失敗）", "select a whole command block (red = failed)"),
+            t!(
+                "コマンドとその出力をまるごと選ぶ（赤は失敗）",
+                "select a whole command block (red = failed)"
+            ),
         ),
         (
             t!("Ctrl＋クリック", "Ctrl+click"),
@@ -4526,11 +4652,17 @@ fn help_lines() -> Vec<HelpLine> {
         ),
         (
             t!("下の ≡", "the ≡ below"),
-            t!("すべてのコマンド（打って絞り込めます）", "every command, searchable"),
+            t!(
+                "すべてのコマンド（打って絞り込めます）",
+                "every command, searchable"
+            ),
         ),
         (
             t!("下のモードの帯", "the mode chip"),
-            t!("押すと 入力 ⇄ 読む が切り替わる", "click to toggle typing / reading"),
+            t!(
+                "押すと 入力 ⇄ 読む が切り替わる",
+                "click to toggle typing / reading"
+            ),
         ),
     ] {
         v.push(Pair(a, b));
@@ -4540,18 +4672,30 @@ fn help_lines() -> Vec<HelpLine> {
     for (a, b) in [
         (
             t!("入力", "typing"),
-            t!("打った文字がそのままシェルへ行く。普通のターミナル", "keys go to the shell, like any terminal"),
+            t!(
+                "打った文字がそのままシェルへ行く。普通のターミナル",
+                "keys go to the shell, like any terminal"
+            ),
         ),
         (
             t!("読む", "reading"),
-            t!("キーが操作になる。j は「1 行下へ」の意味", "keys become commands; j means one line down"),
+            t!(
+                "キーが操作になる。j は「1 行下へ」の意味",
+                "keys become commands; j means one line down"
+            ),
         ),
         (
             "Esc  /  i",
-            t!("入力 → 読む  /  読む → 入力", "typing → reading  /  reading → typing"),
+            t!(
+                "入力 → 読む  /  読む → 入力",
+                "typing → reading  /  reading → typing"
+            ),
         ),
         (
-            t!("（読むモードの間は日本語入力が自動で切れます）", "(IME turns off while reading)"),
+            t!(
+                "（読むモードの間は日本語入力が自動で切れます）",
+                "(IME turns off while reading)"
+            ),
             "",
         ),
     ] {
@@ -4562,12 +4706,21 @@ fn help_lines() -> Vec<HelpLine> {
     for (a, b) in [
         (
             t!("下の ✕ 端末へ戻る", "the ✕ below"),
-            t!("エディタを閉じて、元のシェルへ戻る", "close the editor and go back to the shell"),
+            t!(
+                "エディタを閉じて、元のシェルへ戻る",
+                "close the editor and go back to the shell"
+            ),
         ),
-        (":w  /  :q", t!("保存 / 端末へ戻る", "save / back to the shell")),
+        (
+            ":w  /  :q",
+            t!("保存 / 端末へ戻る", "save / back to the shell"),
+        ),
         (
             t!("下の ◱ 読む形", "the ◱ below"),
-            t!("Markdown を読む形にする（Space m でも）", "render Markdown (or Space m)"),
+            t!(
+                "Markdown を読む形にする（Space m でも）",
+                "render Markdown (or Space m)"
+            ),
         ),
     ] {
         v.push(Pair(a, b));
@@ -4580,15 +4733,33 @@ fn help_lines() -> Vec<HelpLine> {
     for (a, b) in [
         (
             t!("下の ● 返事待ち", "the ● waiting count"),
-            t!("待っているエージェントの数。押すとそこへ飛ぶ", "agents waiting for you; click to jump"),
+            t!(
+                "待っているエージェントの数。押すとそこへ飛ぶ",
+                "agents waiting for you; click to jump"
+            ),
         ),
         (
             t!("タブの ● ✓ ✕ ◍", "● ✓ ✕ ◍ on a tab"),
-            t!("返事待ち / 終わった / 失敗 / 動いている", "waiting / done / failed / working"),
+            t!(
+                "返事待ち / 終わった / 失敗 / 動いている",
+                "waiting / done / failed / working"
+            ),
         ),
-        ("Space a", t!("次の返事待ちへ飛ぶ", "jump to the next agent waiting")),
-        ("Space f", t!("画面に出てきたファイルの一覧", "files mentioned on this screen")),
-        ("[a  ]a", t!("前 / 次の発話へ", "previous / next agent message")),
+        (
+            "Space a",
+            t!("次の返事待ちへ飛ぶ", "jump to the next agent waiting"),
+        ),
+        (
+            "Space f",
+            t!(
+                "画面に出てきたファイルの一覧",
+                "files mentioned on this screen"
+            ),
+        ),
+        (
+            "[a  ]a",
+            t!("前 / 次の発話へ", "previous / next agent message"),
+        ),
         (
             t!("（先に一度だけ）", "(once, up front)"),
             "tsg --install-agent-hooks",
@@ -4597,14 +4768,38 @@ fn help_lines() -> Vec<HelpLine> {
         v.push(Pair(a, b));
     }
     v.push(Blank);
-    v.push(Title(t!("■ キーで速くしたくなったら", "■ When you want to go faster")));
+    v.push(Title(t!(
+        "■ キーで速くしたくなったら",
+        "■ When you want to go faster"
+    )));
     for (a, b) in [
         ("j  k", t!("下 / 上へ", "down / up")),
-        ("V  →  y", t!("行を選んでコピー", "select a line, then copy")),
-        ("[[  ]]", t!("前 / 次のコマンドへ", "previous / next command")),
-        ("!", t!("選んだものをプロンプトへ送る", "send the selection to the prompt")),
-        (":e path", t!("ファイルを開く（このペインがエディタになる）", "open a file in this pane")),
-        ("Space", t!("画面を分割・切り替え", "split and switch panes")),
+        (
+            "V  →  y",
+            t!("行を選んでコピー", "select a line, then copy"),
+        ),
+        (
+            "[[  ]]",
+            t!("前 / 次のコマンドへ", "previous / next command"),
+        ),
+        (
+            "!",
+            t!(
+                "選んだものをプロンプトへ送る",
+                "send the selection to the prompt"
+            ),
+        ),
+        (
+            ":e path",
+            t!(
+                "ファイルを開く（このペインがエディタになる）",
+                "open a file in this pane"
+            ),
+        ),
+        (
+            "Space",
+            t!("画面を分割・切り替え", "split and switch panes"),
+        ),
         ("F1", t!("この画面", "this screen")),
     ] {
         v.push(Pair(a, b));
@@ -4648,7 +4843,9 @@ fn draw_help(renderer: &mut Renderer, th: &Theme, cols: usize, rows: usize, scro
     let rest = lines.len().saturating_sub(scroll + avail);
     let foot = if rest > 0 || scroll > 0 {
         t!(
-            format!("↑↓ でスクロール（あと {rest} 行） · どれかキーを押す / クリックすると閉じます"),
+            format!(
+                "↑↓ でスクロール（あと {rest} 行） · どれかキーを押す / クリックすると閉じます"
+            ),
             format!("↑↓ to scroll ({rest} more) · press any key or click to close")
         )
     } else {
@@ -4700,6 +4897,7 @@ impl ApplicationHandler for App {
             size.height,
             self.cfg.font_size,
             transparent,
+            self.cfg.font_family.as_deref(),
         ) {
             Ok(mut r) => {
                 // `Color::Default` の解決先とクリア色を別々に持たせない
@@ -4865,9 +5063,7 @@ impl ApplicationHandler for App {
         if self.watch.changed() {
             dirty |= self.reload_config();
         }
-        if dirty
-            && let Some(w) = &self.window
-        {
+        if dirty && let Some(w) = &self.window {
             w.request_redraw();
         }
         event_loop.set_control_flow(ControlFlow::WaitUntil(
@@ -4881,9 +5077,6 @@ impl ApplicationHandler for App {
         let _ = std::io::stdout().flush();
     }
 }
-
-
-
 
 fn connect_or_spawn(session: &str) -> Result<Client> {
     if let Ok(c) = Client::connect(session) {
@@ -5030,8 +5223,9 @@ fn install_shell_integration(name: Option<&str>) -> Result<()> {
 /// 名前が無ければ今のシェルを見る。分からなければ**黙って諦めず**候補を出す。
 fn pick_shell(name: Option<&str>) -> Result<shell::Shell> {
     match name {
-        Some(n) => shell::Shell::parse(n)
-            .with_context(|| format!("{n} 向けのシェル統合はありません（bash / zsh / fish / pwsh / nu）")),
+        Some(n) => shell::Shell::parse(n).with_context(|| {
+            format!("{n} 向けのシェル統合はありません（bash / zsh / fish / pwsh / nu）")
+        }),
         None => shell::Shell::detect().context(
             "今のシェルが分かりません。名前を渡してください（bash / zsh / fish / pwsh / nu）",
         ),
@@ -5105,7 +5299,9 @@ fn main() -> Result<()> {
     // そのまま窓を開く（開かないより、窓が開くほうがまし）。
     if cli.mode == cli::Mode::Run
         && !cli.new_window
-        && let Some(inside) = std::env::var("TSUMUGI_SESSION").ok().filter(|s| !s.is_empty())
+        && let Some(inside) = std::env::var("TSUMUGI_SESSION")
+            .ok()
+            .filter(|s| !s.is_empty())
         && (!cli.session_given || cli.session == inside)
     {
         let cwd = cli
@@ -5210,10 +5406,7 @@ mod tests {
         let buf = tsg_modal::TermBuffer::new(&t.state.grid, &t.state.marks);
         let text = tsg_modal::line_text(&buf, 0);
         let byte = text.find(needle).expect("目印が無い");
-        text[..byte]
-            .chars()
-            .map(tsg_term::width_of)
-            .sum()
+        text[..byte].chars().map(tsg_term::width_of).sum()
     }
 
     #[test]
@@ -5232,7 +5425,13 @@ mod tests {
     fn a_cell_grained_drag_takes_exactly_what_was_swept() {
         let t = term_with("abcdefgh");
         let buf = tsg_modal::TermBuffer::new(&t.state.grid, &t.state.marks);
-        let r = drag_range(&buf, Pos::new(0, 1), Pos::new(0, 3), mouse::Grain::Cell, false);
+        let r = drag_range(
+            &buf,
+            Pos::new(0, 1),
+            Pos::new(0, 3),
+            mouse::Grain::Cell,
+            false,
+        );
         assert_eq!(tsg_modal::extract(&buf, &r), "bcd");
     }
 
@@ -5240,7 +5439,13 @@ mod tests {
     fn alt_drag_produces_a_block_range() {
         let t = term_with("abcdef\r\nghijkl\r\n");
         let buf = tsg_modal::TermBuffer::new(&t.state.grid, &t.state.marks);
-        let r = drag_range(&buf, Pos::new(0, 1), Pos::new(1, 2), mouse::Grain::Cell, true);
+        let r = drag_range(
+            &buf,
+            Pos::new(0, 1),
+            Pos::new(1, 2),
+            mouse::Grain::Cell,
+            true,
+        );
         assert_eq!(r.kind, RangeKind::Block);
         assert_eq!(tsg_modal::extract(&buf, &r), "bc\nhi\n");
     }
@@ -5249,8 +5454,20 @@ mod tests {
     fn a_backwards_drag_is_normalised() {
         let t = term_with("abcdefgh");
         let buf = tsg_modal::TermBuffer::new(&t.state.grid, &t.state.marks);
-        let fwd = drag_range(&buf, Pos::new(0, 1), Pos::new(0, 4), mouse::Grain::Cell, false);
-        let back = drag_range(&buf, Pos::new(0, 4), Pos::new(0, 1), mouse::Grain::Cell, false);
+        let fwd = drag_range(
+            &buf,
+            Pos::new(0, 1),
+            Pos::new(0, 4),
+            mouse::Grain::Cell,
+            false,
+        );
+        let back = drag_range(
+            &buf,
+            Pos::new(0, 4),
+            Pos::new(0, 1),
+            mouse::Grain::Cell,
+            false,
+        );
         assert_eq!(fwd.start, back.start);
         assert_eq!(fwd.end, back.end);
     }
@@ -5324,13 +5541,18 @@ mod tests {
         // `sort` は Windows にも Unix にもあり、標準入力を読んで書き出す
         let got = pipe_through("sort", "banana\napple\n", None).expect("実行できない");
         let lines: Vec<&str> = got.lines().filter(|l| !l.trim().is_empty()).collect();
-        assert_eq!(lines, ["apple", "banana"], "標準入力が渡っていない: {got:?}");
+        assert_eq!(
+            lines,
+            ["apple", "banana"],
+            "標準入力が渡っていない: {got:?}"
+        );
     }
 
     #[test]
     fn a_failing_pipe_still_shows_what_went_wrong() {
         // 黙って空を返すと、何が起きたのか分からない
-        let got = pipe_through("tsumugi-no-such-command-xyz", "x\n", None).expect("起動自体は成功する");
+        let got =
+            pipe_through("tsumugi-no-such-command-xyz", "x\n", None).expect("起動自体は成功する");
         assert!(!got.trim().is_empty(), "標準エラーが捨てられている");
     }
 
@@ -5348,7 +5570,11 @@ mod tests {
 
         assert_eq!(open_kind("hello"), None, "ただの語に下線が出る");
         assert_eq!(open_kind(""), None);
-        assert_eq!(open_kind("行 42"), None, "空白を含むものは 1 つの対象ではない");
+        assert_eq!(
+            open_kind("行 42"),
+            None,
+            "空白を含むものは 1 つの対象ではない"
+        );
         assert_eq!(open_kind("1234567890"), None, "数字だけをハッシュにしない");
         assert_eq!(open_kind("abc"), None, "3 桁ではハッシュと言えない");
     }
@@ -5424,9 +5650,9 @@ mod tests {
         for spec in tsg_modal::REGISTRY.iter().filter(|s| s.in_palette) {
             let mut e = tsg_modal::Engine::new();
             let fx = e.invoke(spec.id, &buf);
-            let unhandled = fx.iter().any(|f| {
-                matches!(f, Effect::Message(m) if m.contains("ここからは実行できません"))
-            });
+            let unhandled = fx
+                .iter()
+                .any(|f| matches!(f, Effect::Message(m) if m.contains("ここからは実行できません")));
             assert!(!unhandled, "{} がパレットから実行できない", spec.id);
         }
     }

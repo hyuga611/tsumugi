@@ -79,4 +79,3 @@ pub fn size(cols: u16, rows: u16) -> PtySize {
         pixel_height: 0,
     }
 }
-

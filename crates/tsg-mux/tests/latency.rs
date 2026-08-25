@@ -71,7 +71,10 @@ fn ipc_round_trip_stays_within_the_latency_budget() {
     println!("  中央値 {:>8.3} ms", median.as_secs_f64() * 1000.0);
     println!("  p95    {:>8.3} ms", p95.as_secs_f64() * 1000.0);
     println!("  最悪   {:>8.3} ms", worst.as_secs_f64() * 1000.0);
-    println!("  予算   {:>8.3} ms（8ms のうち IPC に割く分）", IPC_BUDGET.as_secs_f64() * 1000.0);
+    println!(
+        "  予算   {:>8.3} ms（8ms のうち IPC に割く分）",
+        IPC_BUDGET.as_secs_f64() * 1000.0
+    );
 
     handle.shutdown();
 

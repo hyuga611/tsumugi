@@ -222,7 +222,10 @@ impl PaneView {
         }
         match &self.file {
             Some(f) => PaneBuffer::File(f),
-            None => PaneBuffer::Term(TermBuffer::new(&self.term.state.grid, &self.term.state.marks)),
+            None => PaneBuffer::Term(TermBuffer::new(
+                &self.term.state.grid,
+                &self.term.state.marks,
+            )),
         }
     }
 
@@ -274,11 +277,7 @@ impl PaneView {
             .map(|n| n.to_string_lossy().into_owned())
             .or_else(|| (!self.title.is_empty()).then(|| self.title.clone()))
             .unwrap_or_else(|| "(無題)".into());
-        Some(if f.dirty {
-            format!("{name} *")
-        } else {
-            name
-        })
+        Some(if f.dirty { format!("{name} *") } else { name })
     }
 
     /// 履歴の先頭が捨てられたぶん、こちらが持つ行番号を寄せる。
@@ -472,9 +471,8 @@ fn split_rects(layout: &Layout, area: Rect, out: &mut BTreeMap<u32, Rect>) {
             let dividers = n - 1;
             let w = weights_for(children, weights);
             let total: u64 = w.iter().map(|x| u64::from(*x)).sum();
-            let share = |avail: usize, i: usize| {
-                ((avail as u64 * u64::from(w[i])) / total.max(1)) as usize
-            };
+            let share =
+                |avail: usize, i: usize| ((avail as u64 * u64::from(w[i])) / total.max(1)) as usize;
             match dir {
                 Dir::Horizontal => {
                     let avail = area.w.saturating_sub(dividers);
@@ -737,7 +735,10 @@ mod tests {
         };
         s.assign_rects(area);
         assert_eq!(s.visible_panes(), vec![2], "ズーム中に他のペインが出ている");
-        assert_eq!(s.panes[&2].rect, area, "ズームしたペインが全面になっていない");
+        assert_eq!(
+            s.panes[&2].rect, area,
+            "ズームしたペインが全面になっていない"
+        );
     }
 
     #[test]

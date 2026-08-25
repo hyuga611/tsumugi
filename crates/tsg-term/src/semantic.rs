@@ -173,7 +173,11 @@ mod tests {
         m.push(MarkKind::PromptStart, 10, 0);
         m.shift_up(5);
         let lines: Vec<usize> = m.all().iter().map(|x| x.line).collect();
-        assert_eq!(lines, vec![5], "寄せた後の行がずれている（印が別の行を指す）");
+        assert_eq!(
+            lines,
+            vec![5],
+            "寄せた後の行がずれている（印が別の行を指す）"
+        );
     }
 
     #[test]
@@ -184,7 +188,11 @@ mod tests {
         }
         m.remove_lines(3, 4);
         let lines: Vec<usize> = m.all().iter().map(|x| x.line).collect();
-        assert_eq!(lines, vec![0, 7], "消した範囲の印が残る / 後ろが詰まっていない");
+        assert_eq!(
+            lines,
+            vec![0, 7],
+            "消した範囲の印が残る / 後ろが詰まっていない"
+        );
     }
 
     #[test]

@@ -1,343 +1,209 @@
-# tsumugi（紡ぎ）
+# tsumugi
 
-> **ターミナルの画面そのものを、vim で編集できるドキュメントとして扱う。
-> そしてその全操作にマウスの道を用意する。**
+> **The terminal screen is a document. Read it, select it, edit it — with vim
+> motions or with the mouse. Every command has both.**
 
-WezTerm の描画・多重化・永続性と、Neovim のモーダル操作を一本に紡ぐターミナルエミュレータ。
-Rust / クロスプラットフォーム（Windows・macOS・Linux）。
-名前とバイナリ名（`tsg`）は仮。
+A terminal emulator that treats scrollback as a buffer you can navigate, and
+that knows when the AI agent running inside it is waiting for you.
 
-**M0 スパイク（`arch.md` §9 の判定ゲート）は 🟢 通過。** 危険な仮定3つ
-（ConPTY を OSC 133 が通る / IME の preedit が出る / CJK 幅が崩れない）はすべて実機で成立し、
-設計の変更は不要だった。実測は [docs/m0-results.md](docs/m0-results.md)。
-**M1〜M8 実装済み** — vim のモーションでスクロールバックを歩いてヤンクでき、
-**ウィンドウを閉じてもシェルは死なない**（mux サーバが別プロセスでセッションを保持）。
-色（SGR）・テキストオブジェクト・マウス操作層・右クリックメニュー・コマンドパレットまで入り、
-起動したディレクトリで開く / `-e` / 透過とぼかしにも対応した。
-**ファイルも同じ操作で編集できる**（`:e` で開き、`d` `c` `=` が効き、`:w` で保存、構文強調つき）。
-マーク・マクロ・ペインのズームと入れ替え・セッション一覧も入り、
-**`mouse-parity.md` の対応表は全行が実配線になった**（未配線の欄が空）。
-シェル統合を配るようになり（`tsg --install-shell-integration`）、
-ガター・`[[` `]]`・`ac` が実際のシェルで効く。編集は全文ではなく差分で送る。
-`tsg --install` でスタートメニュー・PATH・右クリックに載り、**表示は日本語と英語**、
-既定で背景が透けてぼける。
-**M8 で仕上げた** — 合字（`->` が 1 つの字形になる）・配色（夜霧 / 墨 / 白磁、
-`[theme.colors]` で個別に上書き）・**設定の読み直し**（保存した瞬間に効く）・
-**外から動かす口**（`--list` / `--send` / `--capture` / `--rpc`、[docs/rpc.md](docs/rpc.md)）。
-あわせて **mux ソケットを自分だけに閉じた**（それまで同じマシンの他ユーザから
-到達できた）。方針は [SECURITY.md](SECURITY.md)。
+Rust. Windows today; macOS and Linux build but are **not yet tested** (see
+[Status](#status)).
 
-## 入れる・起動する
+日本語の説明は [README.ja.md](README.ja.md) にあります。
 
-ビルドしたら 1 回だけ:
+![tsumugi](assets/preview.png)
+
+## Why another terminal
+
+**1. The scrollback is a document, not a log.** Move with `j` `k` `w` `[[` `]]`,
+select a whole command block with `ac`, yank it, pipe it through `jq`, open a
+file in the same pane with `:e`. The grid and a file buffer are the same thing
+to the editor, so the same keys work on both.
+
+**2. Every command is reachable with the mouse — enforced in CI.** A test walks
+the command registry and fails if any command lacks a mouse path. Double-click
+selects a path or URL as one token. The left gutter marks each command's exit
+code; click it to select that command and its output. Right-click shows what you
+can do *here*.
+
+**3. It knows what your agents are doing.** Run Claude Code or Codex in three
+panes; the tab shows ● when one is waiting for you, and `Space a` jumps there.
+Send one prompt to all of them (`Space b`) and compare the answers
+(`tsg --compare`). The state is **reported by the agent's own hooks**, not
+guessed from the screen — guessing breaks silently the day the output changes.
+
+Closing the window does not kill your shells: the multiplexer is a separate
+process, so reopening puts you back where you were, including files you had
+open and had not saved.
+
+## Install
 
 ```
-tsg --install                       # スタートメニュー・デスクトップ・PATH・右クリックに登録
-tsg --install-shell-integration     # プロンプトの位置を伝える設定（強く推奨）
+git clone https://github.com/hyuga611/tsumugi
+cd tsumugi
+cargo build --release
+./target/release/tsg --install
 ```
 
-以後の開き方は普通のターミナルと同じ。
+`--install` adds a Start Menu and desktop shortcut, puts `tsg` on your PATH, and
+adds "Open tsumugi here" to the folder context menu. **It does not move the
+executable** — it points at wherever you built it. `tsg --uninstall` removes
+everything it added, and every change is printed as it happens.
 
-- スタートメニュー / デスクトップのアイコン
-- どのシェルからでも `tsg`
-- フォルダを右クリックして「tsumugi でここを開く」
-- `tsg --cwd <dir>` / `tsg -e <コマンド>`（ランチャや他のアプリから）
+Strongly recommended, once:
 
-`tsg --uninstall` で全部元に戻る（**exe は動かさないので、置き場所は自分で決められる**）。
+```
+tsg --install-shell-integration     # OSC 133: prompt marks, exit codes, command blocks
+```
 
-## ドキュメント
+Without it, `[[` `]]`, the gutter, and `ac` / `io` have nothing to work from.
 
-| ファイル | 内容 |
+> **Windows SmartScreen**: the binary is unsigned, so the first launch shows
+> "Windows protected your PC". More info → Run anyway. If Smart App Control is
+> on, it will block the binary outright; there is no workaround short of turning
+> that feature off, which is irreversible.
+
+## The first five minutes
+
+Open it and press **F1**. The help starts with what the mouse alone can do.
+
+| | |
 |---|---|
-| [docs/concept.md](docs/concept.md) | 何を捨て何を取るか。中心命題と、マウス／Esc の所有権モデル |
-| [docs/modal-spec.md](docs/modal-spec.md) | モード遷移図とキーマップ全表。ターミナル固有のモーション・テキストオブジェクト・オペレータ |
-| [docs/mouse-parity.md](docs/mouse-parity.md) | 各操作のマウス等価と、等価を CI で腐らせない仕組み |
-| [docs/arch.md](docs/arch.md) | クレート分割・依存選定・不変条件・マイルストーン・リスク |
-| [docs/m0-results.md](docs/m0-results.md) | M0 スパイクの実測結果と、そこで潰した前提 |
-| [docs/m2-results.md](docs/m2-results.md) | mux 分離のレイテンシ実測と、そこで潰した不整合 |
-| [docs/m3-results.md](docs/m3-results.md) | 色・テキストオブジェクト・マウス層の実装範囲と、**通っていないもの** |
-| [docs/m4-results.md](docs/m4-results.md) | 内蔵エディタとオペレータ。実機で見つけた 2 件 |
-| [docs/m5-results.md](docs/m5-results.md) | マーク / マクロ・配置の残り・マウス経路の完了・構文強調。実機で見つけた 4 件 |
-| [docs/m6-results.md](docs/m6-results.md) | シェル統合の配布と編集の差分化。実機で見つけた 3 件 |
-| [docs/m7-results.md](docs/m7-results.md) | 起動導線・アイコン・UI の作り直し・日本語 / 英語 |
-| [docs/m8-results.md](docs/m8-results.md) | 合字・テーマ・設定の読み直し・RPC の口と、安全側の作り直し |
-| [docs/rpc.md](docs/rpc.md) | **外から動かす口**。全メッセージと、安全のこと |
-| [SECURITY.md](SECURITY.md) | 何を守り、何を守らないか |
+| type | it is a normal terminal |
+| `Esc` | reading mode — the bar at the bottom changes colour |
+| click the bar | toggles typing ⇄ reading without knowing any keys |
+| double-click | select a word, path or URL as one |
+| `Ctrl`+click | open that path or URL |
+| right-click | everything you can do here |
+| `≡` at the bottom | every command, searchable |
 
-## 読む順番
+## What it does
 
-1. `concept.md` — ここで方向が決まる。特に「捨てるもの」と alt-screen 所有権モデル
-2. `arch.md` の §9 マイルストーン — **M0 のスパイクが全体の判定ゲート**
-3. `m0-results.md` — どの前提が実測で立証済みか
-4. 残り2本は実装時の参照仕様
+**Reading and editing** — vim motions over scrollback, text objects
+(`ac` command block, `io` output, `if` path, `iu` URL, `ih` hash), operators
+(`d` `c` `y` `=` `>`), marks, macros, registers, undo/redo.
+`:e` turns the pane into an editor; `:w` saves; `:q` goes back to the shell.
 
-## クレート
+**Finding things** — `/` searches as you type and highlights every match.
+`Space l` labels every path and URL on screen so one keypress opens it.
+`Space o` folds a command's output; the folded line says what it hid.
 
-| クレート | 状態 |
+**Panes and sessions** — split, zoom, swap, resize, tabs, named sessions,
+detach and reattach. `Space S` lists what is running.
+
+**Reading output** — syntax highlighting, `git diff` in colour (`Space g`),
+Markdown rendered in place (`Space m`), images via the Kitty graphics protocol.
+
+**For AI agents** — see [For agents](#for-agents).
+
+**Looks** — three themes plus per-colour overrides, ligatures, a translucent
+blurred background by default, Japanese/English UI, IME that follows the mode.
+
+## For agents
+
+```
+tsg --install-agent-hooks          # wire Claude Code / Codex, once
+```
+
+The agent then reports its own state, and tsumugi shows it:
+
+| | |
 |---|---|
-| `tsg-pty` | PTY 抽象（ConPTY / Unix PTY） |
-| `tsg-term` | エスケープ解析・グリッド・スクロールバック・OSC 133・所有権裁定 |
-| `tsg-buffer` | `Buffer` トレイト。グリッドとファイルバッファを同じ座標系に載せる |
-| `tsg-modal` | 🔴 中核。モード機械・コマンドレジストリ・モーション・ディスパッチャ。**I/O 依存ゼロ** |
-| `tsg-mux` | セッション / タブ / ペインの木。サーバプロセスと JSON Lines プロトコル |
-| `tsg-render` | wgpu によるセル描画・グリフアトラス・フォントチェーン |
-| `tsg` | winit ウィンドウ + IME + 描画。**mux サーバのクライアント**として動く |
-| `tsg-probe` | M0-a 判定ゲートの実測ツール |
+| `●` on a tab | waiting for you |
+| `✓` / `✕` | finished / failed |
+| `● waiting N` at the bottom | click to jump there |
+| `Space a` | jump to the next one waiting |
+| taskbar flash | only when the window is in the background, only on change |
+
+Scriptable, and it answers with exit codes so you can put it in an `if`:
 
 ```
-cargo test --workspace        # 336 tests
-cargo run -p tsg-probe        # M0-a: ConPTY と OSC 133 を実測
-cargo run -p tsg -- --diagnose  # フォントと CJK 幅の数値だけ出して終了
-tsg                           # 起動したディレクトリでシェルが開く
-tsg --help                    # 使えるオプション一覧
-tsg -e cargo test --workspace # シェルの代わりにコマンドを走らせる（専用セッション）
-tsg --opacity 0.9             # 背景を透かす（Windows 11 ではぼかしも入る）
-cargo run -p tsg -- --session work   # 名前付きセッション
-
-tsg --list                    # 走っているセッション
-tsg -s work --capture         # そのセッションに見えているものをテキストで
-tsg -s work --rpc             # 生のプロトコルで動かす（docs/rpc.md）
-cargo run -p tsg -- --session work --send "ls
-"   # 走っているセッションへ外から入力
-cargo run -p tsg -- --session work --tap            # そのセッションの生バイトを覗く
+tsg --agents                          # session <TAB> pane <TAB> state
+tsg --prompt "fix the failing test" --wait
+tsg --wait --until done --timeout 600
+tsg --broadcast "review this diff" --wait   # every visible pane
+tsg --compare                               # their answers, side by side
+tsg --layout agents                         # three panes
 ```
 
-`--send` / `--tap` は `mouse-parity.md` §2.1 が挙げる RPC の口で、
-**GUI を外から動かして実際の描画を確かめる**のに使う。
+## Configuration
 
-⚠️ 環境変数 `CARGO_TARGET_DIR` が `%LOCALAPPDATA%` 配下を指していると、
-ビルドした実行ファイルが Windows のアプリ制御ポリシーに阻まれて起動できない
-（`os error 4551`）。`.cargo/config.toml` の設定より環境変数が優先されるため、
-シェル側で上書きする。
-
-```powershell
-# PowerShell
-$env:CARGO_TARGET_DIR = "./target"
-cargo run -p tsg
-```
-
-```bash
-# bash / zsh
-CARGO_TARGET_DIR=./target cargo run -p tsg
-```
-
-## 使えるキー
-
-| キー | 動作 |
-|---|---|
-| `Esc` / `C-\` | 通常モードへ（`C-\` は所有権の裁定を迂回して常に奪う） |
-| `i` `a` `I` `A` `o` `O` | 入力モードへ。端末ではどれも同じ（打てるのは生きた末尾だけ）。**ファイルでは vim と同じ**に、行頭 / 行末 / 上下に 1 行開ける |
-| `h j k l` `w W b B e E` `0 ^ $` `{ }` `gg G` `f F t T ; ,` `%` `H M L` `C-d C-u C-f C-b` | モーション |
-| `[[` `]]` | 前 / 次のプロンプトへ（OSC 133） |
-| `[e` `]e` | 前 / 次の**失敗した**コマンドへ |
-| `v` `V` `C-v` | 選択（文字 / 行 / 矩形） |
-| `y` + モーション / `yy` / `Y` | ヤンク。既定でシステムクリップボードにも入る |
-| `!` + オブジェクト | 範囲を**プロンプトへ送る**（実行はしない。Enter は自分で押す） |
-| `d` + モーション / `dd` | 削除。端末では**表示から消すだけ**でプロセスには無関係 |
-| `c` + モーション | 変更（消して入力モードへ）。ファイルでのみ |
-| `=` + モーション / `==` | 整形。JSON の字下げと表の桁揃え |
-| `>` + モーション | 範囲を**外部コマンドへ通す**。結果は新しいペインで開く |
-| `u` / `C-r` | 取り消し / やり直し（ファイルのみ） |
-| `p` / `P` | 貼り付け。**端末ではプロンプトへ入る**（表示に差し込んでも次の出力で流れるため） |
-| `"a` `"A` | レジスタ指定（大文字は追記） |
-| `ma` … `` `a `` / `'a` | 印を置く / 飛ぶ（`'` は行頭まで）。二度押しで飛ぶ前へ戻る |
-| `qa` … `q` / `@a` / `@@` | マクロの記録 / 再生 / 直前をもう一度 |
-| `{count}` 前置 | `3w` `2yy` `12G` |
-| `Space` | 配置モードへ |
-| 配置 `s` `v` | ペインを上下 / 左右に分割 |
-| 配置 `h j k l` | ペインを移動 |
-| 配置 `H J K L` | ペインを入れ替える（中身だけが動き、幅は場所に残る） |
-| 配置 `z` | そのペインを画面いっぱいに（もう一度で戻る） |
-| 配置 `<` `>` `+` `-` | 分割比を変える |
-| 配置 `=` | 分割比をそろえる |
-| 配置 `[` `]` | タブを前後へ動かす |
-| 配置 `S` | セッションの一覧（Enter で切り替え） |
-| 配置 `x` `c` `n` `p` | ペインを閉じる / 新タブ / 次・前のタブ |
-| 配置 `d` | デタッチ（**シェルは生きたまま**ウィンドウを閉じる） |
-| 配置 `Q` | セッションごと終了（中のシェルも終わる） |
-| `F1` | 使い方を全画面表示 |
-| `ZZ` | ウィンドウを閉じる（セッションは残る） |
-
-### テキストオブジェクト（`i` / `a` の後に）
-
-| キー | 対象 |
-|---|---|
-| `w` `W` `"` `'` `` ` `` `(` `[` `{` `<` `p` `s` | 単語・引用符・括弧・段落・文 |
-| `c` | コマンドブロック（`ic` = 打ったコマンド行 / `ac` = プロンプト＋出力の全体） |
-| `o` | 出力ブロック |
-| `f` | ファイルパス（`if` = パス / `af` = `:42:8` 込み） |
-| `u` `h` `n` | URL / ハッシュ・UUID / 数値（`an` は `1.2GB` の単位込み） |
-| `e` | エラーブロック（`ae` は失敗したコマンドの出力全体） |
-
-`!if` で「カーソル下のパスをプロンプトへ」、`yac` で「この実行まるごとコピー」。
-
-通常モードでは **IME が自動で切れる**（`dd` が「っd」にならない）。入力モードへ戻ると復帰する。
-
-## 使えるマウス
-
-| 操作 | 動作 |
-|---|---|
-| クリック | ペインを選び、カーソルを置く。履歴なら通常モード、末尾なら入力モードへ |
-| ダブルクリック | **文脈依存の選択** — `src/main.rs:42` の上なら `src` ではなくパス全体 |
-| トリプルクリック | 行を選択 |
-| ドラッグ | 範囲選択（直前のクリック回数の粒度で伸びる） |
-| Alt＋ドラッグ | 矩形選択 |
-| 左ガターの色バー | コマンドブロックを選択。ダブルクリックで出力だけ（緑=成功 / 橙=実行中 / 太い赤=失敗） |
-| ホイール | スクロール。全画面アプリでは委譲、または矢印キーへ変換 |
-| Ctrl＋ホイール | 文字の大きさ |
-| ホバー | パス・URL・ハッシュに下線（開けるものだけ光る） |
-| Ctrl＋クリック | 開く（パス→エディタ / URL→ブラウザ / ハッシュ→`git show` をプロンプトへ） |
-| 右ドラッグ＆ドロップ | 掴んだものをプロンプトへ落とす（`!` のマウス版） |
-| 中クリック | クリップボードから貼り付け |
-| タブバー | クリックでタブ切替 |
-| ペイン境界のドラッグ | 分割比の変更（サーバが持つので再アタッチしても戻らない） |
-| ペイン境界のダブルクリック | 分割比をそろえる |
-| タブのドラッグ | タブの並べ替え |
-| 右クリック | その場のコンテキストメニュー（選択があれば「コピー」「プロンプトへ送る」も） |
-| セッション一覧 | `Space S` で走っているセッションを並べ、Enter で乗り換える（今のセッションは生きたまま） |
-| ステータス行の `≡ メニュー` | すべてのコマンド（打って絞り込める） |
-| ステータス行の `? 使い方` | 使い方の表示 |
-| ステータス行のモードの帯 | 押すと 入力 ⇄ 読む が切り替わる |
-| ステータス行の `● 記録` / `▶ a` | マクロの記録開始・終了 / 直前のマクロを再生 |
-| 左ガターの英字 | `ma` で置いた印。クリックでそこへ飛ぶ |
-| ステータス行のマウスバッジ | 入力の所有権を取り返す（`C-\` と等価） |
-
-### ファイルを編集する
-
-| キー | 動作 |
-|---|---|
-| `:e パス` | このペインをエディタにする（下のシェルは走ったまま） |
-| `Space e` | 同上（パレットが `e ` を入れた状態で開く） |
-| `:w` / `:q` / `:q!` / `:wq` | 保存 / 端末へ戻る / 捨てて戻る / 保存して戻る |
-| `:w <パス>` | 保存先を決めて保存（`>` の結果を残すとき） |
-
-構文強調が付く（Rust / C 系 / Python / JS・TS / Go / JSON / TOML / YAML / Markdown / シェル）。
-**行をまたぐ状態は持たない**割り切りで、行をまたぐブロックコメントは次の行で素に戻る。
-そのぶん、上の行を直しても下を塗り直さないので大きなファイルでも重くならない。
-
-モーションもテキストオブジェクトもオペレータも、端末で使うものがそのまま効く。
-**ファイル用の実装は書いていない** — `Buffer` トレイトを共有しているため。
-
-取り消しは **1 操作 = 1 段**。入力モードに入ってから抜けるまでは 1 段にまとまる。
-
-**開いたファイルはセッションに残る。** ウィンドウを閉じても、保存していない編集ごと
-残っていて、起動し直すと続きから編集できる（シェルと同じ扱い）。
-本当に捨てるのは配置モードの `Q`（セッションごと終了）だけで、そこでは 1 度止めて知らせる。
-
-`>` は範囲を外部コマンドへ通して、結果を新しいペインで開く（`>ap sort`、`>io jq .`）。
-結果のペインにも保存先が無いだけでファイルと同じ操作が効くので、`:w <パス>` で残せる。
-
-## シェル統合（強く推奨）
-
-`[[` `]]` `[e` `]e`・左ガターのマーカー・`ac` / `io` は、**どこがプロンプトか**を
-OSC 133 から得ている。シェル側がそれを出していないと、端末としては動くのに
-tsumugi の中核がまるごと効かない。
-
-```
-tsg --install-shell-integration        # 今のシェルを見て置き、設定ファイルに 1 行足す
-tsg --shell-integration bash           # 中身だけ見る / 自分で読ませる
-```
-
-bash / zsh / fish / PowerShell / nushell に対応。**cmd.exe には同じ口が無い**ので、
-Windows では PowerShell を使うか、プロンプトまわりの機能を諦めることになる。
-作業ディレクトリ（OSC 7）も一緒に伝わるので、分割したペインが同じ場所で開く。
-
-## 設定
-
-`%APPDATA%\tsumugi\config.toml`（Unix は `~/.config/tsumugi/config.toml`）。
-無くても動く。壊れていても既定で起動して、警告だけ出す。
+`%APPDATA%\tsumugi\config.toml` (`~/.config/tsumugi/config.toml` on Unix).
+It works without one; a broken one starts with defaults and a warning rather
+than refusing to open. **Menu → Open the config file** creates a commented
+template with every setting and its default.
 
 ```toml
 [ui]
-lang = "auto"    # "ja" / "en" / "auto"（OS の言語に合わせる）
+lang = "auto"                 # "ja" / "en" / "auto"
 
 [window]
-opacity = 0.85   # 既定。1.0 にすると不透明
-blur = true      # Windows 11 では背景がぼける
+opacity = 0.85
+blur = true
 
 [font]
 size = 18.0
-ambiguous_width = "narrow"   # 既定。"wide" にすると罫線素片などを 2 幅で数える
+family = "Cascadia Code"      # falls back through the stack if absent
+ligatures = true
+ambiguous_width = "narrow"    # "wide" for the older CJK convention
+
+[theme]
+name = "yogiri"               # yogiri / sumi / hakuji
 ```
 
-**既定で少し透けて、背景がぼけます。** 不透明にしたいときだけ `opacity = 1.0`。
-表示は日本語と英語。書かなければ OS の言語に合わせます（`tsg --lang en` でも切り替わる）。
+Saving takes effect immediately.
 
-まだ設定ファイルが無ければ、**メニュー → 設定ファイルを開く**で雛形ごと作られる。
-書けるものが全部コメントで並んでいるので、外したい行の `#` を取るだけでいい。
+## Driving it from outside
 
-## AI エージェントを並べて使う
-
-何本も走らせると「どれが返事待ちか」を目で探す時間が仕事の大半になる。
-エージェント自身に名乗らせて、それを消す。
+The multiplexer speaks JSON Lines over a socket that is closed to everyone but
+you. Convenience commands are wrappers; `--rpc` is the escape hatch.
 
 ```
-tsg --install-agent-hooks     # Claude Code / Codex に配線する（1 回だけ）
+tsg --list                     # running sessions
+tsg --capture                  # what a pane shows, as text
+tsg --open README.md --render  # open a file in the running window
+tsg --search "TODO"            # search from outside; n / N still work
+tsg --run <command-id>         # any command in the UI (--commands lists them)
+tsg --rpc                      # raw protocol on stdin/stdout — see docs/rpc.md
 ```
 
-- タブに `●` 返事待ち / `✓` 終わった / `✕` 失敗 / `◍` 動いている
-- 下の `● 返事待ち N` を押すとそこへ飛ぶ。`Space a` でも同じ
-- 裏に居るときだけタスクバーが光る（状態が変わった瞬間だけ）
-- `Space f` で画面に出てきたファイルの一覧、`[a` `]a` で発話単位に移動
+## Status
 
-台本からも回せる。終了コードで答えるので `if` に書ける。
+**Windows** is developed and tested on. Everything in this README was verified
+on a real machine.
 
-```
-tsg --agents                            # session<TAB>pane<TAB>state
-tsg --prompt "テストを直して" --wait      # 投げて、返事待ちになるまで待つ
-tsg --wait --until done --timeout 600   # 終わるまで待つ
-```
+**macOS and Linux** compile, and the terminal, multiplexer, editor and modal
+layers are platform-independent — but the window decoration, IME, and
+`--install` are written against Windows APIs, and **nobody has run it there
+yet**. Treat those platforms as untested rather than supported.
 
-**状態は推測しない。** 画面を読んで当てにいくと、エージェントが出力の形を
-変えた日に黙って壊れる。名乗らないものには印を出さない。
+Not done yet: Sixel, cross-line syntax highlighting, scrollback reflow on
+resize, remote/SSH domains, keybinding customisation. Ligatures work but could
+not be verified here (no ligature font on the development machine;
+`tsg --diagnose` will tell you).
 
-## Markdown を読む形にする
+## Security
 
-`Space m`、下の `◱ 読む形`、または端末から:
+The multiplexer socket is restricted to your user, and tsumugi checks who is on
+the other end before trusting it. Scrollback lives only in the multiplexer's
+memory — **it is never written to disk**. Terminal escape sequences are treated
+as untrusted input: OSC 52 clipboard writes are accepted but reads are refused,
+`file://` cwd from another host is rejected, and image payloads are bounded.
 
-```
-tsg --open README.md --render
-```
+Details and how to report a problem: [SECURITY.md](SECURITY.md).
 
-見出し・強調・箇条書き・引用・表・リンクを読む形にする。
-リンクの URL は薄く残るので Ctrl＋クリックで開ける。
-コードブロックの中は解釈しない。読む形のあいだは編集できない。
+## Design
 
-## 端末の中から開くとタブが増える
+The four design documents are the source of truth, and predate the code:
 
-tsumugi の中で `tsg` と打つと、窓は増えずに**いまの窓のタブが増えて
-切り替わる**。今までどおり窓を開きたいときは `-n`。
+- [docs/concept.md](docs/concept.md) — the central claim and what follows from it
+- [docs/modal-spec.md](docs/modal-spec.md) — the modal layer
+- [docs/mouse-parity.md](docs/mouse-parity.md) — every command's mouse path
+- [docs/arch.md](docs/arch.md) — architecture, invariants, milestones
 
-## 探す・飛ぶ・畳む
+Each milestone has a results document (`docs/m*-results.md`) recording what was
+measured on real hardware, including what went wrong.
 
-- `/` `?` で探す。**打つたびに飛び**、一致が光る。`n` `N` でたどる。
-  Esc で探し始めた場所へ戻る
-- `Space l` で画面のパス・URL に `a s d f …` のラベルが付く。1 キーで開く。
-  フォルダならプロンプトへ `cd` が置かれる
-- `Space o` でコマンドの出力を畳む（`Space O` で全部、`Space U` で全部開く）。
-  畳んだ行には**何を畳んだか**が出る。`Space g` の diff はファイル単位
-- `Space g` で `git diff` を色付きで開く
+## License
 
-## 絵を出す
-
-Kitty graphics protocol に対応している。`timg -p kitty` や
-`chafa -f kitty`、matplotlib の kitty backend がそのまま出る。
-絵はドキュメントの行に貼られるので、スクロールすると一緒に動く。
-Sixel はまだ無い。
-
-## 外から動かす
-
-```
-tsg --commands                   # 動かせるコマンドの id 一覧
-tsg --run search.open            # 画面の側のコマンドを外から実行
-tsg --search "TODO"              # 外から探す（n / N でたどれる）
-tsg --open README.md --render    # 走っている窓でファイルを開く
-tsg --broadcast "テストを直して" --wait
-tsg --compare                    # 各ペインの返事を 1 枚に並べる
-tsg --layout agents              # 3 分割で開く
-```
-
-## 次の一手
-
-行をまたぐ構文強調（いまは 1 行で完結する字句解析）。合字は実機で確かめていない
-（この開発機に合字を持つ字体が無い。`tsg --diagnose` がそう言う）。
+MIT OR Apache-2.0.

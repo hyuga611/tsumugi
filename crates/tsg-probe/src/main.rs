@@ -440,7 +440,8 @@ fn probe_shell(shell: Shell, exe: &Path) -> Result<Vec<Check>> {
             "{}\n{}",
             match shell {
                 Shell::Bash => "printf '\\033[?1049h\\033[?1002h\\033[?1006h'",
-                _ => "[Console]::Out.Write([char]27 + '[?1049h' + [char]27 + '[?1002h' + [char]27 + '[?1006h')",
+                _ =>
+                    "[Console]::Out.Write([char]27 + '[?1049h' + [char]27 + '[?1002h' + [char]27 + '[?1006h')",
             },
             match shell {
                 Shell::Bash => "sleep 0.3",
@@ -468,7 +469,12 @@ fn probe_shell(shell: Shell, exe: &Path) -> Result<Vec<Check>> {
     ));
 
     // ---- 実プロンプト統合 ----
-    let integ = run_script(shell, exe, &script_integration(shell), Duration::from_secs(25))?;
+    let integ = run_script(
+        shell,
+        exe,
+        &script_integration(shell),
+        Duration::from_secs(25),
+    )?;
     let ib = integ.state.marks.blocks();
     let got_three = ib.iter().any(|b| b.exit_code == Some(3));
     checks.push(check(

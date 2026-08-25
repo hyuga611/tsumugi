@@ -54,7 +54,10 @@ pub struct Pending {
 /// APC の中身を 1 つ食わせる（`G` の後ろから `ESC \` の手前まで）。
 ///
 /// 返り値が `Some` なら 1 枚そろった。
-pub fn feed_apc(pending: &mut Option<Pending>, body: &[u8]) -> Option<(Vec<u8>, u32, u32, u32, u32)> {
+pub fn feed_apc(
+    pending: &mut Option<Pending>,
+    body: &[u8],
+) -> Option<(Vec<u8>, u32, u32, u32, u32)> {
     let text = String::from_utf8_lossy(body);
     let (keys, data) = match text.split_once(';') {
         Some((k, d)) => (k, d),
@@ -154,8 +157,7 @@ fn decode(p: &Pending) -> Option<(Vec<u8>, u32, u32)> {
         _ => {
             let (w, h) = (p.width, p.height);
             let need = pixel_bytes(w, h, 4)?;
-            (w > 0 && h > 0 && p.payload.len() >= need)
-                .then(|| (p.payload[..need].to_vec(), w, h))
+            (w > 0 && h > 0 && p.payload.len() >= need).then(|| (p.payload[..need].to_vec(), w, h))
         }
     }
 }

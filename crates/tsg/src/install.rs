@@ -87,7 +87,10 @@ mod imp {
 
         // スタートメニューとデスクトップ
         for (label, folder) in [
-            ("スタートメニュー", "[Environment]::GetFolderPath('Programs')"),
+            (
+                "スタートメニュー",
+                "[Environment]::GetFolderPath('Programs')",
+            ),
             ("デスクトップ", "[Environment]::GetFolderPath('Desktop')"),
         ] {
             let script = format!(
@@ -108,7 +111,9 @@ mod imp {
                 Ok(o) if o.status.success() => {
                     r.done.push(format!("{label}にショートカットを作った"));
                 }
-                _ => r.notes.push(format!("{label}のショートカットは作れなかった")),
+                _ => r
+                    .notes
+                    .push(format!("{label}のショートカットは作れなかった")),
             }
         }
 
@@ -125,8 +130,10 @@ mod imp {
             Ok(o) if o.status.success() => {
                 let out = String::from_utf8_lossy(&o.stdout);
                 if out.contains("added") {
-                    r.done
-                        .push(format!("PATH に足した（新しいシェルから `tsg`）: {}", dir.display()));
+                    r.done.push(format!(
+                        "PATH に足した（新しいシェルから `tsg`）: {}",
+                        dir.display()
+                    ));
                 } else {
                     r.done.push("PATH にはすでに入っていた".into());
                 }
@@ -164,7 +171,10 @@ mod imp {
         let mut r = Report::new();
 
         for (label, folder) in [
-            ("スタートメニュー", "[Environment]::GetFolderPath('Programs')"),
+            (
+                "スタートメニュー",
+                "[Environment]::GetFolderPath('Programs')",
+            ),
             ("デスクトップ", "[Environment]::GetFolderPath('Desktop')"),
         ] {
             let script = format!(

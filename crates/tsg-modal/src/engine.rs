@@ -15,8 +15,8 @@ use crate::command::{
     Command, FileAction, FocusDir, HistoryAction, InsertAt, Mode, MuxRequest, SplitDir, VisualKind,
 };
 use crate::format;
-use crate::t;
 use crate::motion::{self, Motion, MotionKind, View};
+use crate::t;
 use crate::textobj::{self, TextObject};
 
 /// プラットフォーム非依存のキー表現。winit などの型はここへ持ち込まない。
@@ -49,13 +49,18 @@ pub enum Effect {
     ///
     /// エンジンはプロセスを起こさない（`arch.md` の不変条件 2）。
     /// 渡すのは「何を流し込むか」だけ。
-    Pipe { input: String },
+    Pipe {
+        input: String,
+    },
     /// 範囲を `text` で置き換える。`d` は空文字、`=` は整形結果。
     ///
     /// エンジンはバッファを書き換えない（`&dyn Buffer` しか持たない）。
     /// 実際に変えるのはホストで、相手が端末のグリッドかファイルかを知っているのも
     /// ホストだけ。`arch.md` の不変条件 2「`tsg-modal` は純粋」を保つための形。
-    Edit { range: Range, text: String },
+    Edit {
+        range: Range,
+        text: String,
+    },
     Scrolled(isize),
     Message(String),
     HelpToggled(bool),
@@ -64,7 +69,9 @@ pub enum Effect {
     /// 設定ファイルを開く。場所を知っているのはホストだけ。
     OpenConfig,
     /// 検索の入力を開く。窓の作りはホストが持つ。
-    OpenSearch { back: bool },
+    OpenSearch {
+        back: bool,
+    },
     /// mux（別プロセス）への要求。ホストが `tsg-mux` のメッセージへ翻訳する。
     Mux(MuxRequest),
     /// コマンドパレットを開く（`prefix` を入れた状態で）。
@@ -228,17 +235,26 @@ impl Macros {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Awaiting {
     Register,
-    FindChar { till: bool, backward: bool },
+    FindChar {
+        till: bool,
+        backward: bool,
+    },
     GPrefix,
     ZPrefix,
     /// `i` / `a` の次に来るオブジェクト文字を待っている
-    TextObject { around: bool },
+    TextObject {
+        around: bool,
+    },
     /// `[` / `]` の次を待っている（`modal-spec.md` §5.2）
-    Bracket { forward: bool },
+    Bracket {
+        forward: bool,
+    },
     /// `m` の次に来る印の名前を待っている
     MarkSet,
     /// `` ` `` / `'` の次に来る印の名前を待っている
-    MarkJump { exact: bool },
+    MarkJump {
+        exact: bool,
+    },
     /// `q` の次に来るマクロ名を待っている
     MacroRecord,
     /// `@` の次に来るマクロ名を待っている
@@ -516,7 +532,11 @@ impl Engine {
             );
             let register = self.pending.register.take();
             self.pending.clear();
-            return Some(Command::Apply { op, range, register });
+            return Some(Command::Apply {
+                op,
+                range,
+                register,
+            });
         }
 
         // `i` / `a` は、オペレータ待ちと Visual ではテキストオブジェクトの前置になる。
@@ -610,7 +630,7 @@ impl Engine {
             }
 
             'h' => self.motion_command(Motion::Left, buf),
-            'l' | ' ' => self.motion_command(Motion::Right, buf),  // Visual 中の Space は右移動
+            'l' | ' ' => self.motion_command(Motion::Right, buf), // Visual 中の Space は右移動
             'j' => self.motion_command(Motion::Down, buf),
             'k' => self.motion_command(Motion::Up, buf),
             'w' => self.motion_command(Motion::WordFwd { big: false }, buf),
@@ -716,7 +736,11 @@ impl Engine {
         if let Some(range) = self.selection() {
             let register = self.pending.register.take();
             self.pending.clear();
-            return Some(Command::Apply { op, range, register });
+            return Some(Command::Apply {
+                op,
+                range,
+                register,
+            });
         }
         self.pending.operator = Some(op);
         self.pending.operator_key = Some(key);
@@ -789,7 +813,9 @@ impl Engine {
                 };
                 let Some(range) = selection else {
                     return vec![
-                        Effect::Message(t!("先に範囲を選んでください", "select something first").into()),
+                        Effect::Message(
+                            t!("先に範囲を選んでください", "select something first").into(),
+                        ),
                         Effect::Bell,
                     ];
                 };
@@ -804,11 +830,19 @@ impl Engine {
             "edit.paste" => Command::Paste { before: false },
             "mark.set" => {
                 self.pending.awaiting = Some(Awaiting::MarkSet);
-                return vec![Effect::Message(t!("印の名前を押してください（英数字）", "press a letter or digit for the mark").into())];
+                return vec![Effect::Message(
+                    t!(
+                        "印の名前を押してください（英数字）",
+                        "press a letter or digit for the mark"
+                    )
+                    .into(),
+                )];
             }
             "mark.jump" => {
                 self.pending.awaiting = Some(Awaiting::MarkJump { exact: true });
-                return vec![Effect::Message(t!("飛ぶ印の名前を押してください", "press the mark to jump to").into())];
+                return vec![Effect::Message(
+                    t!("飛ぶ印の名前を押してください", "press the mark to jump to").into(),
+                )];
             }
             "macro.record" => {
                 if self.macros.recording().is_some() {
@@ -816,7 +850,11 @@ impl Engine {
                 } else {
                     self.pending.awaiting = Some(Awaiting::MacroRecord);
                     return vec![Effect::Message(
-                        t!("マクロの名前を押してください（q で終了）", "press a name for the macro (q to stop)").into(),
+                        t!(
+                            "マクロの名前を押してください（q で終了）",
+                            "press a name for the macro (q to stop)"
+                        )
+                        .into(),
                     )];
                 }
             }
@@ -825,7 +863,13 @@ impl Engine {
                     Command::MacroReplay('@')
                 } else {
                     self.pending.awaiting = Some(Awaiting::MacroReplay);
-                    return vec![Effect::Message(t!("再生するマクロの名前を押してください", "press the macro to play").into())];
+                    return vec![Effect::Message(
+                        t!(
+                            "再生するマクロの名前を押してください",
+                            "press the macro to play"
+                        )
+                        .into(),
+                    )];
                 }
             }
             "register.list" => {
@@ -833,8 +877,14 @@ impl Engine {
                     .registers
                     .iter()
                     .map(|(n, v)| {
-                        let head: String =
-                            v.text.lines().next().unwrap_or("").chars().take(16).collect();
+                        let head: String = v
+                            .text
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .chars()
+                            .take(16)
+                            .collect();
                         format!("{}{n} {head}", '"')
                     })
                     .collect();
@@ -850,7 +900,11 @@ impl Engine {
             "register.select" => {
                 self.pending.awaiting = Some(Awaiting::Register);
                 return vec![Effect::Message(
-                    t!("レジスタの文字を押してください（大文字で追記）", "press a register letter (uppercase appends)").into(),
+                    t!(
+                        "レジスタの文字を押してください（大文字で追記）",
+                        "press a register letter (uppercase appends)"
+                    )
+                    .into(),
                 )];
             }
             "motion.page" => Command::Move {
@@ -877,7 +931,9 @@ impl Engine {
                 };
                 let Some(range) = selection else {
                     return vec![
-                        Effect::Message(t!("先に範囲を選んでください", "select something first").into()),
+                        Effect::Message(
+                            t!("先に範囲を選んでください", "select something first").into(),
+                        ),
                         Effect::Bell,
                     ];
                 };
@@ -902,7 +958,13 @@ impl Engine {
                 let around = matches!(obj, TextObject::CommandBlock | TextObject::ErrorBlock);
                 let Some(range) = textobj::range_of(buf, self.cursor, obj, around) else {
                     return vec![
-                        Effect::Message(t!("カーソルの下に見つかりません", "nothing like that under the cursor").into()),
+                        Effect::Message(
+                            t!(
+                                "カーソルの下に見つかりません",
+                                "nothing like that under the cursor"
+                            )
+                            .into(),
+                        ),
                         Effect::Bell,
                     ];
                 };
@@ -937,7 +999,11 @@ impl Engine {
             let range = range_for(self.cursor, clamp(buf, target), kind, buf);
             let register = self.pending.register.take();
             self.pending.clear();
-            return Some(Command::Apply { op, range, register });
+            return Some(Command::Apply {
+                op,
+                range,
+                register,
+            });
         }
         self.pending.clear();
         Some(Command::JumpMark { name, exact })
@@ -962,7 +1028,11 @@ impl Engine {
         if let Some(op) = self.pending.operator.take() {
             let register = self.pending.register.take();
             self.pending.clear();
-            return Some(Command::Apply { op, range, register });
+            return Some(Command::Apply {
+                op,
+                range,
+                register,
+            });
         }
         self.pending.clear();
         Some(Command::Select { range })
@@ -971,13 +1041,25 @@ impl Engine {
     /// モーションを `Command` にする。operator-pending なら範囲へ畳む。
     fn motion_command(&mut self, m: Motion, buf: &dyn Buffer) -> Option<Command> {
         let count = self.take_count();
-        let target = motion::apply(m, self.cursor, count, buf, self.view, self.last_find, self.search.as_deref());
+        let target = motion::apply(
+            m,
+            self.cursor,
+            count,
+            buf,
+            self.view,
+            self.last_find,
+            self.search.as_deref(),
+        );
 
         if let Some(op) = self.pending.operator.take() {
             let range = range_for(self.cursor, target, m.kind(), buf);
             let register = self.pending.register.take();
             self.pending.clear();
-            return Some(Command::Apply { op, range, register });
+            return Some(Command::Apply {
+                op,
+                range,
+                register,
+            });
         }
         Some(Command::Move { motion: m, count })
     }
@@ -1017,7 +1099,15 @@ impl Engine {
                 vec![Effect::ModeChanged(self.mode)]
             }
             Command::Move { motion, count } => {
-                let target = motion::apply(motion, self.cursor, count, buf, self.view, self.last_find, self.search.as_deref());
+                let target = motion::apply(
+                    motion,
+                    self.cursor,
+                    count,
+                    buf,
+                    self.view,
+                    self.last_find,
+                    self.search.as_deref(),
+                );
                 self.cursor = target;
                 if self.mode == Mode::OperatorPending {
                     self.mode = Mode::Normal;
@@ -1038,7 +1128,10 @@ impl Engine {
                 self.cursor = clamp(buf, range.end);
                 self.mode = Mode::Visual(kind);
                 self.pending.clear();
-                vec![Effect::ModeChanged(self.mode), Effect::CursorMoved(self.cursor)]
+                vec![
+                    Effect::ModeChanged(self.mode),
+                    Effect::CursorMoved(self.cursor),
+                ]
             }
             Command::Scroll(delta) => vec![Effect::Scrolled(delta)],
             Command::OpenSearch { back } => {
@@ -1088,7 +1181,13 @@ impl Engine {
                 self.pending.clear();
                 if !name.is_ascii_alphanumeric() {
                     return vec![
-                        Effect::Message(t!("マークの名前は英数字です", "marks are named with letters or digits").into()),
+                        Effect::Message(
+                            t!(
+                                "マークの名前は英数字です",
+                                "marks are named with letters or digits"
+                            )
+                            .into(),
+                        ),
                         Effect::Bell,
                     ];
                 }
@@ -1098,14 +1197,20 @@ impl Engine {
                         name,
                         pos: self.cursor,
                     },
-                    Effect::Message(t!(format!("マーク {name} を置きました"), format!("mark {name} set"))),
+                    Effect::Message(t!(
+                        format!("マーク {name} を置きました"),
+                        format!("mark {name} set")
+                    )),
                 ]
             }
             Command::JumpMark { name, exact } => {
                 self.pending.clear();
                 let Some(target) = self.marks.get(name) else {
                     return vec![
-                        Effect::Message(t!(format!("マーク {name} はありません"), format!("no mark {name}"))),
+                        Effect::Message(t!(
+                            format!("マーク {name} はありません"),
+                            format!("no mark {name}")
+                        )),
                         Effect::Bell,
                     ];
                 };
@@ -1116,7 +1221,10 @@ impl Engine {
                 let target = if exact {
                     clamp(buf, target)
                 } else {
-                    clamp(buf, Pos::new(target.line, first_non_blank(buf, target.line)))
+                    clamp(
+                        buf,
+                        Pos::new(target.line, first_non_blank(buf, target.line)),
+                    )
                 };
                 self.cursor = target;
                 if self.mode == Mode::OperatorPending {
@@ -1129,26 +1237,40 @@ impl Engine {
                 self.pending.clear();
                 if !name.is_ascii_alphanumeric() {
                     return vec![
-                        Effect::Message(t!("マクロの名前は英数字です", "macros are named with letters or digits").into()),
+                        Effect::Message(
+                            t!(
+                                "マクロの名前は英数字です",
+                                "macros are named with letters or digits"
+                            )
+                            .into(),
+                        ),
                         Effect::Bell,
                     ];
                 }
                 self.macros.recording = Some((name, Vec::new()));
                 vec![
                     Effect::MacroRecording(Some(name)),
-                    Effect::Message(t!(format!("マクロ {name} を記録中（q で終了）"), format!("recording macro {name} (q to stop)"))),
+                    Effect::Message(t!(
+                        format!("マクロ {name} を記録中（q で終了）"),
+                        format!("recording macro {name} (q to stop)")
+                    )),
                 ]
             }
             Command::MacroRecord(None) => {
                 let Some((name, keys)) = self.macros.recording.take() else {
-                    return vec![Effect::Message(t!("記録していません", "not recording").into())];
+                    return vec![Effect::Message(
+                        t!("記録していません", "not recording").into(),
+                    )];
                 };
                 let n = keys.len();
                 self.macros.stored.insert(name, keys);
                 self.macros.last = Some(name);
                 vec![
                     Effect::MacroRecording(None),
-                    Effect::Message(t!(format!("マクロ {name} を記録しました（{n} キー）"), format!("macro {name} recorded ({n} keys)"))),
+                    Effect::Message(t!(
+                        format!("マクロ {name} を記録しました（{n} キー）"),
+                        format!("macro {name} recorded ({n} keys)")
+                    )),
                 ]
             }
             Command::MacroReplay(name) => {
@@ -1159,7 +1281,9 @@ impl Engine {
                         Some(n) => n,
                         None => {
                             return vec![
-                                Effect::Message(t!("再生できるマクロがありません", "no macro to play").into()),
+                                Effect::Message(
+                                    t!("再生できるマクロがありません", "no macro to play").into(),
+                                ),
                                 Effect::Bell,
                             ];
                         }
@@ -1169,7 +1293,10 @@ impl Engine {
                 };
                 let Some(keys) = self.macros.get(name).map(<[KeyInput]>::to_vec) else {
                     return vec![
-                        Effect::Message(t!(format!("マクロ {name} はありません"), format!("no macro {name}"))),
+                        Effect::Message(t!(
+                            format!("マクロ {name} はありません"),
+                            format!("no macro {name}")
+                        )),
                         Effect::Bell,
                     ];
                 };
@@ -1264,7 +1391,10 @@ impl Engine {
         self.pending.clear();
         let Some(value) = self.registers.get(name).cloned() else {
             return vec![
-                Effect::Message(t!(format!("レジスタ {name} は空です"), format!("register {name} is empty"))),
+                Effect::Message(t!(
+                    format!("レジスタ {name} は空です"),
+                    format!("register {name} is empty")
+                )),
                 Effect::Bell,
             ];
         };
@@ -1275,7 +1405,10 @@ impl Engine {
                 return vec![Effect::Bell];
             }
             self.mode = Mode::Insert;
-            return vec![Effect::SendToPrompt(text), Effect::ModeChanged(Mode::Insert)];
+            return vec![
+                Effect::SendToPrompt(text),
+                Effect::ModeChanged(Mode::Insert),
+            ];
         }
 
         self.mode = Mode::Normal;
@@ -1419,7 +1552,13 @@ impl Engine {
                 let text = extract(buf, &range);
                 let formatted = format::format(&text);
                 if formatted == text {
-                    return vec![Effect::Message(t!("整形できる形ではありませんでした", "nothing here looks formattable").into())];
+                    return vec![Effect::Message(
+                        t!(
+                            "整形できる形ではありませんでした",
+                            "nothing here looks formattable"
+                        )
+                        .into(),
+                    )];
                 }
                 self.cursor = clamp(buf, range.start);
                 vec![
@@ -1434,7 +1573,10 @@ impl Engine {
             OperatorId::Pipe => {
                 let input = extract(buf, &range);
                 if input.trim().is_empty() {
-                    return vec![Effect::Message(t!("流し込むものがありません", "nothing to pipe").into()), Effect::Bell];
+                    return vec![
+                        Effect::Message(t!("流し込むものがありません", "nothing to pipe").into()),
+                        Effect::Bell,
+                    ];
                 }
                 vec![Effect::Pipe { input }]
             }
@@ -1478,10 +1620,7 @@ mod tests {
             let mut term = Terminal::new(40, 8, AmbiguousWidth::Wide);
             term.feed(text.as_bytes());
             let mut engine = Engine::new();
-            engine.set_view(View {
-                top: 0,
-                height: 8,
-            });
+            engine.set_view(View { top: 0, height: 8 });
             engine.mode = Mode::Normal;
             Self { term, engine }
         }
@@ -1539,7 +1678,11 @@ mod tests {
     fn yank_with_motion_is_exclusive() {
         let mut h = Harness::new("hello world");
         h.keys("yw");
-        assert_eq!(h.yanked(), "hello ", "w は exclusive なので行き先を含まない");
+        assert_eq!(
+            h.yanked(),
+            "hello ",
+            "w は exclusive なので行き先を含まない"
+        );
     }
 
     #[test]
@@ -1679,10 +1822,12 @@ mod tests {
 
         let fx = ["c", "w"]
             .iter()
-            .flat_map(|k| match e.key(KeyInput::Char(k.chars().next().unwrap()), &file) {
-                KeyOutcome::Handled(fx) => fx,
-                KeyOutcome::PassThrough => Vec::new(),
-            })
+            .flat_map(
+                |k| match e.key(KeyInput::Char(k.chars().next().unwrap()), &file) {
+                    KeyOutcome::Handled(fx) => fx,
+                    KeyOutcome::PassThrough => Vec::new(),
+                },
+            )
             .collect::<Vec<_>>();
 
         let (range, text) = edit_of(&fx).expect("Edit が出ていない");
@@ -1713,7 +1858,10 @@ mod tests {
         h.keys("gg");
         let fx = h.keys("==");
         let (_, text) = edit_of(&fx).expect("Edit が出ていない");
-        assert!(text.starts_with("{\n  \"a\": 1"), "整形されていない: {text:?}");
+        assert!(
+            text.starts_with("{\n  \"a\": 1"),
+            "整形されていない: {text:?}"
+        );
     }
 
     #[test]
@@ -1754,8 +1902,12 @@ mod tests {
     /// プロンプト2つ・2つ目が失敗、という履歴を作る。
     fn history() -> Harness {
         let mut term = Terminal::new(40, 12, AmbiguousWidth::Wide);
-        term.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07ok-cmd\r\n\x1b]133;C\x07fine\r\n\x1b]133;D;0\x07");
-        term.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07bad-cmd\r\n\x1b]133;C\x07boom\r\n\x1b]133;D;2\x07");
+        term.feed(
+            b"\x1b]133;A\x07$ \x1b]133;B\x07ok-cmd\r\n\x1b]133;C\x07fine\r\n\x1b]133;D;0\x07",
+        );
+        term.feed(
+            b"\x1b]133;A\x07$ \x1b]133;B\x07bad-cmd\r\n\x1b]133;C\x07boom\r\n\x1b]133;D;2\x07",
+        );
         term.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07last\r\n");
         let mut engine = Engine::new();
         engine.set_view(View { top: 0, height: 12 });
@@ -1780,7 +1932,11 @@ mod tests {
         );
 
         h.keys("]]");
-        assert_eq!(h.engine.cursor().line, first_back, "次のプロンプトへ戻れない");
+        assert_eq!(
+            h.engine.cursor().line,
+            first_back,
+            "次のプロンプトへ戻れない"
+        );
     }
 
     #[test]
@@ -1792,13 +1948,20 @@ mod tests {
 
         // 失敗したのは 2 番目のコマンドだけ。その行から先に候補は無い。
         h.keys("]e");
-        assert_eq!(h.engine.cursor().line, err, "成功したコマンドまで拾っている");
+        assert_eq!(
+            h.engine.cursor().line,
+            err,
+            "成功したコマンドまで拾っている"
+        );
 
         let text = {
             let buf = TermBuffer::new(&h.term.state.grid, &h.term.state.marks);
             tsg_buffer::line_text(&buf, err)
         };
-        assert!(text.contains("bad-cmd"), "止まった先が失敗行ではない: {text:?}");
+        assert!(
+            text.contains("bad-cmd"),
+            "止まった先が失敗行ではない: {text:?}"
+        );
     }
 
     #[test]
@@ -1812,7 +1975,11 @@ mod tests {
         g.keys("G");
         g.keys("[[");
         g.keys("[[");
-        assert_eq!(two, g.engine.cursor().line, "count が 1 回ぶんしか効いていない");
+        assert_eq!(
+            two,
+            g.engine.cursor().line,
+            "count が 1 回ぶんしか効いていない"
+        );
     }
 
     // ---- テキストオブジェクト（`modal-spec.md` §6） ----
@@ -1874,7 +2041,9 @@ mod tests {
     #[test]
     fn yac_takes_the_whole_command_block() {
         let mut term = Terminal::new(40, 8, AmbiguousWidth::Wide);
-        term.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07ls -la\r\n\x1b]133;C\x07a.txt\r\n\x1b]133;D;0\x07");
+        term.feed(
+            b"\x1b]133;A\x07$ \x1b]133;B\x07ls -la\r\n\x1b]133;C\x07a.txt\r\n\x1b]133;D;0\x07",
+        );
         let mut engine = Engine::new();
         engine.set_view(View { top: 0, height: 8 });
         engine.mode = Mode::Normal;
@@ -1886,7 +2055,10 @@ mod tests {
         }
         h.keys("yac");
         let got = h.yanked();
-        assert!(got.contains("$ ls -la"), "プロンプト行が入っていない: {got:?}");
+        assert!(
+            got.contains("$ ls -la"),
+            "プロンプト行が入っていない: {got:?}"
+        );
         assert!(got.contains("a.txt"), "出力が入っていない: {got:?}");
 
         h.keys("yic");
@@ -1898,7 +2070,11 @@ mod tests {
         let mut h = Harness::new("plain words only");
         at(&mut h, "words");
         h.keys("yif"); // パスは無い
-        assert_eq!(h.engine.mode(), Mode::Normal, "待機モードに取り残されている");
+        assert_eq!(
+            h.engine.mode(),
+            Mode::Normal,
+            "待機モードに取り残されている"
+        );
         h.keys("yiw");
         assert_eq!(h.yanked(), "words", "その後の操作が効かなくなっている");
     }
@@ -1961,7 +2137,11 @@ mod tests {
         let before = h.engine.cursor();
         h.engine.key(KeyInput::Char('j'), &buf);
         assert!(!h.engine.help_visible());
-        assert_eq!(h.engine.cursor(), before, "ヘルプを閉じるキーが操作に化けない");
+        assert_eq!(
+            h.engine.cursor(),
+            before,
+            "ヘルプを閉じるキーが操作に化けない"
+        );
     }
 
     #[test]
@@ -2008,7 +2188,11 @@ mod tests {
         let mut h = Harness::new("hello");
         h.keys(" ");
         h.keys("Z");
-        assert_eq!(h.engine.mode(), Mode::Normal, "知らないキーで閉じ込められない");
+        assert_eq!(
+            h.engine.mode(),
+            Mode::Normal,
+            "知らないキーで閉じ込められない"
+        );
     }
 
     #[test]
@@ -2109,14 +2293,26 @@ mod tests {
 
         h.engine.mode = Mode::Normal;
         h.keys("o");
-        assert_eq!(h.file.text(), "alpha-EDIT\n\nbravo\n", "o が下に 1 行開けていない");
+        assert_eq!(
+            h.file.text(),
+            "alpha-EDIT\n\nbravo\n",
+            "o が下に 1 行開けていない"
+        );
         assert_eq!(h.engine.cursor(), Pos::new(1, 0));
 
         h.engine.mode = Mode::Normal;
         h.engine.set_cursor(Pos::new(0, 0), &h.file);
         h.keys("O");
-        assert_eq!(h.file.text(), "\nalpha-EDIT\n\nbravo\n", "O が上に 1 行開けていない");
-        assert_eq!(h.engine.cursor(), Pos::new(0, 0), "O の後は開いた行に居るべき");
+        assert_eq!(
+            h.file.text(),
+            "\nalpha-EDIT\n\nbravo\n",
+            "O が上に 1 行開けていない"
+        );
+        assert_eq!(
+            h.engine.cursor(),
+            Pos::new(0, 0),
+            "O の後は開いた行に居るべき"
+        );
     }
 
     #[test]
@@ -2125,7 +2321,11 @@ mod tests {
         let mut h = Harness::new("hello world\r\n");
         h.keys("A");
         assert_eq!(h.engine.mode(), Mode::Insert);
-        assert_eq!(h.engine.cursor(), Pos::new(0, 0), "端末で位置を動かしている");
+        assert_eq!(
+            h.engine.cursor(),
+            Pos::new(0, 0),
+            "端末で位置を動かしている"
+        );
     }
 
     #[test]
@@ -2159,7 +2359,11 @@ mod tests {
         h.keys("jjma");
         h.keys("gg");
         h.keys("d'a");
-        assert_eq!(h.yanked(), "one\ntwo\nthree\n", "印までを行ごと取れていない");
+        assert_eq!(
+            h.yanked(),
+            "one\ntwo\nthree\n",
+            "印までを行ごと取れていない"
+        );
     }
 
     #[test]
@@ -2167,7 +2371,8 @@ mod tests {
         let mut h = Harness::new("one\r\ntwo\r\n");
         let fx = h.keys("`z");
         assert!(
-            fx.iter().any(|f| matches!(f, Effect::Message(m) if m.contains("ありません"))),
+            fx.iter()
+                .any(|f| matches!(f, Effect::Message(m) if m.contains("ありません"))),
             "黙って何も起きないのが一番困る"
         );
     }
@@ -2228,7 +2433,10 @@ mod tests {
     fn paste_into_a_file_inserts_without_eating_anything() {
         let mut h = FileHarness::new("one\ntwo\n");
         h.keys("yy");
-        assert_eq!(h.engine.registers.get('"').map(|v| v.kind), Some(RangeKind::Line));
+        assert_eq!(
+            h.engine.registers.get('"').map(|v| v.kind),
+            Some(RangeKind::Line)
+        );
         h.keys("p");
         assert_eq!(h.file.text(), "one\none\ntwo\n", "行として下へ貼れていない");
         assert_eq!(h.engine.cursor().line, 1, "貼った行の頭にいない");
@@ -2253,7 +2461,10 @@ mod tests {
     fn charwise_paste_lands_after_the_cursor() {
         let mut h = FileHarness::new("abcd\n");
         h.keys("vly");
-        assert_eq!(h.engine.registers.get('"').map(|v| v.text.clone()), Some("ab".into()));
+        assert_eq!(
+            h.engine.registers.get('"').map(|v| v.text.clone()),
+            Some("ab".into())
+        );
         h.keys("p");
         assert_eq!(h.file.text(), "aabbcd\n");
     }
@@ -2265,7 +2476,8 @@ mod tests {
         h.keys("yy");
         let fx = h.keys("p");
         assert!(
-            fx.iter().any(|f| matches!(f, Effect::SendToPrompt(t) if t.contains("hello"))),
+            fx.iter()
+                .any(|f| matches!(f, Effect::SendToPrompt(t) if t.contains("hello"))),
             "端末での貼り付けがプロンプトへ行っていない"
         );
         assert_eq!(h.engine.mode(), Mode::Insert);
@@ -2275,7 +2487,10 @@ mod tests {
     fn pasting_an_empty_register_says_so() {
         let mut h = FileHarness::new("abc\n");
         let fx = h.keys("p");
-        assert!(fx.iter().any(|f| matches!(f, Effect::Message(m) if m.contains("空"))));
+        assert!(
+            fx.iter()
+                .any(|f| matches!(f, Effect::Message(m) if m.contains("空")))
+        );
         assert_eq!(h.file.text(), "abc\n", "空なのに何か入った");
     }
 

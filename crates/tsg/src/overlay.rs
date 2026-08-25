@@ -430,9 +430,7 @@ pub enum PaletteKind {
     #[default]
     Command,
     /// 検索。`back` なら後ろ向き。
-    Search {
-        back: bool,
-    },
+    Search { back: bool },
 }
 
 /// 選んだものの扱い。
@@ -496,9 +494,7 @@ fn needs_range(id: &str) -> bool {
 }
 
 fn display_width(s: &str) -> usize {
-    s.chars()
-        .map(tsg_term::width_of)
-        .sum()
+    s.chars().map(tsg_term::width_of).sum()
 }
 
 #[cfg(test)]
@@ -518,7 +514,11 @@ mod tests {
     #[test]
     fn the_picker_returns_the_name_that_was_chosen() {
         let mut p = Picker::default();
-        p.show("セッション", vec!["default".into(), "作業:1".into()], PickKind::Session);
+        p.show(
+            "セッション",
+            vec!["default".into(), "作業:1".into()],
+            PickKind::Session,
+        );
         p.move_by(1);
         assert_eq!(p.accept(), Action::Pick("作業:1".into()));
         assert_eq!(p.click(0), Action::Pick("default".into()));
@@ -692,13 +692,21 @@ mod tests {
         let (start, view) = p.view(h);
         let want = view[1].id;
         assert!(start > 0, "この時点では窓は動いているはず");
-        assert_eq!(p.click(1), Action::Run(want), "見えている行と実行が食い違う");
+        assert_eq!(
+            p.click(1),
+            Action::Run(want),
+            "見えている行と実行が食い違う"
+        );
     }
 
     #[test]
     fn the_picker_keeps_the_selection_inside_the_window() {
         let mut p = Picker::default();
-        p.show("s", (0..30).map(|i| format!("s{i}")).collect(), PickKind::Session);
+        p.show(
+            "s",
+            (0..30).map(|i| format!("s{i}")).collect(),
+            PickKind::Session,
+        );
         for _ in 0..25 {
             p.move_by(1);
             let sel = p.selected;

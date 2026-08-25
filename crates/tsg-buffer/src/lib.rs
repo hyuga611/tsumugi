@@ -18,7 +18,7 @@ use tsg_term::{Cell, Grid, SemanticMarks};
 pub use file::{FileBuffer, Splice};
 pub use syntax::{Lang, Token, highlight};
 
-pub use tsg_term::{CommandBlock, Cell as BufferCell, MarkKind, SemanticMarks as Marks};
+pub use tsg_term::{Cell as BufferCell, CommandBlock, MarkKind, SemanticMarks as Marks};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BufferKind {

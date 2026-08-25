@@ -71,9 +71,10 @@ impl Rasterizer {
     pub fn render(&mut self, font: &FontData, px: f32, gid: GlyphId) -> Option<RasterizedGlyph> {
         let font_ref = font.font_ref()?;
         let mut scaler = self.ctx.builder(font_ref).size(px).hint(true).build();
-        let image = Render::new(&[ScaleSource::Outline, ScaleSource::Bitmap(
-            swash::scale::StrikeWith::BestFit,
-        )])
+        let image = Render::new(&[
+            ScaleSource::Outline,
+            ScaleSource::Bitmap(swash::scale::StrikeWith::BestFit),
+        ])
         .format(Format::Alpha)
         .render(&mut scaler, gid)?;
 
@@ -104,14 +105,24 @@ pub struct FontStack {
 pub const LIGATURE_PROBES: [&str; 6] = ["->", "=>", "!=", "==", "<=", "|>"];
 
 /// プラットフォーム別の候補。前から順に、実在した最初のものを採る。
-fn candidates() -> (&'static [&'static str], &'static [&'static str], &'static [&'static str]) {
+fn candidates() -> (
+    &'static [&'static str],
+    &'static [&'static str],
+    &'static [&'static str],
+) {
     #[cfg(target_os = "windows")]
     {
         (
             // Cascadia Code を Mono より先に置く。寸法は同じで、
             // **合字を持つかどうかだけ**が違う。合字を切りたい人は設定で切れる。
             &["Cascadia Code", "Cascadia Mono", "Consolas", "Courier New"],
-            &["MS Gothic", "Yu Gothic UI", "Meiryo", "Yu Gothic", "MS Mincho"],
+            &[
+                "MS Gothic",
+                "Yu Gothic UI",
+                "Meiryo",
+                "Yu Gothic",
+                "MS Mincho",
+            ],
             &["Segoe UI Emoji"],
         )
     }
@@ -145,7 +156,11 @@ fn find(db: &Database, names: &[&str]) -> Option<fontdb::ID> {
             // fontdb は家族名が無くても近縁を返すことがあるので、実際の家族名を確認する。
             let matched = db
                 .face(id)
-                .map(|f| f.families.iter().any(|(fam, _)| fam.eq_ignore_ascii_case(name)))
+                .map(|f| {
+                    f.families
+                        .iter()
+                        .any(|(fam, _)| fam.eq_ignore_ascii_case(name))
+                })
                 .unwrap_or(false);
             if matched {
                 return Some(id);
@@ -196,12 +211,22 @@ fn fit_scale(font: &FontData, px: f32, cell_w: f32) -> f32 {
 impl FontStack {
     /// システムフォントから等幅 + CJK + 絵文字のチェーンを組む。
     pub fn discover(px: f32) -> Result<Self> {
+        Self::discover_with(px, None)
+    }
+
+    /// 使う字体を指定して探す。`want` が見つからなければ既定の候補へ落ちる。
+    ///
+    /// **見つからなくても開く。** 字体の名前を間違えただけで端末が起動
+    /// しないのは、端末エミュレータとして最悪の事故（`config.rs` と同じ方針）。
+    pub fn discover_with(px: f32, want: Option<&str>) -> Result<Self> {
         let mut db = Database::new();
         db.load_system_fonts();
 
         let (mono, cjk, emoji) = candidates();
 
-        let mono_id = find(&db, mono)
+        let asked: Vec<&str> = want.into_iter().collect();
+        let mono_id = find(&db, &asked)
+            .or_else(|| find(&db, mono))
             .or_else(|| {
                 db.query(&Query {
                     families: &[Family::Monospace],
@@ -220,7 +245,9 @@ impl FontStack {
         }
 
         let (cell_w, cell_h, ascent) = {
-            let base = fonts[0].font_ref().context("基準フォントを解釈できません")?;
+            let base = fonts[0]
+                .font_ref()
+                .context("基準フォントを解釈できません")?;
             let metrics = base.metrics(&[]).scale(px);
             let gm = base.glyph_metrics(&[]).scale(px);
             let gid = base.charmap().map('M');

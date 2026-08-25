@@ -64,8 +64,8 @@ pub fn lock_directory(dir: &std::path::Path) -> std::io::Result<()> {
     let sid = current_user_sid().map_err(|e| fail(&e.to_string()))?;
     let sddl = U16CString::from_str(format!("D:P(A;OICI;GA;;;{sid})"))
         .map_err(|_| fail("SDDL を UTF-16 にできません"))?;
-    let path = U16CString::from_os_str(dir.as_os_str())
-        .map_err(|_| fail("パスを UTF-16 にできません"))?;
+    let path =
+        U16CString::from_os_str(dir.as_os_str()).map_err(|_| fail("パスを UTF-16 にできません"))?;
 
     let mut sd: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR = std::ptr::null_mut();
     // SAFETY: 文字列は終端付き。返った SD は LocalFree で返す。
@@ -220,13 +220,19 @@ mod tests {
 
     #[test]
     fn my_own_process_is_recognised_as_mine() {
-        assert!(process_is_current_user(std::process::id()), "自分を自分と見なせない");
+        assert!(
+            process_is_current_user(std::process::id()),
+            "自分を自分と見なせない"
+        );
     }
 
     /// 居ない pid には決して「自分のもの」と答えない。**迷ったら繋がない。**
     #[test]
     fn a_process_that_is_not_there_is_not_mine() {
-        assert!(!process_is_current_user(u32::MAX), "存在しない pid を自分と見なした");
+        assert!(
+            !process_is_current_user(u32::MAX),
+            "存在しない pid を自分と見なした"
+        );
     }
 
     #[test]
@@ -245,6 +251,9 @@ mod tests {
         assert!(sddl.contains("D:P"), "継承を遮っていない");
         assert_eq!(sddl.matches("(A;").count(), 1, "許可の ACE が 1 つではない");
         assert!(!sddl.contains(";WD)"), "Everyone(WD) が入っている");
-        assert!(!sddl.contains(";AU)"), "Authenticated Users(AU) が入っている");
+        assert!(
+            !sddl.contains(";AU)"),
+            "Authenticated Users(AU) が入っている"
+        );
     }
 }

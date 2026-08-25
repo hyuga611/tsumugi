@@ -25,6 +25,11 @@ pub struct Config {
     pub font_size: f32,
     /// 合字を組むか（`->` を 1 つの字形にする）。
     pub ligatures: bool,
+    /// 使う字体の名前。無ければ OS ごとの既定の候補から探す。
+    ///
+    /// **見つからなくても開く。** 名前を間違えただけで端末が起動しないのは、
+    /// 端末エミュレータとして最悪の事故。
+    pub font_family: Option<String>,
     /// East Asian Ambiguous を 1 幅で数えるか 2 幅で数えるか（`arch.md` §6.1）。
     ///
     /// **これも読み直しでは変えない。** 桁の勘定そのものが変わるので、
@@ -49,6 +54,7 @@ impl Default for Config {
             blur: true,
             font_size: DEFAULT_FONT_SIZE,
             ligatures: true,
+            font_family: None,
             ambiguous_width: AmbiguousWidth::Narrow,
             scrollback: tsg_term::grid::DEFAULT_MAX_SCROLLBACK,
             lang: detect_lang(),
@@ -105,7 +111,9 @@ fn parse_ambiguous(v: Option<&toml::Value>) -> Result<Option<AmbiguousWidth>, St
     match v {
         toml::Value::Integer(1) => Ok(Some(AmbiguousWidth::Narrow)),
         toml::Value::Integer(2) => Ok(Some(AmbiguousWidth::Wide)),
-        toml::Value::String(s) if s.eq_ignore_ascii_case("narrow") => Ok(Some(AmbiguousWidth::Narrow)),
+        toml::Value::String(s) if s.eq_ignore_ascii_case("narrow") => {
+            Ok(Some(AmbiguousWidth::Narrow))
+        }
         toml::Value::String(s) if s.eq_ignore_ascii_case("wide") => Ok(Some(AmbiguousWidth::Wide)),
         other => Err(format!(
             "ambiguous_width = {other} を読めません（\"narrow\" / \"wide\" / 1 / 2）"
@@ -137,6 +145,7 @@ struct Window {
 #[derive(Debug, Default, Deserialize)]
 struct Font {
     size: Option<f32>,
+    family: Option<String>,
     ligatures: Option<bool>,
     /// `"narrow"` / `"wide"`、または `1` / `2`。
     ambiguous_width: Option<toml::Value>,
@@ -174,6 +183,8 @@ pub fn template() -> String {
 [font]
 # 文字の大きさ（px）。Ctrl＋ホイールでも変えられます。
 # size = {size}
+# 使う字体。見つからなければ既定の候補から探します（開かなくなりません）。
+# family = "Cascadia Code"
 # -> や != を 1 つの字形に組む（字体が持っていれば）。
 # ligatures = {lig}
 # 罫線素片・記号など East Asian Ambiguous を何幅で数えるか。
@@ -285,6 +296,7 @@ impl Config {
             blur: f.window.blur.unwrap_or(d.blur),
             font_size: f.font.size.unwrap_or(d.font_size).clamp(6.0, 96.0),
             ligatures: f.font.ligatures.unwrap_or(d.ligatures),
+            font_family: f.font.family.clone().filter(|s| !s.trim().is_empty()),
             ambiguous_width: match parse_ambiguous(f.font.ambiguous_width.as_ref()) {
                 Ok(v) => v.unwrap_or(d.ambiguous_width),
                 Err(w) => {
@@ -297,12 +309,7 @@ impl Config {
                 .lines
                 .unwrap_or(d.scrollback)
                 .clamp(100, 1_000_000),
-            lang: f
-                .ui
-                .lang
-                .as_deref()
-                .and_then(Lang::parse)
-                .unwrap_or(d.lang),
+            lang: f.ui.lang.as_deref().and_then(Lang::parse).unwrap_or(d.lang),
             theme_name: name,
             theme,
         };
@@ -393,7 +400,11 @@ mod tests {
     fn a_partial_file_only_overrides_what_it_names() {
         let c = parsed("[window]\nopacity = 0.8\n");
         assert_eq!(c.opacity, 0.8);
-        assert_eq!(c.blur, Config::default().blur, "書いていない項目まで変わっている");
+        assert_eq!(
+            c.blur,
+            Config::default().blur,
+            "書いていない項目まで変わっている"
+        );
         assert_eq!(c.font_size, DEFAULT_FONT_SIZE);
     }
 
@@ -414,52 +425,83 @@ mod tests {
 
     #[test]
     fn a_theme_can_be_picked_by_name_and_a_typo_is_reported() {
-        let c = parsed("[theme]
+        let c = parsed(
+            "[theme]
 name = \"白磁\"
-");
+",
+        );
         assert_eq!(c.theme_name, "白磁");
         assert_eq!(c.theme, theme::builtin("白磁").expect("引けない"));
 
         // 知らない名前でも**開く**。ただし黙らない。
-        let c = parsed("[theme]
+        let c = parsed(
+            "[theme]
 name = \"no-such-theme\"
-");
-        assert_eq!(c.theme, Theme::default(), "知らない名前で既定に落ちていない");
-        let w = warning("[theme]
+",
+        );
+        assert_eq!(
+            c.theme,
+            Theme::default(),
+            "知らない名前で既定に落ちていない"
+        );
+        let w = warning(
+            "[theme]
 name = \"no-such-theme\"
-").expect("警告が出ていない");
+",
+        )
+        .expect("警告が出ていない");
         assert!(w.contains("no-such-theme"), "何が悪いか言っていない: {w}");
     }
 
     #[test]
     fn individual_colors_can_be_overridden_and_mistakes_are_reported() {
-        let c = parsed("[theme.colors]
+        let c = parsed(
+            "[theme.colors]
 background = \"#102030\"
 ansi1 = \"#ff0000\"
-");
+",
+        );
         assert_eq!(c.theme.bg, [16.0 / 255.0, 32.0 / 255.0, 48.0 / 255.0, 1.0]);
         assert_eq!(c.theme.ansi[1], [1.0, 0.0, 0.0, 1.0]);
 
         // **書いたのに効かない**で終わらせない。
-        let w = warning("[theme.colors]
+        let w = warning(
+            "[theme.colors]
 backgruond = \"#102030\"
-").expect("警告が出ていない");
+",
+        )
+        .expect("警告が出ていない");
         assert!(w.contains("backgruond"), "綴り違いを指摘していない: {w}");
-        let w = warning("[theme.colors]
+        let w = warning(
+            "[theme.colors]
 background = \"blue\"
-").expect("警告が出ていない");
+",
+        )
+        .expect("警告が出ていない");
         assert!(w.contains("#rrggbb"), "書き方を教えていない: {w}");
     }
 
     #[test]
     fn an_absurd_scrollback_is_clamped_not_obeyed() {
         // 0 行だとモーションの行き先が消え、10 億行だとメモリが尽きる。
-        assert!(parsed("[scrollback]
+        assert!(
+            parsed(
+                "[scrollback]
 lines = 0
-").scrollback >= 100);
-        assert!(parsed("[scrollback]
+"
+            )
+            .scrollback
+                >= 100
+        );
+        assert!(
+            parsed(
+                "[scrollback]
 lines = 99999999999
-").scrollback <= 1_000_000);
+"
+            )
+            .scrollback
+                <= 1_000_000
+        );
     }
 
     #[test]
@@ -477,7 +519,10 @@ lines = 99999999999
         assert_eq!(parsed("[ui]\nlang = \"en\"\n").lang, Lang::En);
         assert_eq!(parsed("[ui]\nlang = \"ja\"\n").lang, Lang::Ja);
         // `auto` も知らない値も、OS を見た既定に落ちる
-        assert_eq!(parsed("[ui]\nlang = \"auto\"\n").lang, Config::default().lang);
+        assert_eq!(
+            parsed("[ui]\nlang = \"auto\"\n").lang,
+            Config::default().lang
+        );
         assert_eq!(parsed("[ui]\nlang = \"kl\"\n").lang, Config::default().lang);
     }
 

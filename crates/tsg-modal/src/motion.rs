@@ -24,9 +24,15 @@ pub enum Motion {
     Right,
     Up,
     Down,
-    WordFwd { big: bool },
-    WordBack { big: bool },
-    WordEnd { big: bool },
+    WordFwd {
+        big: bool,
+    },
+    WordBack {
+        big: bool,
+    },
+    WordEnd {
+        big: bool,
+    },
     LineStart,
     FirstNonBlank,
     LineEnd,
@@ -35,8 +41,14 @@ pub enum Motion {
     ToLine(usize),
     ParaFwd,
     ParaBack,
-    FindChar { c: char, till: bool, backward: bool },
-    RepeatFind { reverse: bool },
+    FindChar {
+        c: char,
+        till: bool,
+        backward: bool,
+    },
+    RepeatFind {
+        reverse: bool,
+    },
     MatchPair,
     ScreenTop,
     ScreenMiddle,
@@ -749,10 +761,7 @@ mod tests {
             from,
             count,
             &buf,
-            View {
-                top: 0,
-                height: 10,
-            },
+            View { top: 0, height: 10 },
             None,
             None,
         )
@@ -927,7 +936,16 @@ mod tests {
             2
         );
         assert_eq!(
-            apply(Motion::ScreenBottom, Pos::new(0, 0), 1, &buf, view, None, None).line,
+            apply(
+                Motion::ScreenBottom,
+                Pos::new(0, 0),
+                1,
+                &buf,
+                view,
+                None,
+                None
+            )
+            .line,
             5
         );
     }

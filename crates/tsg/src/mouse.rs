@@ -146,22 +146,37 @@ pub fn report(
         }
         MouseEncoding::Urxvt => {
             // 解放はボタン 3 で表す（レガシーと同じ規約）
-            let cb = if phase == Phase::Release { 3 | modifiers } else { cb };
+            let cb = if phase == Phase::Release {
+                3 | modifiers
+            } else {
+                cb
+            };
             format!("\x1b[{};{x};{y}M", cb + 32).into_bytes()
         }
         MouseEncoding::Utf8 => {
-            let cb = if phase == Phase::Release { 3 | modifiers } else { cb };
+            let cb = if phase == Phase::Release {
+                3 | modifiers
+            } else {
+                cb
+            };
             let mut out = b"\x1b[M".to_vec();
             for v in [u32::from(cb) + 32, x as u32 + 32, y as u32 + 32] {
                 let mut buf = [0u8; 4];
                 out.extend_from_slice(
-                    char::from_u32(v).unwrap_or('\u{fffd}').encode_utf8(&mut buf).as_bytes(),
+                    char::from_u32(v)
+                        .unwrap_or('\u{fffd}')
+                        .encode_utf8(&mut buf)
+                        .as_bytes(),
                 );
             }
             out
         }
         MouseEncoding::Default => {
-            let cb = if phase == Phase::Release { 3 | modifiers } else { cb };
+            let cb = if phase == Phase::Release {
+                3 | modifiers
+            } else {
+                cb
+            };
             // 223 を超えると表現できない。座標を送らずに黙るより、端で止める。
             let clip = |v: usize| (v.min(223) + 32) as u8;
             vec![0x1b, b'[', b'M', cb + 32, clip(x), clip(y)]
@@ -184,13 +199,21 @@ mod tests {
         let t0 = Instant::now();
         assert_eq!(c.press((5, 5), t0), 1);
         assert_eq!(c.press((5, 5), t0 + Duration::from_millis(100)), 2);
-        assert_eq!(c.press((6, 5), t0 + Duration::from_millis(200)), 3, "1 列のぶれは許す");
+        assert_eq!(
+            c.press((6, 5), t0 + Duration::from_millis(200)),
+            3,
+            "1 列のぶれは許す"
+        );
         assert_eq!(
             c.press((5, 5), t0 + Duration::from_millis(900)),
             1,
             "間隔が空いたら数え直す"
         );
-        assert_eq!(c.press((40, 5), t0 + Duration::from_millis(950)), 1, "離れた位置は別のクリック");
+        assert_eq!(
+            c.press((40, 5), t0 + Duration::from_millis(950)),
+            1,
+            "離れた位置は別のクリック"
+        );
     }
 
     #[test]
@@ -223,7 +246,11 @@ mod tests {
             4,
             0,
         );
-        assert_eq!(up.as_deref(), Some(&b"\x1b[<0;10;5m"[..]), "解放は小文字の m");
+        assert_eq!(
+            up.as_deref(),
+            Some(&b"\x1b[<0;10;5m"[..]),
+            "解放は小文字の m"
+        );
     }
 
     #[test]
@@ -247,13 +274,19 @@ mod tests {
             report(t, MouseEncoding::Sgr, Button::Left, p, 0, 0, 0).is_some()
         };
 
-        assert!(!call(MouseTracking::Off, Phase::Press), "無効なら何も送らない");
+        assert!(
+            !call(MouseTracking::Off, Phase::Press),
+            "無効なら何も送らない"
+        );
 
         assert!(call(MouseTracking::X10, Phase::Press));
         assert!(!call(MouseTracking::X10, Phase::Release), "X10 は押下だけ");
 
         assert!(call(MouseTracking::Normal, Phase::Release));
-        assert!(!call(MouseTracking::Normal, Phase::Drag), "1000 は移動を送らない");
+        assert!(
+            !call(MouseTracking::Normal, Phase::Drag),
+            "1000 は移動を送らない"
+        );
 
         assert!(call(MouseTracking::ButtonEvent, Phase::Drag));
         assert!(call(MouseTracking::AnyEvent, Phase::Drag));

@@ -117,11 +117,31 @@ pub struct TermState {
 /// **無視すると `lqqqk` のような文字化けになる。** 変換表は小さいので持つ。
 fn dec_special(c: char) -> Option<char> {
     Some(match c {
-        'j' => '┘', 'k' => '┐', 'l' => '┌', 'm' => '└', 'n' => '┼',
-        'q' => '─', 't' => '├', 'u' => '┤', 'v' => '┴', 'w' => '┬',
-        'x' => '│', 'a' => '▒', '`' => '◆', 'f' => '°', 'g' => '±',
-        'o' => '⎺', 'p' => '⎻', 'r' => '⎼', 's' => '⎽', '~' => '·',
-        'y' => '≤', 'z' => '≥', '{' => 'π', '|' => '≠', '}' => '£',
+        'j' => '┘',
+        'k' => '┐',
+        'l' => '┌',
+        'm' => '└',
+        'n' => '┼',
+        'q' => '─',
+        't' => '├',
+        'u' => '┤',
+        'v' => '┴',
+        'w' => '┬',
+        'x' => '│',
+        'a' => '▒',
+        '`' => '◆',
+        'f' => '°',
+        'g' => '±',
+        'o' => '⎺',
+        'p' => '⎻',
+        'r' => '⎼',
+        's' => '⎽',
+        '~' => '·',
+        'y' => '≤',
+        'z' => '≥',
+        '{' => 'π',
+        '|' => '≠',
+        '}' => '£',
         '0' => '█',
         _ => return None,
     })
@@ -439,7 +459,11 @@ fn color_from_parts(parts: &[u16]) -> Option<Color> {
         5 => parts.get(1).map(|n| Color::Indexed(*n as u8)),
         2 => {
             // `38:2::r:g:b` は色空間 ID が 1 つ挟まる。長さで見分ける。
-            let v = if parts.len() >= 5 { &parts[2..] } else { &parts[1..] };
+            let v = if parts.len() >= 5 {
+                &parts[2..]
+            } else {
+                &parts[1..]
+            };
             Some(Color::Rgb(
                 *v.first()? as u8,
                 *v.get(1)? as u8,
@@ -473,9 +497,9 @@ impl Perform for TermState {
 
     fn execute(&mut self, byte: u8) {
         match byte {
-            0x07 => {}                          // BEL
-            0x08 => self.grid.backspace(),      // BS
-            0x09 => self.grid.tab(),            // HT
+            0x07 => {}                     // BEL
+            0x08 => self.grid.backspace(), // BS
+            0x09 => self.grid.tab(),       // HT
             0x0A..=0x0C => self.grid.line_feed(),
             0x0D => self.grid.carriage_return(),
             _ => {}
@@ -714,13 +738,15 @@ impl Terminal {
         self.state.marks.shift_up(dropped);
         // 絵も同じだけ寄せる。**印と同じ理由**で、忘れると別の行に出る。
         if dropped > 0 {
-            self.state.images.retain_mut(|img| match img.line.checked_sub(dropped) {
-                Some(l) => {
-                    img.line = l;
-                    true
-                }
-                None => false,
-            });
+            self.state
+                .images
+                .retain_mut(|img| match img.line.checked_sub(dropped) {
+                    Some(l) => {
+                        img.line = l;
+                        true
+                    }
+                    None => false,
+                });
         }
     }
 }
@@ -752,7 +778,10 @@ mod tests {
         t.state.bg_rgb = (0x11, 0x22, 0x33);
         t.feed(b"]11;?\\");
         let got = String::from_utf8_lossy(&t.state.replies).to_string();
-        assert!(got.contains("rgb:1111/2222/3333"), "OSC 11 の答えが違う: {got}");
+        assert!(
+            got.contains("rgb:1111/2222/3333"),
+            "OSC 11 の答えが違う: {got}"
+        );
     }
 
     /// クリップボードは**書き込みだけ**受ける。読み出しに答えると、
@@ -937,7 +966,11 @@ mod tests {
         let mut t = term();
         t.feed(b"[44m[2J");
         assert_eq!(attrs_at(&t, 0, 5).bg, Color::Indexed(4));
-        assert_eq!(attrs_at(&t, 0, 5).fg, Color::Default, "前景までは持ち越さない");
+        assert_eq!(
+            attrs_at(&t, 0, 5).fg,
+            Color::Default,
+            "前景までは持ち越さない"
+        );
     }
 
     #[test]
@@ -973,8 +1006,14 @@ mod tests {
         let mut t = term();
         t.feed(b"[45m[K");
         let ansi = t.state.grid.line_ansi(0).unwrap();
-        assert!(ansi.contains("45m") || ansi.contains("48;5;5"), "背景色が落ちた: {ansi:?}");
-        assert!(ansi.trim_end_matches("[0m").ends_with(' '), "空白が残っていない");
+        assert!(
+            ansi.contains("45m") || ansi.contains("48;5;5"),
+            "背景色が落ちた: {ansi:?}"
+        );
+        assert!(
+            ansi.trim_end_matches("[0m").ends_with(' '),
+            "空白が残っていない"
+        );
     }
 
     /// タイトルは**子プロセスが自由に決められる**。制御文字と長さを
@@ -1004,12 +1043,16 @@ mod tests {
     fn marks_follow_the_lines_when_old_scrollback_is_dropped() {
         let mut t = Terminal::new(20, 2, AmbiguousWidth::Wide);
         t.state.grid.set_max_scrollback(4);
-        t.feed(b"]133;Aprompt
-");
+        t.feed(
+            b"]133;Aprompt
+",
+        );
         let before = t.state.marks.all()[0].line;
         for _ in 0..20 {
-            t.feed(b"x
-");
+            t.feed(
+                b"x
+",
+            );
         }
         assert_eq!(t.state.grid.scrollback_len(), 4, "履歴が上限を超えている");
         if let Some(m) = t.state.marks.all().first() {

@@ -150,7 +150,10 @@ impl FileBuffer {
 
     /// 行の中身（文字列）。
     pub fn line(&self, index: usize) -> String {
-        self.lines.get(index).map(|l| line_string(l)).unwrap_or_default()
+        self.lines
+            .get(index)
+            .map(|l| line_string(l))
+            .unwrap_or_default()
     }
 
     // 全角の右半分（スペーサ）を入れてあるので、**添字と列は一致する**。
@@ -227,7 +230,10 @@ impl FileBuffer {
             }
             RangeKind::Block => {
                 let last = range.end.line.min(self.lines.len().saturating_sub(1));
-                let (from, to) = (range.start.col.min(range.end.col), range.start.col.max(range.end.col));
+                let (from, to) = (
+                    range.start.col.min(range.end.col),
+                    range.start.col.max(range.end.col),
+                );
                 for line in range.start.line..=last {
                     let a = self.start_index(line, from);
                     let b = self.end_index(line, to);
@@ -631,7 +637,11 @@ mod tests {
     fn wide_characters_keep_columns_and_indices_apart() {
         // 全角は 2 列 1 文字。列で数えたまま消すと 1 文字ずれる。
         let mut b = buf("あいうえお");
-        assert_eq!(b.cells(0).unwrap().len(), 10, "全角は 2 セル（右半分を含む）");
+        assert_eq!(
+            b.cells(0).unwrap().len(),
+            10,
+            "全角は 2 セル（右半分を含む）"
+        );
         b.delete(&Range::new(Pos::new(0, 2), Pos::new(0, 3), RangeKind::Char));
         assert_eq!(b.line(0), "あうえお");
     }
@@ -665,7 +675,10 @@ mod tests {
         assert_eq!(b.kind(), BufferKind::File);
         assert_eq!(crate::last_col(&b, 0), 6);
         assert_eq!(crate::line_text(&b, 1), "baz");
-        assert!(b.allows(crate::OperatorId::Change), "File では c が使えるはず");
+        assert!(
+            b.allows(crate::OperatorId::Change),
+            "File では c が使えるはず"
+        );
     }
 
     // ---- 取り消し ----
@@ -730,7 +743,10 @@ mod tests {
 
         let out = b.take_splices();
         let total: usize = out.iter().map(|s| s.removed.len() + s.inserted.len()).sum();
-        assert!(total < 20, "行の入れ替えで全文が流れている（{total} バイト）");
+        assert!(
+            total < 20,
+            "行の入れ替えで全文が流れている（{total} バイト）"
+        );
 
         b.undo().expect("戻せない");
         assert_eq!(b.text(), "one\ntwo\nthree\n", "取り消しで元へ戻らない");
@@ -764,7 +780,10 @@ mod tests {
         assert!(!b.take_resync());
 
         b.undo().expect("戻せない");
-        assert!(b.take_resync(), "取り消しの後に全文を渡し直すよう頼んでいない");
+        assert!(
+            b.take_resync(),
+            "取り消しの後に全文を渡し直すよう頼んでいない"
+        );
         assert!(!b.take_resync(), "1 度取ったら下りる");
     }
 

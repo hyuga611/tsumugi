@@ -109,8 +109,7 @@ impl Shell {
 /// 「毎回追記して rc が太る」より優先する。
 pub fn install(shell: Shell) -> Result<String> {
     let dir = script_dir().context("設定ディレクトリの場所が分かりません")?;
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("{} を作れません", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("{} を作れません", dir.display()))?;
     let script = dir.join(shell.file_name());
     // PowerShell 5.1 は BOM 無しの .ps1 を ANSI として読む。中身は ASCII だけに
     // してあるので実害は出ないが、BOM を付けておけば他の道具から見ても迷わない。
@@ -121,8 +120,7 @@ pub fn install(shell: Shell) -> Result<String> {
     } else {
         shell.script().to_string()
     };
-    std::fs::write(&script, body)
-        .with_context(|| format!("{} を書けません", script.display()))?;
+    std::fs::write(&script, body).with_context(|| format!("{} を書けません", script.display()))?;
 
     let line = shell.source_line(&script);
     let Some(rc) = shell.rc_path() else {
@@ -214,13 +212,7 @@ mod tests {
     /// exe を 1 つ置いただけの環境で何も出せなくなる。
     #[test]
     fn every_shell_ships_a_script_that_marks_the_prompt() {
-        for s in [
-            Shell::Bash,
-            Shell::Zsh,
-            Shell::Fish,
-            Shell::Pwsh,
-            Shell::Nu,
-        ] {
+        for s in [Shell::Bash, Shell::Zsh, Shell::Fish, Shell::Pwsh, Shell::Nu] {
             let script = s.script();
             assert!(script.len() > 200, "{} のスクリプトが空", s.name());
             for mark in ["133;A", "133;B", "133;C", "133;D"] {
@@ -230,7 +222,11 @@ mod tests {
                     s.name()
                 );
             }
-            assert!(script.contains("]7;file://"), "{} が cwd を出していない", s.name());
+            assert!(
+                script.contains("]7;file://"),
+                "{} が cwd を出していない",
+                s.name()
+            );
         }
     }
 
@@ -251,8 +247,10 @@ mod tests {
     fn the_source_line_points_at_the_script() {
         let p = std::path::Path::new("/tmp/tsumugi.bash");
         assert!(Shell::Bash.source_line(p).contains("/tmp/tsumugi.bash"));
-        assert!(Shell::Pwsh
-            .source_line(std::path::Path::new("C:/x/tsumugi.ps1"))
-            .starts_with(". "));
+        assert!(
+            Shell::Pwsh
+                .source_line(std::path::Path::new("C:/x/tsumugi.ps1"))
+                .starts_with(". ")
+        );
     }
 }

@@ -26,6 +26,6 @@ pub use textobj::TextObject;
 
 pub use tsg_buffer::markdown;
 pub use tsg_buffer::{
-    Buffer, BufferKind, FileBuffer, Lang as SyntaxLang, OperatorId, Pos, Range, RangeKind, Splice, TermBuffer,
-    Token, clamp_insert, extract, highlight, line_text,
+    Buffer, BufferKind, FileBuffer, Lang as SyntaxLang, OperatorId, Pos, Range, RangeKind, Splice,
+    TermBuffer, Token, clamp_insert, extract, highlight, line_text,
 };

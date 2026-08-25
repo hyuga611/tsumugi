@@ -120,9 +120,7 @@ fn align_columns(text: &str) -> String {
 }
 
 fn width(s: &str) -> usize {
-    s.chars()
-        .map(tsg_buffer::char_display_width)
-        .sum()
+    s.chars().map(tsg_buffer::char_display_width).sum()
 }
 
 #[cfg(test)]
@@ -148,7 +146,10 @@ mod tests {
 
     #[test]
     fn empty_containers_stay_on_one_line() {
-        assert_eq!(format(r#"{"a":{},"b":[]}"#), "{\n  \"a\": {},\n  \"b\": []\n}");
+        assert_eq!(
+            format(r#"{"a":{},"b":[]}"#),
+            "{\n  \"a\": {},\n  \"b\": []\n}"
+        );
     }
 
     #[test]

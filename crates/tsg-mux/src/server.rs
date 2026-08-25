@@ -268,7 +268,9 @@ impl State {
     }
 
     fn tab_of(&mut self, pane: u32) -> Option<&mut TabInfo> {
-        self.tabs.iter_mut().find(|t| t.layout.panes().contains(&pane))
+        self.tabs
+            .iter_mut()
+            .find(|t| t.layout.panes().contains(&pane))
     }
 
     fn send_to(&mut self, id: u64, msg: &ServerMsg) {
@@ -451,7 +453,10 @@ impl State {
             }
 
             ClientMsg::Resize { pane, cols, rows } => {
-                let changed = self.panes.get(&pane).is_some_and(|p| p.cols != cols || p.rows != rows);
+                let changed = self
+                    .panes
+                    .get(&pane)
+                    .is_some_and(|p| p.cols != cols || p.rows != rows);
                 if let Some(p) = self.panes.get_mut(&pane) {
                     p.cols = cols;
                     p.rows = rows;

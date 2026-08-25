@@ -354,11 +354,18 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new<W>(window: W, width: u32, height: u32, font_px: f32, transparent: bool) -> Result<Self>
+    pub fn new<W>(
+        window: W,
+        width: u32,
+        height: u32,
+        font_px: f32,
+        transparent: bool,
+        family: Option<&str>,
+    ) -> Result<Self>
     where
         W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
     {
-        let fonts = FontStack::discover(font_px)?;
+        let fonts = FontStack::discover_with(font_px, family)?;
 
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,

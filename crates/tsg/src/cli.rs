@@ -32,11 +32,17 @@ pub enum Mode {
     /// シェル統合を置いて rc に 1 行足す
     InstallShellIntegration(Option<String>),
     /// 同じ文を、見えているペイン全部へ投げる
-    Broadcast { text: String, wait: bool },
+    Broadcast {
+        text: String,
+        wait: bool,
+    },
     /// 各ペインの返事を 1 つのペインに並べて見せる
     Compare,
     /// 走っているセッションでファイルを開く
-    Open { path: String, render: bool },
+    Open {
+        path: String,
+        render: bool,
+    },
     /// 読む形を切り替える
     Render,
     /// 画面の側のコマンドを外から実行する
@@ -50,9 +56,15 @@ pub enum Mode {
     /// どのペインのエージェントがどうなっているか
     Agents,
     /// その状態になるまで待つ（台本用）
-    Wait { until: String, timeout: u64 },
+    Wait {
+        until: String,
+        timeout: u64,
+    },
     /// エージェントへ文を投げる。`--wait` を付けると返事待ちになるまで待つ
-    Prompt { text: String, wait: bool },
+    Prompt {
+        text: String,
+        wait: bool,
+    },
     /// エージェントの hooks を入れる / 外す
     InstallAgentHooks(Option<String>),
     UninstallAgentHooks(Option<String>),
@@ -326,7 +338,9 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Cli {
                 }
             }
             "--timeout" => {
-                let t = next_value(&args, &mut i).and_then(|v| v.parse().ok()).unwrap_or(0);
+                let t = next_value(&args, &mut i)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0);
                 if let Mode::Wait { timeout, .. } = &mut cli.mode {
                     *timeout = t;
                 }
@@ -397,7 +411,14 @@ mod tests {
         let c = cli(&["-e", "cargo", "test", "--workspace", "--help"]);
         assert_eq!(
             c.command.as_deref(),
-            Some(&["cargo".to_string(), "test".into(), "--workspace".into(), "--help".into()][..])
+            Some(
+                &[
+                    "cargo".to_string(),
+                    "test".into(),
+                    "--workspace".into(),
+                    "--help".into()
+                ][..]
+            )
         );
         assert_eq!(c.mode, Mode::Run, "-e の後の --help を拾ってしまっている");
     }
@@ -405,7 +426,10 @@ mod tests {
     #[test]
     fn dash_e_gets_its_own_session_unless_named() {
         let c = cli(&["-e", "top"]);
-        assert!(c.session.starts_with("run-"), "既存セッションへ相乗りしている");
+        assert!(
+            c.session.starts_with("run-"),
+            "既存セッションへ相乗りしている"
+        );
 
         let named = cli(&["--session", "work", "-e", "top"]);
         assert_eq!(named.session, "work", "明示した名前を無視している");
