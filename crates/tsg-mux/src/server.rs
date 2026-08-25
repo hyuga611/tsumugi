@@ -1088,8 +1088,8 @@ fn accept_loop(
     tx: Sender<Event>,
     stop: &std::sync::atomic::AtomicBool,
 ) {
-    use interprocess::local_socket::traits::Listener as _;
     use interprocess::local_socket::ListenerNonblockingMode;
+    use interprocess::local_socket::traits::Listener as _;
     use std::sync::atomic::Ordering;
 
     // 受けるところだけ待たない。**繋がったあとの読み書きは今までどおり**

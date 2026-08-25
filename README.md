@@ -95,6 +95,12 @@ layout and each pane's directory come back on the next launch** (the screen
 contents are never written to disk). For an agent, the resume line is placed
 at the prompt — pressing it is your call.
 
+**Remote** — list a host under `[domains]` and open it with `tsg -d <name>`
+(it also shows up in `Space S`). **Losing the link doesn't lose the session**:
+the far side keeps running and reattaching brings the screen back. tsumugi has
+to be installed on the far side; keys and jump hosts are left to
+`~/.ssh/config`.
+
 **Reading output** — syntax highlighting, `git diff` in colour (`Space g`),
 Markdown rendered in place (`Space m`), images (Kitty graphics and Sixel),
 OSC 8 hyperlinks, a position indicator on the right edge. Narrowing the window
@@ -191,7 +197,7 @@ layers are platform-independent — but the window decoration, IME, and
 `--install` are written against Windows APIs, and **nobody has run it there
 yet**. Treat those platforms as untested rather than supported.
 
-Not done yet: cross-line syntax highlighting, remote/SSH domains. Ligatures
+Not done yet: cross-line syntax highlighting. Ligatures
 work but could not be verified here (no ligature font on the development
 machine; `tsg --diagnose` will tell you).
 

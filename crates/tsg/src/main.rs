@@ -29,7 +29,7 @@ use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use tsg_modal::command::{MuxRequest, SplitDir};
 use tsg_modal::{
     Buffer, Effect, Engine, KeyInput, KeyOutcome, Mode, Pos, Range, RangeKind, View, t,
@@ -49,6 +49,12 @@ use cli::{Cli, Mode as CliMode};
 use config::Config;
 use session::{GUTTER, PaneView, Rect, Session};
 use theme::{Rgba, Theme};
+
+/// セッションの一覧で、遠隔の繋ぎ先に付ける印。
+///
+/// **名前とぶつからない字**にする。セッション名は `slug` を通すので、
+/// この字が名前として入ってくることはない。
+const DOMAIN_MARK: &str = "@";
 
 /// クリア色。**`Color::Default` の解決先とクリア色を別々に持たせない。**
 /// 2 か所に書くと、テーマを変えたときに片方だけ古い色のまま残る。
@@ -132,6 +138,11 @@ struct App {
     cwd: Option<String>,
     /// `--cwd` を明示されたか（既定で入った場所と区別する）。
     cwd_given: bool,
+    /// いま繋いでいる遠隔の名前（`[domains]`）。手元なら `None`。
+    ///
+    /// **持ち歩く。** セッションを切り替えても同じ繋ぎ先の中で動くのが
+    /// 頼まれたことで、切り替えるたびに手元へ落ちるのは違う。
+    domain: Option<String>,
     /// 差分を取った場所。かたまりを当て直すときに同じ場所で走らせる。
     diff_cwd: Option<String>,
     /// 取り消し待ちのかたまり。**2 回押させる**ための控え。
@@ -200,11 +211,18 @@ impl App {
             // 入っただけなのか。**組み直すかどうかがここで決まる**ので、
             // 既定が入ったのと言われたのを混ぜない。
             cwd_given: cli.cwd.is_some(),
+            domain: cli.domain.clone(),
             diff_cwd: None,
             pending_revert: None,
             want_first_hunk: false,
             command: cli.command.clone(),
         }
+    }
+
+    /// いま繋いでいる遠隔の設定。
+    fn current_domain(&self) -> Option<&config::Domain> {
+        let name = self.domain.as_deref()?;
+        self.cfg.domains.iter().find(|d| d.name == name)
     }
 
     /// 前回の形から組み直してよいか。
@@ -498,6 +516,14 @@ impl App {
             names.push(self.session_name.clone());
             names.sort_unstable();
         }
+        // 遠隔の繋ぎ先も同じ一覧に出す。**「どこで作業するか」は
+        // 手元か向こうかを問わず同じ選び方**でいい。
+        //
+        // 向こうに何本走っているかは、繋がないと分からない（覗く道が無い）。
+        // 名前だけ出して、選ばれたら繋ぐ。
+        for d in &self.cfg.domains {
+            names.push(format!("{}{}", DOMAIN_MARK, d.name));
+        }
         self.menu.hide();
         self.palette.hide();
         self.picker.show(
@@ -512,6 +538,25 @@ impl App {
 
     /// 別のセッションへ乗り換える。**今のセッションは殺さない**（デタッチ）。
     fn switch_session(&mut self, name: &str) {
+        // 遠隔が選ばれた。繋ぎ先を変えて、向こうの既定のセッションへ。
+        if let Some(domain) = name.strip_prefix(DOMAIN_MARK) {
+            let known = self.cfg.domains.iter().any(|d| d.name == domain);
+            if !known {
+                self.status_msg = t!(
+                    format!("{domain} という繋ぎ先はありません"),
+                    format!("no such domain: {domain}")
+                );
+                return;
+            }
+            self.domain = Some(domain.to_string());
+            self.send_msg(&ClientMsg::Detach);
+            self.client = None;
+            self.session = Session::default();
+            self.session_name = "default".into();
+            let name = self.session_name.clone();
+            self.reconnect(&name);
+            return;
+        }
         if name == self.session_name {
             self.status_msg = t!(
                 format!("すでに {name} にいます"),
@@ -523,7 +568,12 @@ impl App {
         self.client = None;
         self.session = Session::default();
         self.session_name = name.to_string();
-        match connect_or_spawn(name, self.restore) {
+        self.reconnect(name);
+    }
+
+    /// いまの繋ぎ先で `session_name` へ繋ぎ直す。
+    fn reconnect(&mut self, name: &str) {
+        match connect_to(name, self.restore, self.current_domain()) {
             Ok(client) => {
                 self.client = Some(client);
                 let area = self.area();
@@ -5538,7 +5588,7 @@ impl ApplicationHandler for App {
         self.cols = cols;
         self.rows = rows;
 
-        match connect_or_spawn(&self.session_name, self.restore) {
+        match connect_to(&self.session_name, self.restore, self.current_domain()) {
             Ok(client) => {
                 self.client = Some(client);
                 let area = self.area();
@@ -5703,54 +5753,30 @@ impl ApplicationHandler for App {
     }
 }
 
+/// 繋ぐ。遠隔なら `ssh` 越しに、手元ならソケットで。
+///
+/// **遠隔では起こす判断も向こうがする。** こちらから向こうのプロセスを
+/// 覗く手立ては無いので、向こうの `tsg --rpc --spawn` に任せる。
+fn connect_to(session: &str, restore: bool, domain: Option<&config::Domain>) -> Result<Client> {
+    match domain {
+        Some(d) => {
+            println!("{} のセッション '{session}' へ繋ぎます", d.name);
+            Client::over_ssh(&d.ssh, &d.target, &d.program, session)
+        }
+        None => connect_or_spawn(session, restore),
+    }
+}
+
 fn connect_or_spawn(session: &str, restore: bool) -> Result<Client> {
     if let Ok(c) = Client::connect(session) {
         println!("既存の mux セッション '{session}' に再接続しました");
         return Ok(c);
     }
     println!("mux セッション '{session}' を新しく起こします");
-
-    let exe = std::env::current_exe().context("自分の実行ファイルの場所が分かりません")?;
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.arg("--server").arg(session);
-    if !restore {
-        cmd.arg("--no-restore");
-    }
-    detach(&mut cmd);
-    cmd.spawn()
-        .with_context(|| format!("mux サーバを起こせません: {}", exe.display()))?;
-
-    for _ in 0..100 {
-        std::thread::sleep(Duration::from_millis(50));
-        if let Ok(c) = Client::connect(session) {
-            println!("mux サーバを起動しました");
-            return Ok(c);
-        }
-    }
-    bail!("mux サーバが 5 秒以内に応答しませんでした")
+    let c = rpc::spawn_server_with(session, restore)?;
+    println!("mux サーバを起動しました");
+    Ok(c)
 }
-
-/// サーバ子プロセスを親から切り離す。
-///
-/// これを忘れると、GUI が強制終了されたときにサーバも道連れになり、
-/// 「ウィンドウを閉じてもシェルは死なない」という約束が破れる（実際に踏んだ）。
-#[cfg(windows)]
-fn detach(cmd: &mut std::process::Command) {
-    use std::os::windows::process::CommandExt;
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-}
-
-#[cfg(unix)]
-fn detach(cmd: &mut std::process::Command) {
-    use std::os::unix::process::CommandExt;
-    // 新しいプロセスグループへ。端末からのシグナルを一緒に受けないようにする。
-    cmd.process_group(0);
-}
-
-#[cfg(not(any(windows, unix)))]
-fn detach(_cmd: &mut std::process::Command) {}
 
 fn print_font_diagnostics(renderer: &Renderer) {
     let f = &renderer.fonts;
@@ -5879,7 +5905,7 @@ fn main() -> Result<()> {
         cli::Mode::Tap => return rpc::tap(&cli.session),
         cli::Mode::List => return rpc::list(),
         cli::Mode::Capture(pane) => return rpc::capture(&cli.session, *pane),
-        cli::Mode::Rpc => return rpc::raw(&cli.session),
+        cli::Mode::Rpc => return rpc::raw(&cli.session, cli.spawn),
         cli::Mode::Install => return report_install(install::install()),
         cli::Mode::Uninstall => return report_install(install::uninstall()),
         cli::Mode::ShellIntegration(name) => return print_shell_integration(name.as_deref()),

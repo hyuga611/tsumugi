@@ -101,6 +101,17 @@ pub struct Cli {
     pub layout: Option<String>,
     /// 前回の形から組み直すか。`--no-restore` で切る。
     pub restore: bool,
+    /// 繋ぎ先の名前（`[domains]` に書いたもの）。手元なら `None`。
+    ///
+    /// **遠隔でもセッションは向こうに残る。** 線が切れても向こうの
+    /// シェルは生きていて、繋ぎ直せば続きから使える。
+    pub domain: Option<String>,
+    /// `--rpc` で、サーバが居なければ起こす。
+    ///
+    /// 遠隔から繋がれたときに要る（向こうにはまだ誰も居ない）。
+    /// **手元の `--rpc` は既定で起こさない**（覗くだけの口なので、
+    /// 覗いただけでサーバが増えるのは頼んだことと違う）。
+    pub spawn: bool,
     /// `--agent-state` と一緒に名乗る相手の名前（`claude` / `codex`）。
     ///
     /// **再起動のあとに「続きから」を出すために要る。** シェルの中で
@@ -127,6 +138,8 @@ impl Default for Cli {
             pane: None,
             layout: None,
             restore: true,
+            domain: None,
+            spawn: false,
             agent: None,
             cost: None,
         }
@@ -303,6 +316,8 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Cli {
             "--tap" => cli.mode = Mode::Tap,
             "--list" => cli.mode = Mode::List,
             "--rpc" => cli.mode = Mode::Rpc,
+            "--spawn" => cli.spawn = true,
+            "-d" | "--domain" => cli.domain = next_value(&args, &mut i),
             "--layout" => cli.layout = next_value(&args, &mut i),
             "--no-restore" => cli.restore = false,
             "--cost" => cli.cost = next_value(&args, &mut i),

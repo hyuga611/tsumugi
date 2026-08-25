@@ -56,6 +56,11 @@ pub struct Config {
     /// **端末には出さない。** 端末の「行」はコマンドの出力が積み上がった
     /// もので、番号を振っても指す先が無い。
     pub line_numbers: bool,
+    /// 遠隔の繋ぎ先。名前 -> どこへ、向こうの `tsg` はどこ。
+    ///
+    /// **鍵も設定も `ssh` に任せる。** こちらで持つと、`~/.ssh/config` に
+    /// 書いてあることを二重に書かせることになる。
+    pub domains: Vec<Domain>,
     /// 差し替えたキー。**既定は消さず、上に重ねる**（`keymap.rs`）。
     pub keys: tsg_modal::Keymap,
 }
@@ -75,9 +80,26 @@ impl Default for Config {
             theme: Theme::default(),
             guides: true,
             line_numbers: true,
+            domains: Vec::new(),
             keys: tsg_modal::Keymap::default(),
         }
     }
+}
+
+/// 遠隔の繋ぎ先 1 つ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Domain {
+    /// 呼び名（`tsg -d <名前>`）。
+    pub name: String,
+    /// `ssh` に渡すもの（`user@host`、`~/.ssh/config` の Host 名でもいい）。
+    pub target: String,
+    /// 向こうの `tsg` の在り処。PATH に居るなら `"tsg"`。
+    pub program: String,
+    /// 繋ぐのに使うもの。既定は `"ssh"`。
+    ///
+    /// **入れ替えられるようにしておく。** 会社によっては別の踏み台用の
+    /// コマンドを使う（`gcloud compute ssh` のような）。
+    pub ssh: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -88,6 +110,9 @@ struct File {
     font: Font,
     #[serde(default)]
     ui: Ui,
+    /// 遠隔の繋ぎ先。`[domains.<名前>]` の形で書く。
+    #[serde(default)]
+    domains: std::collections::BTreeMap<String, DomainFile>,
     #[serde(default)]
     scrollback: Scrollback,
     #[serde(default)]
@@ -122,6 +147,16 @@ struct ThemeFile {
     /// 綴りを間違えたときに「書いたのに効かない」で終わらせない。
     #[serde(default)]
     colors: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct DomainFile {
+    /// `ssh` に渡すもの。書かなければ名前をそのまま使う。
+    host: Option<String>,
+    /// 向こうの `tsg`。書かなければ `tsg`。
+    tsg: Option<String>,
+    /// 繋ぐのに使うもの。書かなければ `ssh`。
+    ssh: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -236,6 +271,16 @@ pub fn template() -> String {
 [scrollback]
 # さかのぼって読める行数。
 # lines = {sb}
+
+[domains]
+# 遠隔のセッション。`tsg -d <名前>` で開きます（Space S の一覧にも出ます）。
+# 向こうに tsumugi が入っている必要があります（`tsg --version` が通ること）。
+# 鍵や踏み台の設定は ~/.ssh/config に任せます。
+#
+# [domains.dev]
+# host = "dev.example.com"    # 省略すると名前をそのまま ssh へ渡します
+# tsg  = "tsg"                # 向こうの tsg の在り処
+# ssh  = "ssh"                # 繋ぐのに使うもの（踏み台用の別コマンドでも可）
 
 [keys]
 # キーを差し替える。左がキー、右がコマンドの id（一覧は tsg --commands）。
@@ -433,6 +478,16 @@ impl Config {
             lang: f.ui.lang.as_deref().and_then(Lang::parse).unwrap_or(d.lang),
             guides: f.ui.guides.unwrap_or(d.guides),
             line_numbers: f.ui.line_numbers.unwrap_or(d.line_numbers),
+            domains: f
+                .domains
+                .iter()
+                .map(|(name, v)| Domain {
+                    name: name.clone(),
+                    target: v.host.clone().unwrap_or_else(|| name.clone()),
+                    program: v.tsg.clone().unwrap_or_else(|| "tsg".into()),
+                    ssh: v.ssh.clone().unwrap_or_else(|| "ssh".into()),
+                })
+                .collect(),
             theme_name: name,
             theme,
             keys,

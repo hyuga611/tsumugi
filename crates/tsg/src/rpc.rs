@@ -37,6 +37,56 @@ const NO_SIZE: (u16, u16) = (0, 0);
 /// 応答を待つ上限。返らないときに黙って固まらせない。
 const TIMEOUT: Duration = Duration::from_secs(5);
 
+/// サーバ子プロセスを親から切り離す。
+///
+/// これを忘れると、GUI が強制終了されたときにサーバも道連れになり、
+/// 「ウィンドウを閉じてもシェルは死なない」という約束が破れる（実際に踏んだ）。
+#[cfg(windows)]
+pub(crate) fn detach(cmd: &mut std::process::Command) {
+    use std::os::windows::process::CommandExt;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+}
+
+#[cfg(unix)]
+pub(crate) fn detach(cmd: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+    // 新しいプロセスグループへ。端末からのシグナルを一緒に受けないようにする。
+    cmd.process_group(0);
+}
+
+#[cfg(not(any(windows, unix)))]
+pub(crate) fn detach(_cmd: &mut std::process::Command) {}
+
+/// mux サーバを起こして、繋がるまで待つ。
+///
+/// **起こすのはここだけ。** 手元から開くときも、遠隔から繋がれたときも
+/// 同じ道を通る（別の起こし方を 2 つ持つと、片方だけ直る）。
+pub fn spawn_server(session: &str) -> Result<Client> {
+    spawn_server_with(session, true)
+}
+
+pub fn spawn_server_with(session: &str, restore: bool) -> Result<Client> {
+    let exe = std::env::current_exe().context("自分の実行ファイルの場所が分かりません")?;
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("--server").arg(session);
+    if !restore {
+        cmd.arg("--no-restore");
+    }
+    detach(&mut cmd);
+    cmd.spawn()
+        .with_context(|| format!("mux サーバを起こせません: {}", exe.display()))?;
+
+    for _ in 0..100 {
+        std::thread::sleep(Duration::from_millis(50));
+        if let Ok(c) = Client::connect(session) {
+            return Ok(c);
+        }
+    }
+    bail!("mux サーバが 5 秒以内に応答しませんでした")
+}
+
 /// 繋いで Attach まで済ませ、セッションの形を返す。
 fn attach(session: &str) -> Result<(Client, SessionInfo)> {
     let mut client = Client::connect(session)
@@ -200,7 +250,11 @@ pub fn tap(session: &str) -> Result<()> {
 ///
 /// 送る側が壊れた行を出したら、その行だけ捨てて `{"t":"error"}` を返す。
 /// 落とさないのは、対話的に手で打って形を覚える使い方を潰さないため。
-pub fn raw(session: &str) -> Result<()> {
+pub fn raw(session: &str, spawn: bool) -> Result<()> {
+    // 遠隔から繋がれたときは、向こうにまだ誰も居ない。起こしてから話す。
+    if spawn && Client::connect(session).is_err() {
+        spawn_server(session)?;
+    }
     let (mut client, info) = attach(session)?;
     emit(&ServerMsg::Attached {
         version: PROTOCOL_VERSION,
