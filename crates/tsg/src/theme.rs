@@ -90,6 +90,11 @@ pub struct Theme {
     pub diff_del: Rgba,
     pub diff_head: Rgba,
 
+    /// 縦の位置を出す細い帯。**地に沈める。** 本文より目立つと、
+    /// 読んでいる最中に視線を持っていかれる。
+    pub scroll_track: Rgba,
+    pub scroll_thumb: Rgba,
+
     pub help_bg: Rgba,
     pub help_title: Rgba,
     pub help_body: Rgba,
@@ -223,6 +228,9 @@ impl Seed {
             diff_add: calm(s.ansi[10], 0.10),
             diff_del: calm(s.ansi[9], 0.10),
             diff_head: mix(s.ansi[13], s.fg, 0.30),
+
+            scroll_track: mix(s.bg, if s.dark { WHITE } else { BLACK }, 0.05),
+            scroll_thumb: mix(s.bg, if s.dark { WHITE } else { BLACK }, 0.22),
 
             // 使い方の面は**沈める**。明るいテーマで白へ寄せると、既に白い背景と
             // 見分けが付かず、面として立たない。どちらの明暗でも暗い側へ動かす。
@@ -446,6 +454,8 @@ pub fn set_named(t: &mut Theme, key: &str, c: Rgba) -> bool {
         "diff_add" => &mut t.diff_add,
         "diff_del" => &mut t.diff_del,
         "diff_head" => &mut t.diff_head,
+        "scroll_track" => &mut t.scroll_track,
+        "scroll_thumb" => &mut t.scroll_thumb,
         "mode_insert" => &mut t.mode_insert,
         "mode_normal" => &mut t.mode_normal,
         "mode_visual" => &mut t.mode_visual,

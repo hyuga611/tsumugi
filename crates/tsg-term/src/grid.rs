@@ -67,6 +67,11 @@ pub struct Cell {
     pub width: u8,
     /// SGR。スペーサは直前のセルと同じものを持つ（背景色が途切れないように）
     pub attrs: Attrs,
+    /// OSC 8 のリンク先。0 は無し、それ以外は `TermState.links` の番号 + 1。
+    ///
+    /// **URL そのものはセルに持たない。** 同じリンクが何百セルに渡ることが
+    /// あるので、実体は 1 つにして番号だけ置く。
+    pub link: u16,
 }
 
 impl Default for Cell {
@@ -82,6 +87,7 @@ impl Cell {
             text: " ".to_string(),
             width: 1,
             attrs,
+            link: 0,
         }
     }
 
@@ -94,6 +100,7 @@ impl Cell {
             text: String::new(),
             width: 0,
             attrs,
+            link: 0,
         }
     }
 
@@ -203,6 +210,10 @@ pub struct Grid {
 
     /// いま書き込みに使う SGR。CSI m がここを動かす。
     pub pen: Attrs,
+    /// いま書き込みに使うリンク（OSC 8）。0 は無し。
+    pub pen_link: u16,
+    /// 直近の組み直しで動いた行番号の対応表。
+    reflow_map: Option<Vec<usize>>,
 
     /// スクロール領域（0-origin, 両端含む）
     scroll_top: usize,
@@ -226,6 +237,8 @@ impl Grid {
             cursor: Cursor::default(),
             saved_cursor: Cursor::default(),
             pen: Attrs::default(),
+            pen_link: 0,
+            reflow_map: None,
             scroll_top: 0,
             scroll_bot: rows.saturating_sub(1),
             max_scrollback: DEFAULT_MAX_SCROLLBACK,
@@ -393,13 +406,17 @@ impl Grid {
 
         let (row, col) = (self.cursor.row, self.cursor.col);
         let attrs = self.pen;
+        let link = self.pen_link;
         self.screen[row].cells[col] = Cell {
             text: c.to_string(),
             width: w as u8,
             attrs,
+            link,
         };
         if w == 2 && col + 1 < self.cols {
-            self.screen[row].cells[col + 1] = Cell::spacer(attrs);
+            let mut sp = Cell::spacer(attrs);
+            sp.link = link;
+            self.screen[row].cells[col + 1] = sp;
         }
         self.cursor.col += w;
     }
@@ -648,12 +665,130 @@ impl Grid {
     ///
     /// 論理行の折り返し再計算（reflow）は M1 の担当。ここでは行の伸縮と、
     /// 行数が減ったぶんを履歴へ送る処理だけを行う。
+    /// 折り返し位置を新しい幅で組み直す。
+    ///
+    /// `wrapped` が立っている行は論理行の途中。続きをつなげて 1 本にしてから、
+    /// 新しい幅で切り直す。**全角は跨がせない**（跨ぐと右半分だけが次の行に
+    /// 残って字が割れる）。
+    ///
+    /// カーソルの居た論理位置を覚えておいて、組み直したあとに置き直す。
+    /// 忘れると、幅を変えた瞬間にプロンプトからカーソルが外れる。
+    ///
+    /// **印（OSC 133）と絵の行番号もここで動く。** 呼ぶ側が
+    /// `take_reflow_map()` で新しい行番号を受け取って寄せる。
+    fn reflow(&mut self, cols: usize) {
+        let cursor_doc = self.scrollback.len() + self.cursor.row;
+        let cursor_col = self.cursor.col;
+
+        let mut all: Vec<Line> = Vec::with_capacity(self.scrollback.len() + self.screen.len());
+        all.append(&mut self.scrollback);
+        all.append(&mut self.screen);
+
+        // 論理行へまとめる。`from` はその論理行を作った元の行番号たち。
+        let mut logical: Vec<(Vec<Cell>, Vec<usize>)> = Vec::new();
+        let mut joining = false;
+        for (i, line) in all.into_iter().enumerate() {
+            let continues = line.wrapped;
+            let mut cells = line.cells;
+            // 行末の詰め物を落とす。折り返しの途中は落とさない
+            // （そこは本当に幅いっぱいまで字が入っている）。
+            if !continues {
+                while cells.last().is_some_and(|c| c.text == " " && c.link == 0) {
+                    cells.pop();
+                }
+            }
+            if joining && let Some(last) = logical.last_mut() {
+                last.0.extend(cells);
+                last.1.push(i);
+            } else {
+                logical.push((cells, vec![i]));
+            }
+            joining = continues;
+        }
+
+        // 新しい幅で切り直す。**全角は跨がせない。**
+        let mut out: Vec<Line> = Vec::new();
+        let mut map: Vec<usize> = vec![0; logical.iter().map(|(_, f)| f.len()).sum()];
+        let mut cursor_at = (0usize, 0usize);
+        for (cells, from) in logical {
+            let first = out.len();
+            let mut col = 0usize;
+            let mut cur = Vec::with_capacity(cols);
+            let mut pushed_any = false;
+            for cell in cells {
+                let w = cell.width.max(1) as usize;
+                if col + w > cols && col > 0 {
+                    let mut line = Line {
+                        cells: std::mem::take(&mut cur),
+                        wrapped: true,
+                    };
+                    line.cells.resize(cols, Cell::default());
+                    out.push(line);
+                    pushed_any = true;
+                    col = 0;
+                }
+                // スペーサ（全角の右半分）は桁を進めない。進めると
+                // 全角 1 文字で 3 桁数えてしまう。
+                col += if cell.width == 0 { 0 } else { w };
+                cur.push(cell);
+            }
+            let mut line = Line {
+                cells: cur,
+                wrapped: false,
+            };
+            line.cells.resize(cols, Cell::default());
+            out.push(line);
+            let _ = pushed_any;
+
+            // 元の行番号 -> 新しい先頭行。畳みや印を寄せるのに使う。
+            for f in &from {
+                if let Some(slot) = map.get_mut(*f) {
+                    *slot = first;
+                }
+            }
+            // カーソルが居た論理行なら、新しい位置を出す。
+            if from.contains(&cursor_doc) {
+                // 論理行の先頭からの桁数（前の行ぶんを足す）
+                let before: usize = from.iter().take_while(|f| **f < cursor_doc).count();
+                let flat = before * self.cols + cursor_col;
+                cursor_at = (first + flat / cols.max(1), flat % cols.max(1));
+            }
+        }
+
+        self.reflow_map = Some(map);
+
+        // 画面ぶんを末尾から取り、残りを履歴へ。
+        let rows = self.rows.min(out.len());
+        self.screen = out.split_off(out.len() - rows);
+        self.scrollback = out;
+        while self.screen.len() < self.rows {
+            self.screen.push(Line::new(cols));
+        }
+
+        let base = self.scrollback.len();
+        self.cursor.row = cursor_at.0.saturating_sub(base).min(self.rows - 1);
+        self.cursor.col = cursor_at.1.min(cols.saturating_sub(1));
+    }
+
+    /// 組み直しで動いた行番号の対応表。`旧 -> 新`。1 回取ると空になる。
+    pub fn take_reflow_map(&mut self) -> Option<Vec<usize>> {
+        self.reflow_map.take()
+    }
+
     pub fn resize(&mut self, cols: usize, rows: usize) {
         let (cols, rows) = (cols.max(1), rows.max(1));
         if cols == self.cols && rows == self.rows {
             return;
         }
 
+        // **幅が変わったら組み直す。** 切り詰めるだけだと、窓を狭めた瞬間に
+        // 右へはみ出した字が消える。履歴は「読み返すためのもの」なので、
+        // 見えなくなるのではなく**消える**のは致命的。
+        //
+        // alt screen は相手が自分で描き直すので触らない。
+        if cols != self.cols && !self.is_alt() {
+            self.reflow(cols);
+        }
         for line in &mut self.screen {
             line.cells.resize(cols, Cell::default());
         }
@@ -707,6 +842,66 @@ impl Grid {
 
 #[cfg(test)]
 mod tests {
+    /// **窓を狭めても字が消えない。** 切り詰めるだけだと、履歴の右側が
+    /// 読み返せなくなる。履歴は読み返すためのものなので、これは致命的。
+    #[test]
+    fn narrowing_the_window_rewraps_instead_of_losing_text() {
+        let mut g = Grid::new(20, 4, AmbiguousWidth::Narrow);
+        for c in "abcdefghijklmnopqrstuvwxyz".chars() {
+            g.print(c);
+        }
+        // 20 桁で折り返して 2 行になっている
+        assert_eq!(
+            g.document_line(0).unwrap().text().trim_end(),
+            "abcdefghijklmnopqrst"
+        );
+
+        g.resize(10, 4);
+        let joined: String = (0..g.document_len())
+            .filter_map(|l| g.document_line(l).map(|x| x.text().trim_end().to_string()))
+            .collect();
+        assert!(
+            joined.contains("abcdefghijklmnopqrstuvwxyz"),
+            "字が消えた: {joined}"
+        );
+        for l in 0..g.document_len() {
+            let t = g.document_line(l).unwrap().text();
+            assert!(t.chars().count() <= 10, "新しい幅を超えた: {t:?}");
+        }
+    }
+
+    /// 広げたら 1 本に戻る。
+    #[test]
+    fn widening_joins_the_pieces_back() {
+        let mut g = Grid::new(10, 4, AmbiguousWidth::Narrow);
+        for c in "abcdefghijklmnopqrst".chars() {
+            g.print(c);
+        }
+        g.resize(30, 4);
+        assert_eq!(
+            g.document_line(0).unwrap().text().trim_end(),
+            "abcdefghijklmnopqrst"
+        );
+    }
+
+    /// **全角を跨がせない。** 跨ぐと右半分だけが次の行に残って字が割れる。
+    #[test]
+    fn a_wide_character_is_never_split_across_the_wrap() {
+        let mut g = Grid::new(20, 4, AmbiguousWidth::Wide);
+        for c in "あいうえおかきくけこ".chars() {
+            g.print(c);
+        }
+        g.resize(7, 4);
+        for l in 0..g.document_len() {
+            let line = g.document_line(l).unwrap();
+            // 行頭がスペーサ（全角の右半分）で始まっていないこと
+            assert!(
+                !line.cells.first().is_some_and(Cell::is_spacer),
+                "全角が割れた（{l} 行目）"
+            );
+        }
+    }
+
     use super::*;
 
     /// TUI が枠を描く字は East Asian **Ambiguous**。ここを 2 幅で数えると、

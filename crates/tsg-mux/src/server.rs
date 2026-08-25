@@ -461,7 +461,7 @@ impl State {
                     p.cols = cols;
                     p.rows = rows;
                     let _ = p.pty.resize(tsg_pty::size(cols, rows));
-                    p.term.state.grid.resize(cols as usize, rows as usize);
+                    p.term.resize(cols as usize, rows as usize);
                 }
                 // ここが ConPTY の桁数が変わった瞬間。同じ順路で全クライアントへ伝える。
                 if changed {

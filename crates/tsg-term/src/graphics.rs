@@ -104,6 +104,24 @@ pub fn feed_apc(
     Some((rgba, w, h, p.cols, p.rows))
 }
 
+/// RGB を RGBA に。**不透明で埋める。**
+fn rgb_to_rgba(src: &[u8]) -> Vec<u8> {
+    let (chunks, _) = src.as_chunks::<3>();
+    chunks
+        .iter()
+        .flat_map(|c| [c[0], c[1], c[2], 255])
+        .collect()
+}
+
+/// 灰＋透過を RGBA に。
+fn gray_alpha_to_rgba(src: &[u8]) -> Vec<u8> {
+    let (chunks, _) = src.as_chunks::<2>();
+    chunks
+        .iter()
+        .flat_map(|c| [c[0], c[0], c[0], c[1]])
+        .collect()
+}
+
 /// 画素の総数。**掛け算で溢れさせない。**
 ///
 /// `w * h * 4` を `u32` で計算すると、release では小さな値へ折り返す。
@@ -125,18 +143,12 @@ fn decode(p: &Pending) -> Option<(Vec<u8>, u32, u32)> {
             pixel_bytes(info.width, info.height, 4)?;
             let rgba = match info.color_type {
                 png::ColorType::Rgba => buf[..info.buffer_size()].to_vec(),
-                png::ColorType::Rgb => buf[..info.buffer_size()]
-                    .chunks_exact(3)
-                    .flat_map(|c| [c[0], c[1], c[2], 255])
-                    .collect(),
+                png::ColorType::Rgb => rgb_to_rgba(&buf[..info.buffer_size()]),
                 png::ColorType::Grayscale => buf[..info.buffer_size()]
                     .iter()
                     .flat_map(|g| [*g, *g, *g, 255])
                     .collect(),
-                png::ColorType::GrayscaleAlpha => buf[..info.buffer_size()]
-                    .chunks_exact(2)
-                    .flat_map(|c| [c[0], c[0], c[0], c[1]])
-                    .collect(),
+                png::ColorType::GrayscaleAlpha => gray_alpha_to_rgba(&buf[..info.buffer_size()]),
                 // パレットは展開しないと出せない。**間違った色で出すより出さない。**
                 png::ColorType::Indexed => return None,
             };
@@ -145,14 +157,8 @@ fn decode(p: &Pending) -> Option<(Vec<u8>, u32, u32)> {
         24 => {
             let (w, h) = (p.width, p.height);
             let need = pixel_bytes(w, h, 3)?;
-            (w > 0 && h > 0 && p.payload.len() >= need).then(|| {
-                let rgba = p
-                    .payload
-                    .chunks_exact(3)
-                    .flat_map(|c| [c[0], c[1], c[2], 255])
-                    .collect();
-                (rgba, w, h)
-            })
+            (w > 0 && h > 0 && p.payload.len() >= need)
+                .then(|| (rgb_to_rgba(&p.payload[..need]), w, h))
         }
         _ => {
             let (w, h) = (p.width, p.height);

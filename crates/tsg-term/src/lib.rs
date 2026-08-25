@@ -9,6 +9,7 @@ pub mod attrs;
 pub mod graphics;
 pub mod grid;
 pub mod semantic;
+pub mod sixel;
 
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use vte::{Params, Perform};
@@ -89,6 +90,8 @@ pub struct TermState {
     pub images: Vec<graphics::Image>,
     /// 組み立て中の絵（分割して届く）。
     pending_image: Option<graphics::Pending>,
+    /// 読み取り中の Sixel（DCS `q`）。古い道具はこちらで絵を出す。
+    sixel: Option<sixel::Decoder>,
     next_image: u64,
 
     /// **端末から相手へ返す答え。** ホストが取り出して PTY へ書く。
@@ -103,6 +106,11 @@ pub struct TermState {
     pub bg_rgb: (u8, u8, u8),
     /// カーソルの形（DECSCUSR `CSI Ps SP q`）。0 = 既定。
     pub cursor_style: u16,
+    /// OSC 8 のリンク先。セルは番号だけを持ち、実体はここに 1 つ。
+    ///
+    /// `eza` `ls --hyperlink` `cargo` `bat` が既に出している。画面の字から
+    /// パスらしきものを当てにいくのと違い、**相手が明示した行き先**なので確か。
+    pub links: Vec<String>,
     /// OSC 52 で相手が置いたクリップボードの中身。ホストが取り出す。
     ///
     /// **読み出し（`?`）には答えない。** 答えると、画面に字を出しただけで
@@ -160,11 +168,13 @@ impl TermState {
             log_osc: false,
             images: Vec::new(),
             pending_image: None,
+            sixel: None,
             next_image: 1,
             replies: Vec::new(),
             fg_rgb: (0xd8, 0xde, 0xe9),
             bg_rgb: (0x11, 0x13, 0x1a),
             cursor_style: 0,
+            links: Vec::new(),
             clipboard: None,
             line_drawing: false,
         }
@@ -176,6 +186,14 @@ impl TermState {
             return;
         }
         self.replies.extend_from_slice(bytes);
+    }
+
+    /// そのセルのリンク先（OSC 8）。無ければ `None`。
+    pub fn link_of(&self, cell: &Cell) -> Option<&str> {
+        (cell.link > 0)
+            .then(|| self.links.get(cell.link as usize - 1))
+            .flatten()
+            .map(String::as_str)
     }
 
     /// APC の中身を 1 つ受け取る。そろったらカーソルの位置に置く。
@@ -191,12 +209,17 @@ impl TermState {
         else {
             return;
         };
-        // 何セルぶんにするか。指定が無ければ、セルの大きさから当てる。
-        // ここでの 1 セルは 8x16 と見なす（実寸はホストが知っているが、
-        // **端末はセル数だけ決めればよい**）。
-        // **相手の言うセル数を鵜呑みにしない。** `r=4000000000` と書かれた
-        // 数バイトの APC で、行送りを 40 億回まわしてセッションを止められる。
-        // 画面に入る大きさで頭を打つ。
+        self.place_image(rgba, w, h, want_cols, want_rows);
+    }
+
+    /// 受け取った絵をカーソルの位置に置き、そのぶん行を送る。
+    ///
+    /// **絵のぶんだけ行を送る。** 送らないと、次に出る字が絵の上に重なる。
+    /// グリッドは相変わらず文書で、絵はその上に乗るだけ。
+    ///
+    /// **相手の言うセル数を鵜呑みにしない。** `r=4000000000` と書かれた
+    /// 数バイトで、行送りを 40 億回まわしてセッションを止められる。
+    fn place_image(&mut self, rgba: Vec<u8>, w: u32, h: u32, want_cols: u32, want_rows: u32) {
         let max_cols = self.grid.cols.max(1);
         let max_rows = self.grid.rows.max(1);
         let cols = if want_cols > 0 {
@@ -620,6 +643,29 @@ impl Perform for TermState {
         }
     }
 
+    fn hook(&mut self, _params: &Params, _intermediates: &[u8], _ignore: bool, action: char) {
+        // Sixel（`DCS ... q`）。ほかの DCS は知らないので受け取らない。
+        if action == 'q' {
+            self.sixel = Some(sixel::Decoder::new());
+        }
+    }
+
+    fn put(&mut self, byte: u8) {
+        if let Some(d) = self.sixel.as_mut() {
+            d.put(byte);
+        }
+    }
+
+    fn unhook(&mut self) {
+        let Some(d) = self.sixel.take() else {
+            return;
+        };
+        let Some((rgba, w, h)) = d.finish() else {
+            return;
+        };
+        self.place_image(rgba, w, h, 0, 0);
+    }
+
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
         if self.log_osc {
             let raw: Vec<String> = params
@@ -641,6 +687,26 @@ impl Perform for TermState {
                 if let Some(u) = params.get(1) {
                     self.cwd = Some(sanitize_osc_text(u, 4096)).filter(|s| !s.is_empty());
                 }
+            }
+            // ハイパーリンク。`OSC 8 ; params ; URI ST` … `OSC 8 ; ; ST` で閉じる。
+            b"8" => {
+                let uri = params.get(2).map(|u| sanitize_osc_text(u, 2048));
+                self.grid.pen_link = match uri.filter(|u| !u.is_empty()) {
+                    None => 0,
+                    Some(u) => {
+                        // **同じ行き先は 1 つにまとめる。** ls の出力 1 画面で
+                        // 何百回も同じ URI が来る。
+                        match self.links.iter().position(|x| *x == u) {
+                            Some(i) => i as u16 + 1,
+                            None if self.links.len() < 4096 => {
+                                self.links.push(u);
+                                self.links.len() as u16
+                            }
+                            // 溜まりすぎたら、それ以上は覚えない（印も付けない）
+                            None => 0,
+                        }
+                    }
+                };
             }
             // 前景 / 背景の問い合わせ。nvim はこれで明暗を決める。
             // **答えないと、暗い背景に暗い字を置かれる。**
@@ -703,6 +769,8 @@ pub struct Terminal {
     /// 履歴の先頭から捨てた行数の累計。**外にも配る**（印と絵はここで
     /// 寄せているが、畳みや表示位置はホストが持っているため）。
     dropped: usize,
+    /// 直近の組み直しで動いた行番号の対応表。
+    reflow_map: Option<Vec<usize>>,
     pub state: TermState,
 }
 
@@ -712,6 +780,7 @@ impl Terminal {
             parser: vte::Parser::new(),
             apc: graphics::ApcSplitter::default(),
             dropped: 0,
+            reflow_map: None,
             state: TermState::new(cols, rows, amb),
         }
     }
@@ -721,6 +790,28 @@ impl Terminal {
     /// 畳んだ範囲が別の行を指す。
     pub fn take_dropped(&mut self) -> usize {
         std::mem::take(&mut self.dropped)
+    }
+
+    /// 幅を変える。**印と絵の行番号も一緒に寄せる。**
+    ///
+    /// 組み直すと行番号が動く。寄せ忘れると、ガターの印と絵が別の行を指す。
+    /// 畳みはホストが持っているので、`take_reflow_map` で受け取って寄せる。
+    pub fn resize(&mut self, cols: usize, rows: usize) {
+        self.state.grid.resize(cols, rows);
+        let Some(map) = self.state.grid.take_reflow_map() else {
+            return;
+        };
+        let at = |old: usize| map.get(old).copied().unwrap_or(old);
+        self.state.marks.remap(&|l| at(l));
+        for img in &mut self.state.images {
+            img.line = at(img.line);
+        }
+        self.reflow_map = Some(map);
+    }
+
+    /// 直近の組み直しの対応表。ホスト側の行番号（表示位置・畳み）を寄せる。
+    pub fn take_reflow_map(&mut self) -> Option<Vec<usize>> {
+        self.reflow_map.take()
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {

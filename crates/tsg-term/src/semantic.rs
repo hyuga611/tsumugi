@@ -75,6 +75,17 @@ impl SemanticMarks {
     /// 印は**ドキュメント絶対行番号**で持っている。行が消えたのに寄せないと、
     /// ガターの印と `[[` `]]` が実在しない行、あるいは無関係な行を指す。
     /// 消えた側へ落ちた印は捨てる（指す先がもう無い）。
+    /// 行番号を付け替える（幅を変えて組み直したとき）。
+    ///
+    /// **印は行に付いている。** 組み直すと行が動くので、ここを忘れると
+    /// ガターの印が別のコマンドを指す。
+    pub fn remap(&mut self, at: &dyn Fn(usize) -> usize) {
+        for m in &mut self.marks {
+            m.line = at(m.line);
+        }
+        self.marks.sort_by_key(|m| m.line);
+    }
+
     pub fn shift_up(&mut self, n: usize) {
         if n == 0 {
             return;

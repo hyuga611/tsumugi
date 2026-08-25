@@ -504,6 +504,7 @@ fn cells_of(s: &str, amb: AmbiguousWidth) -> Vec<Cell> {
             text: c.to_string(),
             width: w as u8,
             attrs: tsg_term::Attrs::default(),
+            link: 0,
         });
         // 全角の右半分。グリッドと同じ規則にしないと、添字と列が 1 つずつずれて
         // 文字が重なって描かれる（実機で踏んだ）。

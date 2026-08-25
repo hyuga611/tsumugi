@@ -1130,7 +1130,14 @@ impl App {
                     // 鏡を広げるのはここだけ。ウィンドウのリサイズ時に自分で広げると、
                     // 古い桁で組まれたバイトを新しい桁で読んで表示がずれる（実機で再現した）。
                     if let Some(v) = self.session.panes.get_mut(&pane) {
-                        v.term.state.grid.resize(cols as usize, rows as usize);
+                        v.term.resize(cols as usize, rows as usize);
+                        // 組み直しで行番号が動いた。**畳みと表示位置も寄せる。**
+                        // 畳みは範囲が変わるので、素直に外す（何を隠している
+                        // のか説明できなくなるより、開いてしまうほうがいい）。
+                        if let Some(map) = v.term.take_reflow_map() {
+                            v.top = map.get(v.top).copied().unwrap_or(v.top);
+                            v.folds.clear();
+                        }
                     }
                 }
                 ServerMsg::Output { pane, data } => {
@@ -1919,6 +1926,22 @@ impl App {
     /// **勝手に実行はしない。** URL はブラウザ、パスはエディタ、ハッシュは
     /// `git show` をプロンプトへ置くところまで。最後の Enter は人が押す。
     fn open_at(&mut self, id: u32, pos: Pos) {
+        // **相手が明示した行き先が先。** OSC 8 があるなら、画面の字から
+        // パスらしきものを当てにいく必要は無い。
+        if let Some(url) = self.link_at(id, pos) {
+            match open_in_os(&url) {
+                Ok(()) => {
+                    self.status_msg = t!(format!("{url} を開きました"), format!("opened {url}"));
+                }
+                Err(e) => {
+                    self.status_msg = t!(
+                        format!("{url} を開けません: {e}"),
+                        format!("cannot open {url}: {e}")
+                    );
+                }
+            }
+            return;
+        }
         let Some(view) = self.session.panes.get(&id) else {
             return;
         };
@@ -1968,6 +1991,46 @@ impl App {
                 }
             }
         }
+    }
+
+    /// その位置のセルが持つリンク（OSC 8）。
+    fn link_at(&self, id: u32, pos: Pos) -> Option<String> {
+        let view = self.session.panes.get(&id)?;
+        if view.editing() || view.previewing() {
+            return None;
+        }
+        let cell = view
+            .term
+            .state
+            .grid
+            .document_line(pos.line)?
+            .cells
+            .get(pos.col)?;
+        view.term.state.link_of(cell).map(str::to_string)
+    }
+
+    /// 同じリンクが続いている範囲。下線をリンク全体に引くために要る。
+    fn link_span(&self, id: u32, pos: Pos) -> Option<Range> {
+        let view = self.session.panes.get(&id)?;
+        let line = view.term.state.grid.document_line(pos.line)?;
+        let want = line.cells.get(pos.col)?.link;
+        if want == 0 {
+            return None;
+        }
+        let same = |c: usize| line.cells.get(c).is_some_and(|x| x.link == want);
+        let mut a = pos.col;
+        while a > 0 && same(a - 1) {
+            a -= 1;
+        }
+        let mut b = pos.col;
+        while same(b + 1) {
+            b += 1;
+        }
+        Some(Range::new(
+            Pos::new(pos.line, a),
+            Pos::new(pos.line, b),
+            RangeKind::Char,
+        ))
     }
 
     /// パスを実際の場所に直す。無ければ `None`。
@@ -2295,6 +2358,11 @@ impl App {
             .filter(|id| !self.on_gutter(*id, col))
             .and_then(|id| Some((id, self.doc_pos(id, col, row)?)))
             .and_then(|(id, pos)| {
+                // 相手が明示したリンク（OSC 8）は、字の形に関係なく開ける。
+                if self.link_at(id, pos).is_some() {
+                    let span = self.link_span(id, pos)?;
+                    return Some((id, span));
+                }
                 let view = self.session.panes.get(&id)?;
                 let buf = view.buffer();
                 let range = tsg_modal::textobj::at_pointer(&buf, pos)?;
@@ -2517,6 +2585,17 @@ impl App {
         let Some(input) = to_key_input(&key, self.mods, self.engine.mode()) else {
             return;
         };
+
+        // 差し替えたキーは**既定より先**に見る。書かなかったキーはそのまま。
+        let when = if self.engine.mode() == Mode::Insert {
+            tsg_modal::KeyWhen::Insert
+        } else {
+            tsg_modal::KeyWhen::Normal
+        };
+        if let Some(id) = self.cfg.keys.lookup(when, input) {
+            self.invoke(id, event_loop);
+            return;
+        }
 
         let was_insert = self.engine.mode() == Mode::Insert;
         let outcome = {
@@ -3225,6 +3304,30 @@ impl App {
                                 color
                             } else {
                                 th.fade(color, 0.45)
+                            },
+                        );
+                    }
+
+                    // 縦の位置を右のふちに出す。**いま全体のどこを見ているか**が
+                    // 分からないのは、長い履歴を主役に据える端末では特に痛い。
+                    // 全部見えているときは出さない（何も言っていないのと同じ）。
+                    let doc_len = doc.line_count().max(1);
+                    if doc_len > rect.h && rect.h > 2 {
+                        let x = (rect.x + rect.w).saturating_sub(1) as f32;
+                        renderer.rect(x, rect.y as f32, 1.0, rect.h as f32, th.scroll_track);
+                        let frac = |n: usize| n as f32 / doc_len as f32;
+                        let h = (frac(rect.h) * rect.h as f32).max(1.0);
+                        let y = rect.y as f32 + frac(top) * rect.h as f32;
+                        let y = y.min((rect.y + rect.h) as f32 - h);
+                        renderer.rect(
+                            x,
+                            y,
+                            1.0,
+                            h,
+                            if is_active {
+                                th.scroll_thumb
+                            } else {
+                                th.fade(th.scroll_thumb, 0.45)
                             },
                         );
                     }

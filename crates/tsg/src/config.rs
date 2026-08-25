@@ -45,6 +45,8 @@ pub struct Config {
     /// 使うテーマの名前。表示と `:theme` のために持つ。
     pub theme_name: String,
     pub theme: Theme,
+    /// 差し替えたキー。**既定は消さず、上に重ねる**（`keymap.rs`）。
+    pub keys: tsg_modal::Keymap,
 }
 
 impl Default for Config {
@@ -60,6 +62,7 @@ impl Default for Config {
             lang: detect_lang(),
             theme_name: theme::DEFAULT_THEME.to_string(),
             theme: Theme::default(),
+            keys: tsg_modal::Keymap::default(),
         }
     }
 }
@@ -76,6 +79,19 @@ struct File {
     scrollback: Scrollback,
     #[serde(default)]
     theme: ThemeFile,
+    /// `[keys]` は読むモード、`[keys.insert]` は入力モード。
+    #[serde(default)]
+    keys: KeysFile,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct KeysFile {
+    /// 入力モードでの割り当て。**素の 1 字は受け取らない**（打てなくなる）。
+    #[serde(default)]
+    insert: std::collections::BTreeMap<String, String>,
+    /// 読むモードでの割り当て。`"ctrl+k" = "search.open"` のように書く。
+    #[serde(flatten)]
+    normal: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -199,6 +215,16 @@ pub fn template() -> String {
 # さかのぼって読める行数。
 # lines = {sb}
 
+[keys]
+# キーを差し替える。左がキー、右がコマンドの id（一覧は tsg --commands）。
+# **書いた分だけ既定より先に見ます。** 書かなかったキーは今までどおりです。
+# "ctrl+k" = "search.open"
+# "F5"     = "git.diff"
+#
+# [keys.insert]
+# 入力モードは Ctrl や F キーだけ（素の字を奪うと、その字が打てません）。
+# "ctrl+g" = "agent.next"
+
 [theme]
 # 配色の名前。{themes}
 # name = "{theme}"
@@ -291,6 +317,19 @@ impl Config {
             }
         }
 
+        // キーの差し替え。読めないものは**理由を出して足さない**。
+        let mut keys = tsg_modal::Keymap::default();
+        for (k, id) in &f.keys.normal {
+            if let Err(e) = keys.add(tsg_modal::KeyWhen::Normal, k, id) {
+                bad.push(e);
+            }
+        }
+        for (k, id) in &f.keys.insert {
+            if let Err(e) = keys.add(tsg_modal::KeyWhen::Insert, k, id) {
+                bad.push(e);
+            }
+        }
+
         let cfg = Self {
             opacity: f.window.opacity.unwrap_or(d.opacity).clamp(0.2, 1.0),
             blur: f.window.blur.unwrap_or(d.blur),
@@ -312,6 +351,7 @@ impl Config {
             lang: f.ui.lang.as_deref().and_then(Lang::parse).unwrap_or(d.lang),
             theme_name: name,
             theme,
+            keys,
         };
         (cfg, (!bad.is_empty()).then(|| bad.join(" / ")))
     }

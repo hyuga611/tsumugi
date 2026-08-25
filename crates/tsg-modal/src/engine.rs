@@ -20,7 +20,7 @@ use crate::t;
 use crate::textobj::{self, TextObject};
 
 /// プラットフォーム非依存のキー表現。winit などの型はここへ持ち込まない。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum KeyInput {
     Char(char),
     Esc,

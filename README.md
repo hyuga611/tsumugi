@@ -92,7 +92,9 @@ Open it and press **F1**. The help starts with what the mouse alone can do.
 detach and reattach. `Space S` lists what is running.
 
 **Reading output** — syntax highlighting, `git diff` in colour (`Space g`),
-Markdown rendered in place (`Space m`), images via the Kitty graphics protocol.
+Markdown rendered in place (`Space m`), images (Kitty graphics and Sixel),
+OSC 8 hyperlinks, a position indicator on the right edge. Narrowing the window
+**re-wraps** the scrollback instead of cutting it off.
 
 **For AI agents** — see [For agents](#for-agents).
 
@@ -149,9 +151,17 @@ ambiguous_width = "narrow"    # "wide" for the older CJK convention
 
 [theme]
 name = "yogiri"               # yogiri / sumi / hakuji
+
+[keys]
+"ctrl+k" = "search.open"      # any command id — `tsg --commands` lists them
+"F5"     = "git.diff"
+
+[keys.insert]
+"ctrl+g" = "agent.next"       # Ctrl or F keys only while typing
 ```
 
-Saving takes effect immediately.
+Saving takes effect immediately. **Your bindings are layered on top of the
+defaults**, so keys you do not mention keep working.
 
 ## Driving it from outside
 
@@ -177,10 +187,9 @@ layers are platform-independent — but the window decoration, IME, and
 `--install` are written against Windows APIs, and **nobody has run it there
 yet**. Treat those platforms as untested rather than supported.
 
-Not done yet: Sixel, cross-line syntax highlighting, scrollback reflow on
-resize, remote/SSH domains, keybinding customisation. Ligatures work but could
-not be verified here (no ligature font on the development machine;
-`tsg --diagnose` will tell you).
+Not done yet: cross-line syntax highlighting, remote/SSH domains, session
+restore across a reboot. Ligatures work but could not be verified here (no
+ligature font on the development machine; `tsg --diagnose` will tell you).
 
 ## Security
 
