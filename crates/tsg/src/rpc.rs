@@ -384,6 +384,27 @@ pub fn prompt(session: &str, text: &str, pane: Option<u32>, and_wait: bool) -> R
     }
 }
 
+/// tsumugi の中で `tsg` と打たれたときに、窓ではなくタブを開く。
+///
+/// **端末エミュレータを端末の中から起動するのは日常**なので、そのたびに
+/// 窓が増えるのは邪魔でしかない。中に居ると分かるなら、いまの窓に
+/// タブを足して切り替える。`--new-window` を書けば今までどおり窓が開く。
+///
+/// 繋がらなければ `false` を返す。呼ぶ側はそのまま窓を開けばいい
+/// （**開かないより、窓が開くほうがまし**）。
+pub fn open_tab_here(session: &str, cwd: Option<String>, command: Option<Vec<String>>) -> bool {
+    let Ok((mut client, _)) = attach(session) else {
+        return false;
+    };
+    if client.send(&ClientMsg::NewTab { cwd, command }).is_err() {
+        return false;
+    }
+    // 送り終える前に切ると取りこぼす
+    std::thread::sleep(Duration::from_millis(200));
+    let _ = client.send(&ClientMsg::Detach);
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

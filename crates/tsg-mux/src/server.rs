@@ -165,6 +165,12 @@ impl State {
             }
         }
         cmd.env("TERM", "xterm-256color");
+        // 中で走るものに「ここは tsumugi の中だ」と教える。
+        //
+        // **これが無いと、中で `tsg` と打ったときに窓がもう 1 枚開く。**
+        // 中に居ると分かれば、新しい窓ではなくこのセッションのタブを開ける。
+        cmd.env("TSUMUGI_SESSION", &self.session);
+        cmd.env("TSUMUGI_PANE", id.to_string());
         match cwd.filter(|c| std::path::Path::new(c).is_dir()) {
             Some(dir) => cmd.cwd(dir),
             None => {
@@ -634,12 +640,15 @@ impl State {
                 }
             }
 
-            ClientMsg::NewTab => {
+            ClientMsg::NewTab { cwd, command } => {
                 let (cols, rows) = (self.cols, self.rows);
-                let here = self.active_pane().and_then(|p| self.pane_cwd(p));
-                let saved = std::mem::replace(&mut self.spawn_cwd, here);
+                // 頼まれた場所が無ければ、いま居るペインと同じ場所。
+                let here = cwd.or_else(|| self.active_pane().and_then(|p| self.pane_cwd(p)));
+                let saved_cwd = std::mem::replace(&mut self.spawn_cwd, here);
+                let saved_cmd = std::mem::replace(&mut self.spawn_command, command);
                 let made = self.new_tab(cols, rows);
-                self.spawn_cwd = saved;
+                self.spawn_cwd = saved_cwd;
+                self.spawn_command = saved_cmd;
                 made?;
                 let info = self.info();
                 self.broadcast(&ServerMsg::Layout(info));

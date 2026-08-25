@@ -475,7 +475,16 @@ pub enum ClientMsg {
         title: String,
         text: String,
     },
-    NewTab,
+    /// 新しいタブ。`cwd` / `command` を書けばそこで開く。
+    ///
+    /// **tsumugi の中で `tsg` と打ったときの受け口**でもある。窓をもう 1 枚
+    /// 開かずに、いまの窓のタブが増えて切り替わる。
+    NewTab {
+        #[serde(default)]
+        cwd: Option<String>,
+        #[serde(default)]
+        command: Option<Vec<String>>,
+    },
     SelectTab {
         tab: u32,
     },

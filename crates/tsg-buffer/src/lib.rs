@@ -10,6 +10,7 @@
 //! 画面上の位置と一致しなくなる。
 
 pub mod file;
+pub mod markdown;
 pub mod syntax;
 
 use tsg_term::{Cell, Grid, SemanticMarks};

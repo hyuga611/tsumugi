@@ -67,6 +67,8 @@ pub struct Cli {
     pub theme: Option<String>,
     /// `--session` を明示されたか。`-e` のときの既定を変えるのに使う。
     pub session_given: bool,
+    /// tsumugi の中から起動したときも、タブではなく新しい窓を開く。
+    pub new_window: bool,
     /// 相手のペイン。書かなければ「いま選ばれているペイン」。
     pub pane: Option<u32>,
 }
@@ -84,6 +86,7 @@ impl Default for Cli {
             lang: None,
             theme: None,
             session_given: false,
+            new_window: false,
             pane: None,
         }
     }
@@ -104,6 +107,8 @@ tsumugi (tsg) — ターミナルの画面を vim で編集できるドキュメ
       --no-blur            背景のぼかしを切る
       --font-size <px>     文字の大きさ
       --lang <ja|en>       表示の言語（既定: OS に合わせる）
+  -n, --new-window         tsumugi の中から起動したときも新しい窓を開く
+                           （既定は、いまの窓にタブが増えて切り替わる）
       --theme <名前>       配色（夜霧 / 墨 / 白磁。英名 yogiri / sumi / hakuji でも可）
       --install            スタートメニュー / デスクトップ / PATH /
                            フォルダの右クリックに登録する（exe は動かさない）
@@ -160,6 +165,7 @@ AI エージェントを並べて使うなら:
     tsg --install-agent-hooks              # Claude Code / Codex に配線する
     Space a                                # 次の返事待ちへ飛ぶ
     Space f                                # 画面に出てきたファイルの一覧
+    Space m                                # Markdown を読む形にする
     [a  ]a                                 # 前 / 次の発話へ
 
   台本から回すこともできる:
@@ -257,6 +263,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Cli {
             "--pane" => {
                 cli.pane = next_value(&args, &mut i).and_then(|v| v.parse().ok());
             }
+            "--new-window" | "-n" => cli.new_window = true,
             "--agents" => cli.mode = Mode::Agents,
             "--agent-state" => {
                 let v = next_value(&args, &mut i).unwrap_or_default();

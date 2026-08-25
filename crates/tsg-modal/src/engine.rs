@@ -740,6 +740,7 @@ impl Engine {
             "layout.sessions" => Command::Mux(MuxRequest::Sessions),
             "agent.next" => Command::Mux(MuxRequest::NextAgent),
             "agent.files" => Command::Mux(MuxRequest::PaneFiles),
+            "file.preview" => Command::Mux(MuxRequest::TogglePreview),
             "motion.agent" => Command::Move {
                 motion: Motion::NextAgentBlock,
                 count: 1,

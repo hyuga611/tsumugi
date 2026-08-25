@@ -151,6 +151,8 @@ pub enum MuxRequest {
     Detach,
     /// セッションごと終了する。中のシェルも死ぬ。
     Shutdown,
+    /// Markdown を読む形にする / 素に戻す（`Space m`）。
+    TogglePreview,
     /// この画面に出てきたファイルの一覧（`Space f`）。
     ///
     /// エージェントは触ったファイルを字で言う。**その字はもう画面に在る**ので、
@@ -644,6 +646,14 @@ pub const REGISTRY: &[CommandSpec] = &[
         title_en: "Sessions (switch)",
         keys: &["Space S"],
         mouse: MousePath::Menu("セッション"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "file.preview",
+        title: "Markdown を読む形にする（もう一度で戻す）",
+        title_en: "Render Markdown (press again to go back)",
+        keys: &["Space m"],
+        mouse: MousePath::Menu("ファイル"),
         in_palette: true,
     },
     CommandSpec {

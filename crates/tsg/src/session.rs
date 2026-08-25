@@ -91,6 +91,12 @@ pub struct PaneView {
     pub top: usize,
     pub follow_tail: bool,
     pub alive: bool,
+    /// Markdown を「読む形」にした写し。
+    ///
+    /// **端末をもう 1 つ持つ**のが一番安い。プレビューは色付きの文字列に
+    /// すぎないので、端末に食わせればセルになり、描画・選択・コピー・
+    /// Ctrl＋クリックがそのまま効く。専用の描画経路を増やさない。
+    pub preview: Option<Terminal>,
 }
 
 /// スクロールバックの上限。**プロセス全体で 1 つ**の設定なので、
@@ -135,11 +141,20 @@ impl PaneView {
             top: 0,
             follow_tail: true,
             alive: true,
+            preview: None,
         }
+    }
+
+    /// プレビュー中か。**中身は読むだけ**で、打鍵はファイルへ行かない。
+    pub fn previewing(&self) -> bool {
+        self.preview.is_some()
     }
 
     /// いま見せている文書。
     pub fn buffer(&self) -> PaneBuffer<'_> {
+        if let Some(p) = &self.preview {
+            return PaneBuffer::Term(TermBuffer::new(&p.state.grid, &p.state.marks));
+        }
         match &self.file {
             Some(f) => PaneBuffer::File(f),
             None => PaneBuffer::Term(TermBuffer::new(&self.term.state.grid, &self.term.state.marks)),
@@ -166,6 +181,9 @@ impl PaneView {
 
     /// 文書の行数（端末なら履歴込み）。
     pub fn doc_len(&self) -> usize {
+        if let Some(p) = &self.preview {
+            return p.state.grid.document_len();
+        }
         match &self.file {
             Some(f) => f.line_count(),
             None => self.term.state.grid.document_len(),
@@ -175,6 +193,15 @@ impl PaneView {
     /// ステータス行に出す名前。
     pub fn label(&self) -> Option<String> {
         let f = self.file.as_ref()?;
+        if self.preview.is_some() {
+            let name = f
+                .path
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "(無題)".into());
+            return Some(name);
+        }
         let name = f
             .path
             .as_ref()

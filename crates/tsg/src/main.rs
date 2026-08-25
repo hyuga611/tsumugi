@@ -319,7 +319,10 @@ impl App {
                 })
             }
             MuxRequest::ClosePane => Some(ClientMsg::ClosePane { pane }),
-            MuxRequest::NewTab => Some(ClientMsg::NewTab),
+            MuxRequest::NewTab => Some(ClientMsg::NewTab {
+                cwd: None,
+                command: None,
+            }),
             MuxRequest::NextTab | MuxRequest::PrevTab => {
                 let info = self.session.info.as_ref()?;
                 let ids: Vec<u32> = info.tabs.iter().map(|t| t.id).collect();
@@ -378,6 +381,10 @@ impl App {
             }
             MuxRequest::PaneFiles => {
                 self.show_paths();
+                None
+            }
+            MuxRequest::TogglePreview => {
+                self.toggle_preview();
                 None
             }
             MuxRequest::Detach => {
@@ -987,6 +994,7 @@ impl App {
                 ServerMsg::FileClosed { pane } => {
                     if let Some(view) = self.session.panes.get_mut(&pane) {
                         view.file = None;
+                        view.preview = None;
                         view.follow_tail = true;
                     }
                     self.status_msg = t!("端末に戻りました", "back to the terminal").into();
@@ -1048,6 +1056,38 @@ impl App {
             // 鏡はここでは触らない。ConPTY が実際にサイズを変えた位置で
             // `ServerMsg::Resized` が届くので、合わせるのはそのとき。
             self.send_msg(&ClientMsg::Resize { pane, cols, rows });
+        }
+        self.refit_previews();
+    }
+
+    /// 幅が変わったプレビューを組み直す。折り返しが窓に合わなくなるため。
+    fn refit_previews(&mut self) {
+        let stale: Vec<u32> = self
+            .session
+            .panes
+            .iter()
+            .filter(|(_, v)| {
+                v.preview
+                    .as_ref()
+                    .is_some_and(|p| p.state.grid.cols != v.text_rect().w.max(20))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in stale {
+            let Some(view) = self.session.panes.get_mut(&id) else {
+                continue;
+            };
+            let Some(text) = view.file.as_ref().map(tsg_modal::FileBuffer::text) else {
+                view.preview = None;
+                continue;
+            };
+            let width = view.text_rect().w.max(20);
+            let rendered = tsg_modal::markdown::render(&text, width);
+            let rows = rendered.lines().count().max(1);
+            let mut term = tsg_term::Terminal::new(width, rows, tsg_term::ambiguous());
+            term.state.grid.set_max_scrollback(rows + 8);
+            term.feed(rendered.as_bytes());
+            view.preview = Some(term);
         }
     }
 
@@ -1174,6 +1214,44 @@ impl App {
         out
     }
 
+    /// Markdown を「読む形」と「素のまま」で行き来する。
+    ///
+    /// **写しを作るだけ**で、元のファイルには触らない。読む形は色付きの
+    /// 文字列にすぎないので、端末に食わせてセルにしてもらう。描画・選択・
+    /// コピー・Ctrl＋クリックは、ふつうのペインとまったく同じ経路に乗る。
+    fn toggle_preview(&mut self) {
+        let pane = self.session.active;
+        let Some(view) = self.session.panes.get_mut(&pane) else {
+            return;
+        };
+        if view.preview.take().is_some() {
+            view.top = 0;
+            self.status_msg = t!("素のまま表示に戻しました", "back to the raw text").into();
+            return;
+        }
+        let Some(file) = view.file.as_ref() else {
+            self.status_msg = t!(
+                "ファイルを開いてから使ってください（Space e）",
+                "open a file first (Space e)"
+            )
+            .into();
+            return;
+        };
+        let width = view.text_rect().w.max(20);
+        let rendered = tsg_modal::markdown::render(&file.text(), width);
+        let rows = rendered.lines().count().max(1);
+        let mut term = tsg_term::Terminal::new(width, rows, tsg_term::ambiguous());
+        term.state.grid.set_max_scrollback(rows + 8);
+        term.feed(rendered.as_bytes());
+        view.preview = Some(term);
+        view.top = 0;
+        self.engine.set_cursor(Pos::default(), &{
+            let v = self.session.panes.get(&pane).expect("いま触ったペイン");
+            v.buffer()
+        });
+        self.status_msg = t!("読む形にしました（もう一度で戻る）", "rendered (press again to go back)").into();
+    }
+
     /// このペインに出てきたファイルパスを集めて一覧にする。
     ///
     /// エージェントは「どのファイルを読んで、どこを直したか」を字で言う。
@@ -1278,13 +1356,9 @@ impl App {
             .into();
             return;
         }
-        // いま居るところより後ろを先に見る（何度も押すと順に回る）。
-        let here = self.session.active;
-        let next = waiting
-            .iter()
-            .copied()
-            .find(|p| *p > here)
-            .unwrap_or(waiting[0]);
+        let Some(next) = Self::next_waiting(&waiting, self.session.active) else {
+            return;
+        };
 
         // 別のタブなら、タブごと移る。
         if let Some(info) = self.session.info.as_ref()
@@ -1781,6 +1855,23 @@ impl App {
             ));
         }
 
+        // Markdown を開いているあいだは、読む形への行き来を出す。
+        // **キーを知らなくても押せる**ことがこのボタンの理由。
+        if self
+            .active_view()
+            .is_some_and(|v| v.previewing() || v.lang() == tsg_modal::SyntaxLang::Markdown)
+        {
+            let on = self.active_view().is_some_and(PaneView::previewing);
+            out.push((
+                if on {
+                    format!(" ◱ {} ", t!("素のまま", "raw"))
+                } else {
+                    format!(" ◱ {} ", t!("読む形", "render"))
+                },
+                StatusTarget::Preview,
+            ));
+        }
+
         // ファイルを開いているあいだだけ、戻る道を常に出しておく。
         // **ここが無いと帰れない。** `:q` も右クリックメニューも知らない人には、
         // エディタになったペインが行き止まりに見える（実機で行き止まった）。
@@ -1831,6 +1922,10 @@ impl App {
             }
             StatusTarget::AgentNext => {
                 self.jump_to_waiting_agent();
+                return;
+            }
+            StatusTarget::Preview => {
+                self.toggle_preview();
                 return;
             }
             StatusTarget::Macro => {
@@ -2157,6 +2252,16 @@ impl App {
             KeyOutcome::PassThrough => {
                 // エディタとして開いていれば、打鍵はファイルへ入る。
                 // 下のシェルには 1 バイトも行かない。
+                // 読む形のあいだは書き換えない。**写しを編集しても
+                // 元のファイルには入らない**ので、入ったように見せない。
+                if self.active_view().is_some_and(PaneView::previewing) {
+                    self.status_msg = t!(
+                        "読む形のあいだは編集できません（Space m で戻る）",
+                        "read-only while rendered (Space m to go back)"
+                    )
+                    .into();
+                    return;
+                }
                 if self.active_view().is_some_and(PaneView::editing) {
                     self.type_into_file(&key, text.as_deref());
                     return;
@@ -2637,7 +2742,19 @@ impl App {
         }
     }
 
-    /// 状態の色。タブの印とステータスで同じものを使う。
+    /// 次に飛ぶ先。**何度も押すと順に回る**ように、いま居るところより後ろを先に見る。
+///
+/// 3 本が同時に返事待ちのとき、押すたびに同じ 1 本へ戻るのでは
+/// 「探す手間を消す」という目的を果たさない。
+    fn next_waiting(waiting: &[u32], here: u32) -> Option<u32> {
+        waiting
+            .iter()
+            .copied()
+            .find(|p| *p > here)
+            .or_else(|| waiting.first().copied())
+    }
+
+/// 状態の色。タブの印とステータスで同じものを使う。
     fn agent_color(th: &Theme, a: AgentState) -> [f32; 4] {
         match a {
             AgentState::Working => th.agent_working,
@@ -2912,6 +3029,9 @@ impl App {
                 }
                 StatusTarget::AgentNext => {
                     renderer.text(x as f32, status_row, label, th.agent_blocked, true);
+                }
+                StatusTarget::Preview => {
+                    renderer.text(x as f32, status_row, label, th.accent, true);
                 }
                 _ => renderer.text(x as f32, status_row, label, th.status_fg, true),
             }
@@ -3358,6 +3478,8 @@ enum StatusTarget {
     CloseFile,
     /// 次の「人の番」のエージェントへ飛ぶ
     AgentNext,
+    /// Markdown を読む形にする / 素に戻す
+    Preview,
 }
 
 /// ボタンの並びから当たりを引く。列の計算を描画と共有するのが要点。
@@ -3519,6 +3641,10 @@ fn help_lines() -> Vec<HelpLine> {
             t!("エディタを閉じて、元のシェルへ戻る", "close the editor and go back to the shell"),
         ),
         (":w  /  :q", t!("保存 / 端末へ戻る", "save / back to the shell")),
+        (
+            t!("下の ◱ 読む形", "the ◱ below"),
+            t!("Markdown を読む形にする（Space m でも）", "render Markdown (or Space m)"),
+        ),
     ] {
         v.push(Pair(a, b));
     }
@@ -4019,6 +4145,26 @@ fn main() -> Result<()> {
         cli::Mode::Run | cli::Mode::Diagnose => {}
     }
 
+    // tsumugi の中から `tsg` と打たれたら、窓ではなくタブを開いて終わる。
+    //
+    // **端末を端末の中から起動するのは日常**なので、そのたびに窓が増えるのは
+    // 邪魔でしかない。`-n` を書けば今までどおり窓が開く。繋がらなければ
+    // そのまま窓を開く（開かないより、窓が開くほうがまし）。
+    if cli.mode == cli::Mode::Run
+        && !cli.new_window
+        && let Some(inside) = std::env::var("TSUMUGI_SESSION").ok().filter(|s| !s.is_empty())
+        && (!cli.session_given || cli.session == inside)
+    {
+        let cwd = cli
+            .cwd
+            .clone()
+            .or_else(|| std::env::current_dir().ok())
+            .map(|p| p.display().to_string());
+        if rpc::open_tab_here(&inside, cwd, cli.command.clone()) {
+            return Ok(());
+        }
+    }
+
     let (mut cfg, warning) = Config::load();
     cfg.override_with(&cli);
     // 表示の言葉はここで 1 度だけ決める（以降プロセス全体で変わらない）
@@ -4045,6 +4191,20 @@ mod tests {
 
     fn range(a: (usize, usize), b: (usize, usize), kind: RangeKind) -> Range {
         Range::new(Pos::new(a.0, a.1), Pos::new(b.0, b.1), kind)
+    }
+
+    /// 押すたびに順に回る。同じ 1 本へ戻るのでは「探す手間を消す」に届かない。
+    #[test]
+    fn pressing_again_moves_to_the_next_waiting_agent() {
+        let waiting = [1u32, 3, 5];
+        assert_eq!(App::next_waiting(&waiting, 0), Some(1));
+        assert_eq!(App::next_waiting(&waiting, 1), Some(3));
+        assert_eq!(App::next_waiting(&waiting, 3), Some(5));
+        // 最後まで行ったら先頭へ戻る
+        assert_eq!(App::next_waiting(&waiting, 5), Some(1));
+        // いま居るペインが待っていなくても、後ろから拾う
+        assert_eq!(App::next_waiting(&waiting, 4), Some(5));
+        assert_eq!(App::next_waiting(&[], 1), None);
     }
 
     #[test]
