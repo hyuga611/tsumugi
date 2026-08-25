@@ -9,12 +9,17 @@ use crate::attrs::Attrs;
 
 /// East Asian Ambiguous 幅の扱い。`arch.md` §6.1。
 ///
-/// 日本語環境の慣習に合わせ既定は `Wide`（2幅）。
+/// **既定は `Narrow`（1 幅）。** 設計時は日本語環境の慣習に合わせて 2 幅を
+/// 既定にしていたが、罫線素片（`─` `│` `╭`）・`●` `•` `·` `←` `█` はどれも
+/// Ambiguous なので、2 幅にすると**TUI が軒並み崩れる**。枠線が破線になり、
+/// 消去とカーソル移動の桁がずれて古い文字が残る（Claude Code で踏んだ）。
+/// かな・漢字は Wide クラスなのでこの設定に左右されない。
+/// 2 幅が要るなら `[font] ambiguous_width = "wide"`。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AmbiguousWidth {
     #[default]
-    Wide,
     Narrow,
+    Wide,
 }
 
 /// 1文字の表示幅を返す。制御文字・結合文字は 0。
@@ -23,6 +28,31 @@ pub fn char_width(c: char, amb: AmbiguousWidth) -> usize {
         AmbiguousWidth::Wide => c.width_cjk().unwrap_or(0),
         AmbiguousWidth::Narrow => c.width().unwrap_or(0),
     }
+}
+
+/// プロセス全体の Ambiguous 幅。
+///
+/// **1 プロセスに 1 つと決める。** 画面ごとに違うと、同じ文字列が
+/// ペインをまたいだ瞬間に幅を変え、桁の勘定がどこかで必ず食い違う。
+/// 起動時に設定から一度だけ決める（`Lang` と同じ扱い）。
+static AMBIGUOUS: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn set_ambiguous(a: AmbiguousWidth) {
+    let v = u8::from(a == AmbiguousWidth::Wide);
+    AMBIGUOUS.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn ambiguous() -> AmbiguousWidth {
+    if AMBIGUOUS.load(std::sync::atomic::Ordering::Relaxed) == 1 {
+        AmbiguousWidth::Wide
+    } else {
+        AmbiguousWidth::Narrow
+    }
+}
+
+/// いまの設定での表示幅。桁を数えるところは全部これを通す。
+pub fn width_of(c: char) -> usize {
+    char_width(c, ambiguous())
 }
 
 /// 1セル。
@@ -678,6 +708,29 @@ impl Grid {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// TUI が枠を描く字は East Asian **Ambiguous**。ここを 2 幅で数えると、
+    /// 枠線が破線になり、消去とカーソル移動の桁がずれて古い文字が残る。
+    /// Claude Code を tsumugi の中で動かして実際に踏んだ。
+    #[test]
+    fn the_characters_tuis_draw_boxes_with_are_one_cell_wide() {
+        for cp in [0x2500u32, 0x2502, 0x256d, 0x2588, 0x25cf, 0x2022, 0x00b7, 0x2190] {
+            let c = char::from_u32(cp).unwrap();
+            assert_eq!(char_width(c, AmbiguousWidth::Narrow), 1, "U+{cp:04X}");
+            assert_eq!(char_width(c, AmbiguousWidth::Wide), 2, "U+{cp:04X}");
+        }
+        assert_eq!(ambiguous(), AmbiguousWidth::Narrow, "既定は 1 幅");
+    }
+
+    /// かな・漢字・全角英字は Wide クラスなので、この設定に左右されない。
+    #[test]
+    fn kana_and_kanji_stay_two_cells_either_way() {
+        for cp in [0x3042u32, 0x6f22, 0xff21] {
+            let c = char::from_u32(cp).unwrap();
+            assert_eq!(char_width(c, AmbiguousWidth::Narrow), 2, "U+{cp:04X}");
+            assert_eq!(char_width(c, AmbiguousWidth::Wide), 2, "U+{cp:04X}");
+        }
+    }
 
     #[test]
     fn ascii_is_one_cell() {

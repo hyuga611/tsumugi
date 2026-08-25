@@ -12,7 +12,9 @@ pub mod semantic;
 use vte::{Params, Perform};
 
 pub use attrs::{Attrs, Color};
-pub use grid::{AmbiguousWidth, Cell, Cursor, Grid, Line, char_width};
+pub use grid::{
+    AmbiguousWidth, Cell, Cursor, Grid, Line, ambiguous, char_width, set_ambiguous, width_of,
+};
 pub use semantic::{CommandBlock, Mark, MarkKind, SemanticMarks};
 
 /// マウストラッキングの段階。数字は DEC プライベートモード番号。

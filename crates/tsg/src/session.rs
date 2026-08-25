@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use tsg_modal::command::FocusDir;
 use tsg_modal::{Buffer, BufferKind, FileBuffer, TermBuffer};
 use tsg_mux::protocol::{Dir, Layout, SessionInfo, weights_for};
-use tsg_term::{AmbiguousWidth, Cell, SemanticMarks, Terminal};
+use tsg_term::{Cell, SemanticMarks, Terminal};
 
 /// 左ガターの幅。OSC 133 のマーカーを置く場所（`mouse-parity.md` §4.2）。
 ///
@@ -104,7 +104,7 @@ pub fn set_scrollback(lines: usize) {
 }
 
 fn new_terminal(cols: usize, rows: usize) -> Terminal {
-    let mut t = Terminal::new(cols.max(1), rows.max(1), AmbiguousWidth::Wide);
+    let mut t = Terminal::new(cols.max(1), rows.max(1), tsg_term::ambiguous());
     let n = SCROLLBACK.load(std::sync::atomic::Ordering::Relaxed);
     if n > 0 {
         t.state.grid.set_max_scrollback(n);

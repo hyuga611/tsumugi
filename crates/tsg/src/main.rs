@@ -35,7 +35,7 @@ use tsg_modal::{
 use tsg_mux::Client;
 use tsg_mux::protocol::{ClientMsg, Dir, PROTOCOL_VERSION, ServerMsg};
 use tsg_render::Renderer;
-use tsg_term::{AmbiguousWidth, Attrs, InputOwner};
+use tsg_term::{Attrs, InputOwner};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
@@ -931,7 +931,7 @@ impl App {
                         .panes
                         .entry(pane)
                         .or_insert_with(|| PaneView::new(area.w, area.h));
-                    let mut file = tsg_modal::FileBuffer::from_text(&text, AmbiguousWidth::Wide);
+                    let mut file = tsg_modal::FileBuffer::from_text(&text, tsg_term::ambiguous());
                     file.path = path.as_deref().map(std::path::PathBuf::from);
                     file.dirty = dirty;
                     view.file = Some(file);
@@ -2692,6 +2692,9 @@ impl App {
         // 変えると画面の一部だけ古い言語のまま残る。
         let lang_changed = next.lang != self.cfg.lang;
         next.lang = self.cfg.lang;
+        // 幅も同じ理由で据え置く（桁の勘定が変わると既存のグリッドと食い違う）。
+        let width_changed = next.ambiguous_width != self.cfg.ambiguous_width;
+        next.ambiguous_width = self.cfg.ambiguous_width;
 
         let font_changed = (next.font_size - self.cfg.font_size).abs() > 0.01;
         let scrollback_changed = next.scrollback != self.cfg.scrollback;
@@ -2721,10 +2724,10 @@ impl App {
             self.resize_window();
         }
 
-        self.status_msg = if lang_changed {
+        self.status_msg = if lang_changed || width_changed {
             t!(
-                "設定を読み直した（言語は次に開いたときから）",
-                "config reloaded (language applies next launch)"
+                "設定を読み直した（言語と文字幅は次に開いたときから）",
+                "config reloaded (language and char width apply next launch)"
             )
             .to_string()
         } else {
@@ -2860,7 +2863,7 @@ fn to_key_input(key: &Key, mods: ModifiersState, mode: Mode) -> Option<KeyInput>
 
 fn display_width(s: &str) -> usize {
     s.chars()
-        .map(|c| tsg_term::char_width(c, AmbiguousWidth::Wide))
+        .map(tsg_term::width_of)
         .sum()
 }
 
@@ -3138,7 +3141,7 @@ fn truncate_width(s: &str, max: usize) -> String {
     let mut out = String::new();
     let mut w = 0;
     for c in s.chars() {
-        let cw = tsg_term::char_width(c, AmbiguousWidth::Wide);
+        let cw = tsg_term::width_of(c);
         if w + cw > max.saturating_sub(1) {
             break;
         }
@@ -3697,6 +3700,8 @@ fn main() -> Result<()> {
     cfg.override_with(&cli);
     // 表示の言葉はここで 1 度だけ決める（以降プロセス全体で変わらない）
     tsg_modal::set_lang(cfg.lang);
+    // 桁の勘定も同じ。途中で変えると、組んだあとのグリッドと食い違う。
+    tsg_term::set_ambiguous(cfg.ambiguous_width);
     session::set_scrollback(cfg.scrollback);
     if let Some(w) = warning {
         eprintln!("設定: {w}（既定で起動します）");
@@ -3760,7 +3765,7 @@ mod tests {
     // ---- マウス（mouse-parity.md §3・§4.3） ----
 
     fn term_with(text: &str) -> tsg_term::Terminal {
-        let mut t = tsg_term::Terminal::new(80, 24, AmbiguousWidth::Wide);
+        let mut t = tsg_term::Terminal::new(80, 24, tsg_term::AmbiguousWidth::Wide);
         t.feed(text.as_bytes());
         t
     }
@@ -3771,7 +3776,7 @@ mod tests {
         let byte = text.find(needle).expect("目印が無い");
         text[..byte]
             .chars()
-            .map(|c| tsg_term::char_width(c, AmbiguousWidth::Wide))
+            .map(tsg_term::width_of)
             .sum()
     }
 
@@ -3976,7 +3981,7 @@ mod tests {
     #[test]
     fn every_palette_reachable_command_can_actually_be_invoked() {
         // 宣言だけして実行できない項目があると、パレットが「最終保証」でなくなる。
-        let mut t = tsg_term::Terminal::new(40, 8, AmbiguousWidth::Wide);
+        let mut t = tsg_term::Terminal::new(40, 8, tsg_term::AmbiguousWidth::Wide);
         t.feed(b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07a.txt src/main.rs 42\r\n\x1b]133;D;1\x07");
         let buf = tsg_modal::TermBuffer::new(&t.state.grid, &t.state.marks);
 

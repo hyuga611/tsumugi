@@ -257,6 +257,7 @@ blur = true      # Windows 11 では背景がぼける
 
 [font]
 size = 18.0
+ambiguous_width = "narrow"   # 既定。"wide" にすると罫線素片などを 2 幅で数える
 ```
 
 **既定で少し透けて、背景がぼけます。** 不透明にしたいときだけ `opacity = 1.0`。

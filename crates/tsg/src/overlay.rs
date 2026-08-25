@@ -452,7 +452,7 @@ fn needs_range(id: &str) -> bool {
 
 fn display_width(s: &str) -> usize {
     s.chars()
-        .map(|c| tsg_term::char_width(c, tsg_term::AmbiguousWidth::Wide))
+        .map(tsg_term::width_of)
         .sum()
 }
 

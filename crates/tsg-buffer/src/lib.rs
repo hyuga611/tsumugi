@@ -109,7 +109,7 @@ pub trait Buffer {
 
 /// 1 文字の表示幅。`tsg-modal` が `tsg-term` を直接見ないための橋。
 pub fn char_display_width(c: char) -> usize {
-    tsg_term::char_width(c, tsg_term::AmbiguousWidth::Wide)
+    tsg_term::width_of(c)
 }
 
 /// その行のセル数（確保された幅）。

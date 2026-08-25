@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 use tsg_modal::Lang;
+use tsg_term::AmbiguousWidth;
 
 use crate::theme::{self, Theme};
 
@@ -24,6 +25,11 @@ pub struct Config {
     pub font_size: f32,
     /// 合字を組むか（`->` を 1 つの字形にする）。
     pub ligatures: bool,
+    /// East Asian Ambiguous を 1 幅で数えるか 2 幅で数えるか（`arch.md` §6.1）。
+    ///
+    /// **これも読み直しでは変えない。** 桁の勘定そのものが変わるので、
+    /// 途中で切り替えると既に組んだグリッドと食い違う。
+    pub ambiguous_width: AmbiguousWidth,
     /// スクロールバックに残す行数。
     pub scrollback: usize,
     /// 表示の言語。設定に無ければ OS の言語を見る。
@@ -43,6 +49,7 @@ impl Default for Config {
             blur: true,
             font_size: DEFAULT_FONT_SIZE,
             ligatures: true,
+            ambiguous_width: AmbiguousWidth::Narrow,
             scrollback: tsg_term::grid::DEFAULT_MAX_SCROLLBACK,
             lang: detect_lang(),
             theme_name: theme::DEFAULT_THEME.to_string(),
@@ -88,6 +95,24 @@ struct Ui {
     lang: Option<String>,
 }
 
+/// `ambiguous_width` を読む。`"narrow"` / `"wide"` と `1` / `2` の両方を通す。
+///
+/// **知らない値は黙って捨てない。** 書いたのに効かないのが一番困る。
+fn parse_ambiguous(v: Option<&toml::Value>) -> Result<Option<AmbiguousWidth>, String> {
+    let Some(v) = v else {
+        return Ok(None);
+    };
+    match v {
+        toml::Value::Integer(1) => Ok(Some(AmbiguousWidth::Narrow)),
+        toml::Value::Integer(2) => Ok(Some(AmbiguousWidth::Wide)),
+        toml::Value::String(s) if s.eq_ignore_ascii_case("narrow") => Ok(Some(AmbiguousWidth::Narrow)),
+        toml::Value::String(s) if s.eq_ignore_ascii_case("wide") => Ok(Some(AmbiguousWidth::Wide)),
+        other => Err(format!(
+            "ambiguous_width = {other} を読めません（\"narrow\" / \"wide\" / 1 / 2）"
+        )),
+    }
+}
+
 /// OS の言語を見る。分からなければ日本語（作者の既定）。
 ///
 /// 知らない言語のときに英語へ倒すか日本語へ倒すかは趣味の問題だが、
@@ -113,6 +138,8 @@ struct Window {
 struct Font {
     size: Option<f32>,
     ligatures: Option<bool>,
+    /// `"narrow"` / `"wide"`、または `1` / `2`。
+    ambiguous_width: Option<toml::Value>,
 }
 
 /// 設定ファイルの場所。
@@ -149,6 +176,9 @@ pub fn template() -> String {
 # size = {size}
 # -> や != を 1 つの字形に組む（字体が持っていれば）。
 # ligatures = {lig}
+# 罫線素片・記号など East Asian Ambiguous を何幅で数えるか。
+# "narrow"（1・既定。TUI が崩れない）/ "wide"（2・日本語端末の古い慣習）。
+# ambiguous_width = "narrow"
 
 [ui]
 # 表示の言語。"ja" / "en" / "auto"（既定は OS に合わせる）。
@@ -255,6 +285,13 @@ impl Config {
             blur: f.window.blur.unwrap_or(d.blur),
             font_size: f.font.size.unwrap_or(d.font_size).clamp(6.0, 96.0),
             ligatures: f.font.ligatures.unwrap_or(d.ligatures),
+            ambiguous_width: match parse_ambiguous(f.font.ambiguous_width.as_ref()) {
+                Ok(v) => v.unwrap_or(d.ambiguous_width),
+                Err(w) => {
+                    bad.push(w);
+                    d.ambiguous_width
+                }
+            },
             scrollback: f
                 .scrollback
                 .lines
