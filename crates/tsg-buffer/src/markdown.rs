@@ -41,7 +41,11 @@ pub fn render(text: &str, width: usize) -> String {
             continue;
         }
         if in_code.is_some() {
-            out.push_str(&format!("{DIM}│{RESET} {CODE}{line}{RESET}\r\n"));
+            // **折り返しはするが、詰め直さない。** コードの字下げは意味を
+            // 持つので、語で組み直すと別物になる。桁で切って次の行へ送る。
+            for chunk in hard_wrap(line, width.saturating_sub(2)) {
+                out.push_str(&format!("{DIM}│{RESET} {CODE}{chunk}{RESET}\r\n"));
+            }
             continue;
         }
 
@@ -83,7 +87,9 @@ pub fn render(text: &str, width: usize) -> String {
         if let Some(rest) = line.trim_start().strip_prefix("> ").or_else(|| {
             (line.trim() == ">").then_some("")
         }) {
-            out.push_str(&format!("{DIM}│{RESET} {ITALIC}{}{RESET}\r\n", inline(rest)));
+            for chunk in wrap(&inline(rest), width.saturating_sub(2)) {
+                out.push_str(&format!("{DIM}│{RESET} {ITALIC}{chunk}{RESET}\r\n"));
+            }
             continue;
         }
 
@@ -207,8 +213,10 @@ fn table(rows: &[String], width: usize) -> String {
     let mut out = String::new();
     for (r, row) in cells.iter().enumerate() {
         if is_sep(&rows[r]) {
+            // 区切りも本文と同じ幅で切る。ここを忘れると、桁の広い表で
+            // 線だけが窓からはみ出す（実際の README で出た）。
             let line: Vec<String> = w.iter().map(|n| "─".repeat(n + 2)).collect();
-            out.push_str(&format!("{DIM}{}{RESET}\r\n", line.join("┼")));
+            out.push_str(&format!("{DIM}{}{RESET}\r\n", truncate(&line.join("┼"), width)));
             continue;
         }
         let head = r == 0;
@@ -267,7 +275,13 @@ fn inline(s: &str) -> String {
             && let Some(paren) = tail.find(')')
         {
             let (name, url) = (&after[..close], &tail[..paren]);
-            out.push_str(&format!("{LINK}{UNDER}{name}{RESET} {DIM}{url}{RESET}"));
+            // 名前と行き先が同じなら 1 回でいい。README では
+            // `[docs/x.md](docs/x.md)` と書くことが多く、2 回出ると読みにくい。
+            if name == url {
+                out.push_str(&format!("{LINK}{UNDER}{name}{RESET}"));
+            } else {
+                out.push_str(&format!("{LINK}{UNDER}{name}{RESET} {DIM}{url}{RESET}"));
+            }
             rest = &tail[paren + 1..];
             continue;
         }
@@ -349,6 +363,37 @@ fn truncate(s: &str, width: usize) -> String {
     out
 }
 
+/// **行頭に置かない字**（閉じ括弧・句読点）。日本語の禁則処理。
+///
+/// これが無いと「〜を保持」で改行して次の行が「）。」から始まる。
+/// 日本語を読むための端末で、ここを落とすわけにいかない。
+const NO_LINE_START: &str = "）」』】〕｝】、。・？！ぁぃぅぇぉっゃゅょゎヵヶァィゥェォッャュョヮ々ー):;,.?!";
+
+fn cannot_start_a_line(c: char) -> bool {
+    NO_LINE_START.contains(c)
+}
+
+/// 詰め直さずに桁で切る。コードブロック用。
+fn hard_wrap(s: &str, width: usize) -> Vec<String> {
+    let width = width.max(4);
+    let mut out = Vec::new();
+    let mut line = String::new();
+    let mut w = 0usize;
+    for c in s.chars() {
+        let cw = tsg_term::width_of(c);
+        if w + cw > width {
+            out.push(std::mem::take(&mut line));
+            w = 0;
+        }
+        line.push(c);
+        w += cw;
+    }
+    if !line.is_empty() || out.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
 /// 折り返す。**エスケープは桁に数えない。**
 fn wrap(s: &str, width: usize) -> Vec<String> {
     let mut out = Vec::new();
@@ -392,8 +437,22 @@ fn wrap(s: &str, width: usize) -> Vec<String> {
         if cw == 2 {
             flush_word(&mut line, &mut w, &mut word, &mut word_w);
             if w + cw > width {
+                // 行頭に来てはいけない字なら、**前の 1 文字ごと**次の行へ送る。
+                // ぶら下げにすると窓の桁を超えて、格子の折り返しに食われる。
+                let mut carry = String::new();
+                if cannot_start_a_line(c)
+                    && let Some(prev) = line.chars().next_back()
+                    && line.chars().count() > 1
+                {
+                    line.pop();
+                    carry.push(prev);
+                }
                 out.push(std::mem::take(&mut line));
                 w = 0;
+                for p in carry.chars() {
+                    line.push(p);
+                    w += tsg_term::width_of(p);
+                }
             }
             line.push(c);
             w += cw;
@@ -495,6 +554,30 @@ mod tests {
         for line in plain(&render("あいうえおかきくけこさしすせそ
 ", 4)).lines() {
             assert!(display_len(line) <= 20, "{line:?} が下限の 20 桁を超えた");
+        }
+    }
+
+    /// 本物の README を通す。**作った文書で試すと、作った通りにしか
+    /// ならない。** 実際に読む文書で崩れないことを見る。
+    #[test]
+    fn the_real_readme_renders_without_overflowing() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../README.md");
+        let Ok(src) = std::fs::read_to_string(&path) else {
+            return; // 配布物にはついてこない
+        };
+        let width = 78;
+        let out = render(&src, width);
+        for line in plain(&out).lines() {
+            assert!(
+                display_len(line) <= width,
+                "{} 桁を超えた: {line:?}",
+                display_len(line)
+            );
+        }
+        assert!(!plain(&out).contains("```"), "囲みの印が残っている");
+        if std::env::var_os("TSG_SHOW_MARKDOWN").is_some() {
+            println!("{out}");
         }
     }
 
