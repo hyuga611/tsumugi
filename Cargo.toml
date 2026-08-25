@@ -6,7 +6,7 @@ members = ["crates/*"]
 version = "0.0.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/hyuga0611/tsumugi"
+repository = "https://github.com/hyuga611/tsumugi"
 rust-version = "1.90"
 
 [workspace.dependencies]

@@ -171,6 +171,9 @@ impl State {
             }
         }
         cmd.env("TERM", "xterm-256color");
+        // **これが無いと多くのアプリが 256 色へ落ちる。** 解析器は真色に
+        // 対応しているので、名乗るだけで見た目が変わる。
+        cmd.env("COLORTERM", "truecolor");
         // 中で走るものに「ここは tsumugi の中だ」と教える。
         //
         // **これが無いと、中で `tsg` と打ったときに窓がもう 1 枚開く。**
@@ -927,7 +930,12 @@ fn default_shell() -> String {
 /// そこを弾くよりホームへ落ちる方が実害が小さい）。
 fn parse_file_url(url: &str) -> Option<String> {
     let rest = url.strip_prefix("file://")?;
-    let path = rest.split_once('/').map_or(rest, |(_, p)| p);
+    let (host, path) = rest.split_once('/').map_or(("", rest), |(h, p)| (h, p));
+    // **ホストを見る。** OSC 7 は子プロセスが自由に言える。よそのホストを
+    // 名乗られたら断る（`file://evil/…` を触りに行かない）。
+    if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") {
+        return None;
+    }
     let decoded = percent_decode(path);
     let cleaned = decoded.trim_start_matches('/');
     // Windows は `C:/dev/x`、Unix は `/home/x`
@@ -936,7 +944,28 @@ fn parse_file_url(url: &str) -> Option<String> {
     } else {
         decoded
     };
+    if !is_safe_local_dir(&out) {
+        return None;
+    }
     std::path::Path::new(&out).is_dir().then_some(out)
+}
+
+/// 触りに行ってよい場所か。**`is_dir()` を呼ぶ前に見る。**
+///
+/// Windows で `\host\share` を `is_dir()` すると、その場で SMB へ繋ぎに行き、
+/// 現在のユーザの資格情報を相手へ渡してしまう。**画面に字を出しただけで
+/// それが起きる**（OSC 7 は子プロセスが自由に言える）ので、その形を先に断る。
+fn is_safe_local_dir(path: &str) -> bool {
+    if path.is_empty() || path.len() > 4096 {
+        return false;
+    }
+    // UNC（`\host\share` `//host/share`）とデバイスパス（`\?\` `\.\`）
+    let head: String = path.chars().take(2).collect();
+    if head == "\\\\" || head == "//" {
+        return false;
+    }
+    // 制御文字を含む場所は相手にしない
+    !path.chars().any(char::is_control)
 }
 
 fn percent_decode(s: &str) -> String {

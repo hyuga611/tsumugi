@@ -10,6 +10,7 @@ pub mod graphics;
 pub mod grid;
 pub mod semantic;
 
+use base64::prelude::{BASE64_STANDARD, Engine as _};
 use vte::{Params, Perform};
 
 pub use attrs::{Attrs, Color};
@@ -89,6 +90,41 @@ pub struct TermState {
     /// 組み立て中の絵（分割して届く）。
     pending_image: Option<graphics::Pending>,
     next_image: u64,
+
+    /// **端末から相手へ返す答え。** ホストが取り出して PTY へ書く。
+    ///
+    /// これが無いと、相手は「この端末は何ができるのか」を訊いても答えが
+    /// 返らない。powerlevel10k はカーソル位置（CPR）を、vim は端末の型
+    /// （DA1）を、nvim は背景色（OSC 11）を訊く。無応答だと待たされるか、
+    /// 誤った既定に倒れる。**訊かれたら答える**のは端末の義務。
+    pub replies: Vec<u8>,
+    /// 前景・背景の実際の色（OSC 10 / 11 の答え）。ホストが配色から入れる。
+    pub fg_rgb: (u8, u8, u8),
+    pub bg_rgb: (u8, u8, u8),
+    /// カーソルの形（DECSCUSR `CSI Ps SP q`）。0 = 既定。
+    pub cursor_style: u16,
+    /// OSC 52 で相手が置いたクリップボードの中身。ホストが取り出す。
+    ///
+    /// **読み出し（`?`）には答えない。** 答えると、画面に字を出しただけで
+    /// クリップボードの中身を抜けてしまう。書き込みだけ受ける。
+    pub clipboard: Option<String>,
+    /// `ESC ( 0` の罫線文字セットが G0 に入っているか。
+    line_drawing: bool,
+}
+
+/// DEC Special Graphics（`ESC ( 0`）。罫線を使う TUI がこれで枠を描く。
+///
+/// **無視すると `lqqqk` のような文字化けになる。** 変換表は小さいので持つ。
+fn dec_special(c: char) -> Option<char> {
+    Some(match c {
+        'j' => '┘', 'k' => '┐', 'l' => '┌', 'm' => '└', 'n' => '┼',
+        'q' => '─', 't' => '├', 'u' => '┤', 'v' => '┴', 'w' => '┬',
+        'x' => '│', 'a' => '▒', '`' => '◆', 'f' => '°', 'g' => '±',
+        'o' => '⎺', 'p' => '⎻', 'r' => '⎼', 's' => '⎽', '~' => '·',
+        'y' => '≤', 'z' => '≥', '{' => 'π', '|' => '≠', '}' => '£',
+        '0' => '█',
+        _ => return None,
+    })
 }
 
 impl TermState {
@@ -105,7 +141,21 @@ impl TermState {
             images: Vec::new(),
             pending_image: None,
             next_image: 1,
+            replies: Vec::new(),
+            fg_rgb: (0xd8, 0xde, 0xe9),
+            bg_rgb: (0x11, 0x13, 0x1a),
+            cursor_style: 0,
+            clipboard: None,
+            line_drawing: false,
         }
+    }
+
+    /// 相手へ返す。**溜めすぎない** — 読み手が居なければ捨てる。
+    fn reply(&mut self, bytes: &[u8]) {
+        if self.replies.len() + bytes.len() > 4096 {
+            return;
+        }
+        self.replies.extend_from_slice(bytes);
     }
 
     /// APC の中身を 1 つ受け取る。そろったらカーソルの位置に置く。
@@ -124,15 +174,20 @@ impl TermState {
         // 何セルぶんにするか。指定が無ければ、セルの大きさから当てる。
         // ここでの 1 セルは 8x16 と見なす（実寸はホストが知っているが、
         // **端末はセル数だけ決めればよい**）。
+        // **相手の言うセル数を鵜呑みにしない。** `r=4000000000` と書かれた
+        // 数バイトの APC で、行送りを 40 億回まわしてセッションを止められる。
+        // 画面に入る大きさで頭を打つ。
+        let max_cols = self.grid.cols.max(1);
+        let max_rows = self.grid.rows.max(1);
         let cols = if want_cols > 0 {
-            want_cols as usize
+            (want_cols as usize).min(max_cols)
         } else {
-            (w as usize).div_ceil(8).max(1)
+            (w as usize).div_ceil(8).clamp(1, max_cols)
         };
         let rows = if want_rows > 0 {
-            want_rows as usize
+            (want_rows as usize).min(max_rows)
         } else {
-            (h as usize).div_ceil(16).max(1)
+            (h as usize).div_ceil(16).clamp(1, max_rows)
         };
         let line = self.grid.scrollback_len() + self.grid.cursor.row;
         let col = self.grid.cursor.col;
@@ -406,6 +461,13 @@ fn p0(params: &Params, idx: usize) -> u16 {
 
 impl Perform for TermState {
     fn print(&mut self, c: char) {
+        // `ESC ( 0` の間は罫線文字に読み替える。無視すると、枠を描く
+        // TUI が `lqqqk` のような字の並びに化ける。
+        let c = if self.line_drawing {
+            dec_special(c).unwrap_or(c)
+        } else {
+            c
+        };
         self.grid.print(c);
     }
 
@@ -444,7 +506,33 @@ impl Perform for TermState {
             return;
         }
 
+        // **訊かれたら答える。** 相手は「この端末は何ができるか」を
+        // 問い合わせて振る舞いを決める。無応答だと、待たされるか
+        // 誤った既定へ倒れる（powerlevel10k は CPR、vim は DA1 を使う）。
         match action {
+            // Device Attributes。VT220 相当＋色を名乗る。
+            'c' if intermediates.first() == Some(&b'>') => {
+                self.reply(b"[>1;10;0c");
+            }
+            'c' => {
+                self.reply(b"[?62;4;22c");
+            }
+            // Device Status Report
+            'n' => {
+                match p0(params, 0) {
+                    5 => self.reply(b"[0n"), // 元気です
+                    6 => {
+                        // カーソル位置（1 始まり）
+                        let (r, c) = (self.grid.cursor.row + 1, self.grid.cursor.col + 1);
+                        self.reply(format!("[{r};{c}R").as_bytes());
+                    }
+                    _ => {}
+                }
+            }
+            // カーソルの形（DECSCUSR）。`CSI Ps SP q`
+            'q' if intermediates.first() == Some(&b' ') => {
+                self.cursor_style = p0(params, 0);
+            }
             'A' => self.grid.move_up(p1(params, 0)),
             'B' | 'e' => self.grid.move_down(p1(params, 0)),
             'C' | 'a' => self.grid.move_right(p1(params, 0)),
@@ -485,7 +573,12 @@ impl Perform for TermState {
         }
     }
 
-    fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
+    fn esc_dispatch(&mut self, intermediates: &[u8], _ignore: bool, byte: u8) {
+        // `ESC ( 0` / `ESC ( B`。G0 に何を入れるか。
+        if intermediates.first() == Some(&b'(') {
+            self.line_drawing = byte == b'0';
+            return;
+        }
         match byte {
             b'7' => self.grid.save_cursor(),
             b'8' => self.grid.restore_cursor(),
@@ -525,6 +618,35 @@ impl Perform for TermState {
                     self.cwd = Some(sanitize_osc_text(u, 4096)).filter(|s| !s.is_empty());
                 }
             }
+            // 前景 / 背景の問い合わせ。nvim はこれで明暗を決める。
+            // **答えないと、暗い背景に暗い字を置かれる。**
+            b"10" | b"11" => {
+                if params.get(1).is_some_and(|v| v.starts_with(b"?")) {
+                    let (r, g, b) = if kind == b"10" {
+                        self.fg_rgb
+                    } else {
+                        self.bg_rgb
+                    };
+                    let n = if kind == b"10" { 10 } else { 11 };
+                    // xterm と同じ 16 bit 表記（各成分を 2 回繰り返す）。
+                    self.reply(
+                        format!("]{n};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\\")
+                            .as_bytes(),
+                    );
+                }
+            }
+            // クリップボード（OSC 52）。**書き込みだけ受ける。**
+            // 読み出しに答えると、画面に字を出しただけで中身を抜かれる。
+            b"52" => {
+                if let Some(data) = params.get(2)
+                    && data != b"?"
+                    && let Ok(text) = BASE64_STANDARD.decode(data)
+                    && let Ok(text) = String::from_utf8(text)
+                    && text.len() <= 1024 * 1024
+                {
+                    self.clipboard = Some(text);
+                }
+            }
             // 133 が本命。633 は VSCode / PSReadLine 系の同義シーケンス。
             b"133" | b"633" => {
                 if let Some(k) = semantic::parse_mark(&params[1..]) {
@@ -554,6 +676,9 @@ fn sanitize_osc_text(raw: &[u8], max_chars: usize) -> String {
 pub struct Terminal {
     parser: vte::Parser,
     apc: graphics::ApcSplitter,
+    /// 履歴の先頭から捨てた行数の累計。**外にも配る**（印と絵はここで
+    /// 寄せているが、畳みや表示位置はホストが持っているため）。
+    dropped: usize,
     pub state: TermState,
 }
 
@@ -562,8 +687,16 @@ impl Terminal {
         Self {
             parser: vte::Parser::new(),
             apc: graphics::ApcSplitter::default(),
+            dropped: 0,
             state: TermState::new(cols, rows, amb),
         }
+    }
+
+    /// 捨てた行数を受け取って 0 に戻す。**ホストが持っている行番号**
+    /// （表示位置・畳み）を同じだけ寄せるために要る。取りこぼすと、
+    /// 畳んだ範囲が別の行を指す。
+    pub fn take_dropped(&mut self) -> usize {
+        std::mem::take(&mut self.dropped)
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
@@ -577,6 +710,7 @@ impl Terminal {
         // 上限を超えて履歴の先頭が捨てられたら、印を同じだけ寄せる。
         // ここが**唯一の合わせ場所**。取りこぼすと印が別の行を指す。
         let dropped = self.state.grid.take_dropped();
+        self.dropped += dropped;
         self.state.marks.shift_up(dropped);
         // 絵も同じだけ寄せる。**印と同じ理由**で、忘れると別の行に出る。
         if dropped > 0 {
@@ -597,6 +731,49 @@ mod tests {
 
     fn term() -> Terminal {
         Terminal::new(40, 6, AmbiguousWidth::Wide)
+    }
+
+    /// **訊かれたら答える。** 無応答だと、相手は待たされるか誤った既定へ倒れる。
+    #[test]
+    fn the_terminal_answers_when_it_is_asked() {
+        let mut t = term();
+        t.feed(b"[c"); // DA1
+        assert!(!t.state.replies.is_empty(), "DA1 に答えていない");
+        t.state.replies.clear();
+
+        t.feed(b"[5n"); // DSR
+        assert_eq!(t.state.replies, b"[0n");
+        t.state.replies.clear();
+
+        t.feed(b"hi[6n"); // CPR。1 始まりで返す
+        assert_eq!(t.state.replies, b"[1;3R");
+        t.state.replies.clear();
+
+        t.state.bg_rgb = (0x11, 0x22, 0x33);
+        t.feed(b"]11;?\\");
+        let got = String::from_utf8_lossy(&t.state.replies).to_string();
+        assert!(got.contains("rgb:1111/2222/3333"), "OSC 11 の答えが違う: {got}");
+    }
+
+    /// クリップボードは**書き込みだけ**受ける。読み出しに答えると、
+    /// 画面に字を出しただけで中身を抜かれる。
+    #[test]
+    fn the_clipboard_can_be_written_but_never_read() {
+        let mut t = term();
+        t.feed(b"]52;c;aGVsbG8=\\");
+        assert_eq!(t.state.clipboard.as_deref(), Some("hello"));
+        t.state.clipboard = None;
+        t.feed(b"]52;c;?\\");
+        assert!(t.state.replies.is_empty(), "読み出しに答えてしまった");
+        assert!(t.state.clipboard.is_none());
+    }
+
+    /// 罫線の文字セット。無視すると枠が `lqqqk` に化ける。
+    #[test]
+    fn the_line_drawing_charset_draws_lines() {
+        let mut t = term();
+        t.feed(b"(0lqqk(Bx");
+        assert_eq!(t.state.grid.document_line(0).unwrap().text(), "┌──┐x");
     }
 
     #[test]

@@ -13,6 +13,17 @@
 
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 
+/// 1 つの APC に許す長さ。**画面に出しただけで落ちない**ための上限。
+///
+/// 終端（`ESC \`）が来ない APC をそのまま溜めると、細工した出力を
+/// `cat` するだけでメモリを食い尽くせる。攻撃と言うより、壊れた
+/// 出力でも同じことが起きる。
+const MAX_APC: usize = 8 * 1024 * 1024;
+/// 1 枚の絵に許す画素数（4096x4096）。
+const MAX_PIXELS: u32 = 4096 * 4096;
+/// 組み立て中の絵に許す長さ。
+const MAX_PAYLOAD: usize = 64 * 1024 * 1024;
+
 /// 受け取った 1 枚。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Image {
@@ -75,6 +86,11 @@ pub fn feed_apc(pending: &mut Option<Pending>, body: &[u8]) -> Option<(Vec<u8>, 
         return None;
     }
     if let Ok(bytes) = BASE64_STANDARD.decode(data.trim()) {
+        if p.payload.len() + bytes.len() > MAX_PAYLOAD {
+            // 上限を超えたら捨てる。**途中まで出さない**（半分の絵は嘘）。
+            *pending = None;
+            return None;
+        }
         p.payload.extend_from_slice(&bytes);
     }
     if more {
@@ -85,6 +101,16 @@ pub fn feed_apc(pending: &mut Option<Pending>, body: &[u8]) -> Option<(Vec<u8>, 
     Some((rgba, w, h, p.cols, p.rows))
 }
 
+/// 画素の総数。**掛け算で溢れさせない。**
+///
+/// `w * h * 4` を `u32` で計算すると、release では小さな値へ折り返す。
+/// 折り返した先が payload の長さを下回ると、不正な寸法のまま受理される。
+fn pixel_bytes(w: u32, h: u32, per: u32) -> Option<usize> {
+    let n = w.checked_mul(h)?;
+    (n <= MAX_PIXELS).then_some(())?;
+    n.checked_mul(per).map(|v| v as usize)
+}
+
 /// 画素にする。PNG（`f=100`）と素の RGB / RGBA（`f=24` / `f=32`）。
 fn decode(p: &Pending) -> Option<(Vec<u8>, u32, u32)> {
     match p.format {
@@ -93,6 +119,7 @@ fn decode(p: &Pending) -> Option<(Vec<u8>, u32, u32)> {
             let mut reader = dec.read_info().ok()?;
             let mut buf = vec![0u8; reader.output_buffer_size()?];
             let info = reader.next_frame(&mut buf).ok()?;
+            pixel_bytes(info.width, info.height, 4)?;
             let rgba = match info.color_type {
                 png::ColorType::Rgba => buf[..info.buffer_size()].to_vec(),
                 png::ColorType::Rgb => buf[..info.buffer_size()]
@@ -114,7 +141,8 @@ fn decode(p: &Pending) -> Option<(Vec<u8>, u32, u32)> {
         }
         24 => {
             let (w, h) = (p.width, p.height);
-            (w > 0 && h > 0 && p.payload.len() >= (w * h * 3) as usize).then(|| {
+            let need = pixel_bytes(w, h, 3)?;
+            (w > 0 && h > 0 && p.payload.len() >= need).then(|| {
                 let rgba = p
                     .payload
                     .chunks_exact(3)
@@ -125,8 +153,9 @@ fn decode(p: &Pending) -> Option<(Vec<u8>, u32, u32)> {
         }
         _ => {
             let (w, h) = (p.width, p.height);
-            (w > 0 && h > 0 && p.payload.len() >= (w * h * 4) as usize)
-                .then(|| (p.payload[..(w * h * 4) as usize].to_vec(), w, h))
+            let need = pixel_bytes(w, h, 4)?;
+            (w > 0 && h > 0 && p.payload.len() >= need)
+                .then(|| (p.payload[..need].to_vec(), w, h))
         }
     }
 }
@@ -161,8 +190,12 @@ impl ApcSplitter {
                 }
                 if b == 0x1b {
                     self.esc = true;
-                } else {
+                } else if buf.len() < MAX_APC {
                     buf.push(b);
+                } else {
+                    // 終端が来ない。**溜め続けない。** 捨てて素へ戻る。
+                    self.buf = None;
+                    self.esc = false;
                 }
                 continue;
             }
@@ -248,6 +281,29 @@ mod tests {
     }
 
     /// 知らない指示で勝手な絵を出さない。
+    /// **画面に出しただけで落ちない。** 終端の来ない APC を溜め続けると、
+    /// 細工した出力を `cat` するだけでメモリを食い尽くせる。
+    #[test]
+    fn an_unterminated_apc_does_not_grow_without_bound() {
+        let mut s = ApcSplitter::default();
+        s.split(b"_G");
+        for _ in 0..20 {
+            s.split(&vec![b'x'; 1024 * 1024]);
+        }
+        // 上限で捨てて素へ戻る。次の素のバイトはちゃんと通る。
+        let (rest, _) = s.split(b"hello");
+        assert_eq!(rest, b"hello", "捨てたあと素へ戻っていない");
+    }
+
+    /// 寸法の掛け算で溢れさせない。release では小さな値へ折り返し、
+    /// 不正な寸法のまま受理されてしまう。
+    #[test]
+    fn absurd_dimensions_are_refused() {
+        let mut pending = None;
+        let body = format!("f=32,s=65536,v=65536;{}", BASE64_STANDARD.encode([0u8; 16]));
+        assert!(feed_apc(&mut pending, body.as_bytes()).is_none());
+    }
+
     #[test]
     fn a_query_does_not_produce_an_image() {
         let mut pending = None;

@@ -21,10 +21,13 @@ use crate::endpoint::slug;
 /// Unix の `/tmp` は誰でも書ける。`XDG_RUNTIME_DIR` が無い環境（macOS など）
 /// では uid を名前に含めた自分専用のディレクトリへ落とす。
 pub fn session_dir() -> PathBuf {
+    // **共有の temp へ落とさない。** `LOCALAPPDATA` が無いときに誰でも
+    // 書ける場所を使うと、他人が偽のセッション名を並べられる（選ぶと
+    // その名前でサーバが起きる）。無ければ諦めて、一覧を出さない。
     #[cfg(windows)]
     let base = std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
+        .unwrap_or_else(|| PathBuf::from(r"\\?\NUL"))
         .join("tsumugi");
     #[cfg(unix)]
     let base = match std::env::var_os("XDG_RUNTIME_DIR") {
@@ -43,13 +46,22 @@ fn file_in(dir: &std::path::Path, name: &str) -> PathBuf {
     dir.join(format!("{}.session", slug(name)))
 }
 
-/// 置き場所を作り、他のユーザから閉じる。
+/// 置き場所を作り、**他のユーザから閉じる**。閉じられなければ作らない。
+///
+/// ここに書ける人が居ると、一覧に偽のセッション名を並べられる。
+/// 選ぶとその名前でサーバが起きるので、名前は入力と同じ重みを持つ。
 fn ensure_dir(dir: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    #[cfg(windows)]
+    {
+        // `%LOCALAPPDATA%` は既定で本人だけだが、**既定に頼らない**。
+        // 継承を切って、所有者だけの DACL を明示的に置く。
+        crate::win_sd::lock_directory(dir)?;
     }
     Ok(())
 }

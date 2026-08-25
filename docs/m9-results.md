@@ -58,7 +58,7 @@
 ## 5. TUI が軒並み崩れる（Ambiguous 幅）
 
 Claude Code を tsumugi の中で動かすと、枠線が `- - - -` の破線になり、
-消したはずのプロンプト（`C:\Users\atlan>`）が新しい描画の上に残っていた。
+消したはずのプロンプト（`C:\Users\me>`）が新しい描画の上に残っていた。
 
 原因は East Asian **Ambiguous** 幅。`─` `│` `╭` `█` `●` `•` `·` `←` は
 どれも Ambiguous で、`width_cjk()` は 2 を返す。tsumugi は全部の桁勘定を

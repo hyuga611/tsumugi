@@ -1098,12 +1098,27 @@ impl App {
                 ServerMsg::Output { pane, data } => {
                     if let Some(bytes) = tsg_mux::decode_bytes(&data) {
                         let area = self.area();
-                        self.session
+                        let view = self
+                            .session
                             .panes
                             .entry(pane)
-                            .or_insert_with(|| PaneView::new(area.w, area.h))
-                            .term
-                            .feed(&bytes);
+                            .or_insert_with(|| PaneView::new(area.w, area.h));
+                        view.term.feed(&bytes);
+                        // 履歴の先頭が捨てられたぶん、こちらの行番号も寄せる。
+                        let dropped = view.term.take_dropped();
+                        view.shift_up(dropped);
+                        let clip = view.term.state.clipboard.take();
+                        // 端末が返した答え（DA1 / CPR など）を相手へ返す。
+                        let replies = std::mem::take(&mut view.term.state.replies);
+                        if let Some(text) = clip {
+                            self.set_clipboard(&text);
+                        }
+                        if !replies.is_empty() {
+                            self.send_msg(&ClientMsg::Input {
+                                pane,
+                                data: tsg_mux::encode_bytes(&replies),
+                            });
+                        }
                     }
                 }
                 ServerMsg::PaneExited { pane } => {
@@ -3969,6 +3984,19 @@ impl App {
         self.open_file(&path.to_string_lossy());
     }
 
+    /// いまの前景 / 背景を各ペインの端末へ知らせる。
+    ///
+    /// **OSC 10 / 11 の答えはここから出る。** 端末は配色を知らないので、
+    /// 知っている側（ホスト）が入れておく。
+    fn tell_panes_the_colors(&mut self) {
+        let fg = rgb8(self.theme.fg);
+        let bg = rgb8(self.theme.bg);
+        for view in self.session.panes.values_mut() {
+            view.term.state.fg_rgb = fg;
+            view.term.state.bg_rgb = bg;
+        }
+    }
+
     /// 配色を差し替える。
     ///
     /// **クリア色も一緒に変える。** ここを忘れると、セルは新しい色で描かれるのに
@@ -3984,6 +4012,7 @@ impl App {
             return;
         }
         self.theme = self.cfg.theme;
+        self.tell_panes_the_colors();
         if let Some(r) = self.renderer.as_mut() {
             r.background = background_of(&self.theme, self.cfg.opacity);
         }
@@ -4296,14 +4325,30 @@ fn pipe_through(command: &str, input: &str, cwd: Option<&str>) -> std::io::Resul
 /// `file://host/C:/dev/x`（OSC 7）をパスへ戻す。
 fn file_url_to_path(url: &str) -> Option<String> {
     let rest = url.strip_prefix("file://")?;
-    let path = rest.split_once('/').map_or(rest, |(_, p)| p);
+    let (host, path) = rest.split_once('/').map_or(("", rest), |(h, p)| (h, p));
+    // **よそのホストは断る。** OSC 7 は子プロセスが自由に言えるので、
+    // `file://evil/…` を触りに行かせない（Windows では `is_dir()` が
+    // その場で SMB へ繋ぎ、資格情報を渡してしまう）。
+    if !host.is_empty() && !host.eq_ignore_ascii_case("localhost") {
+        return None;
+    }
     let cleaned = path.trim_start_matches('/');
     let out = if cleaned.chars().nth(1) == Some(':') {
         cleaned.to_string()
     } else {
         path.to_string()
     };
+    let head: String = out.chars().take(2).collect();
+    if head == "\\\\" || head == "//" || out.chars().any(char::is_control) {
+        return None;
+    }
     std::path::Path::new(&out).is_dir().then_some(out)
+}
+
+/// 0.0〜1.0 の色を 8 bit へ。OSC 10 / 11 の答えに使う。
+fn rgb8(c: [f32; 4]) -> (u8, u8, u8) {
+    let to = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    (to(c[0]), to(c[1]), to(c[2]))
 }
 
 /// 一覧の下地。枠を1本引くだけで、下の本文と混ざらなくなる。

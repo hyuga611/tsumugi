@@ -47,6 +47,75 @@ pub fn owner_only_descriptor() -> Result<SecurityDescriptor> {
     SecurityDescriptor::deserialize(&sddl).context("SDDL を解釈できません")
 }
 
+/// ディレクトリを所有者だけに閉じる。
+///
+/// 既定に頼らない。**継承を切って、自分だけの DACL を明示的に置く。**
+/// 置けなければエラーを返す — 呼ぶ側は、閉じられないなら作らない。
+pub fn lock_directory(dir: &std::path::Path) -> std::io::Result<()> {
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1, SE_FILE_OBJECT,
+        SetNamedSecurityInfoW,
+    };
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+    };
+
+    let fail = |m: &str| std::io::Error::other(m.to_string());
+    let sid = current_user_sid().map_err(|e| fail(&e.to_string()))?;
+    let sddl = U16CString::from_str(format!("D:P(A;OICI;GA;;;{sid})"))
+        .map_err(|_| fail("SDDL を UTF-16 にできません"))?;
+    let path = U16CString::from_os_str(dir.as_os_str())
+        .map_err(|_| fail("パスを UTF-16 にできません"))?;
+
+    let mut sd: windows_sys::Win32::Security::PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: 文字列は終端付き。返った SD は LocalFree で返す。
+    let ok = unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut sd,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 || sd.is_null() {
+        return Err(fail("DACL を作れません"));
+    }
+    // SAFETY: `sd` は上で作った有効な SD。DACL は自己相対形式で入っている。
+    let mut dacl = std::ptr::null_mut();
+    let mut present = 0;
+    let mut defaulted = 0;
+    let got = unsafe {
+        windows_sys::Win32::Security::GetSecurityDescriptorDacl(
+            sd,
+            &mut present,
+            &mut dacl,
+            &mut defaulted,
+        )
+    };
+    let rc = if got != 0 && present != 0 {
+        // SAFETY: `dacl` は `sd` の中を指す。呼び出し中だけ使う。
+        unsafe {
+            SetNamedSecurityInfoW(
+                path.as_ptr().cast_mut(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                dacl,
+                std::ptr::null_mut(),
+            )
+        }
+    } else {
+        1
+    };
+    // SAFETY: LocalAlloc されたものを返す。
+    unsafe { LocalFree(sd.cast()) };
+    if rc != 0 {
+        return Err(fail("DACL を置けません"));
+    }
+    Ok(())
+}
+
 /// その pid のプロセスが自分のものか。
 ///
 /// 開けなければ **false**（自分のものではない）と答える。他のユーザのプロセスは

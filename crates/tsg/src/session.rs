@@ -281,6 +281,30 @@ impl PaneView {
         })
     }
 
+    /// 履歴の先頭が捨てられたぶん、こちらが持つ行番号を寄せる。
+    ///
+    /// **印と絵は端末が寄せるが、表示位置と畳みはここにある。**
+    /// 取りこぼすと、畳んだ範囲が別の行を指し、クリックした行と
+    /// 実際に触る行が食い違う。
+    pub fn shift_up(&mut self, dropped: usize) {
+        if dropped == 0 {
+            return;
+        }
+        self.top = self.top.saturating_sub(dropped);
+        self.folds.retain_mut(|(s, e)| {
+            match (s.checked_sub(dropped), e.checked_sub(dropped)) {
+                (Some(a), Some(b)) => {
+                    *s = a;
+                    *e = b;
+                    true
+                }
+                // 半分だけ落ちた範囲は畳みごと外す（残りを畳んだままに
+                // すると、何を隠しているのか説明できなくなる）。
+                _ => false,
+            }
+        });
+    }
+
     /// 再アタッチ時の画面復元。行を流し込んで写しを組み直す。
     pub fn restore(&mut self, lines: &[String], cols: usize, rows: usize) {
         self.term = new_terminal(cols, rows);

@@ -449,7 +449,19 @@ pub fn matches_in(buf: &dyn Buffer, line: usize, query: &str) -> Vec<(usize, usi
         let idx = text[..byte].chars().count();
         let end_idx = idx + q.chars().count();
         if let Some(start) = cols.get(idx).copied() {
-            let end = cols.get(end_idx).copied().unwrap_or(cols.last().copied().unwrap_or(start) + 1);
+            // 行末で終わるときの終端桁。**最後のセルが全角なら 2 桁**を
+            // 数える。`+1` で済ませると、全角で終わる一致の強調が 1 桁足りない。
+            let end = match cols.get(end_idx).copied() {
+                Some(e) => e,
+                None => {
+                    let last = cols.last().copied().unwrap_or(start);
+                    let width = buf
+                        .cells(line)
+                        .and_then(|c| c.get(last))
+                        .map_or(1usize, |c| usize::from(c.width).max(1));
+                    last + width
+                }
+            };
             out.push((start, end.saturating_sub(start).max(1)));
         }
         at = byte + q.len().max(1);

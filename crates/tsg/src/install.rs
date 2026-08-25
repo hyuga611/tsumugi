@@ -238,6 +238,18 @@ mod imp {
         let bin = home.join(".local").join("bin");
         if std::fs::create_dir_all(&bin).is_ok() {
             let link = bin.join("tsg");
+            // **他人のものを消さない。** そこに既に何かあるなら、
+            // それが別の製品かもしれない。自分が張った symlink だけ張り直す。
+            let ours = std::fs::symlink_metadata(&link)
+                .ok()
+                .is_some_and(|m| m.file_type().is_symlink());
+            if link.exists() && !ours {
+                r.notes.push(format!(
+                    "{} に別のものが在るので触りませんでした",
+                    link.display()
+                ));
+                return Ok(r);
+            }
             let _ = std::fs::remove_file(&link);
             #[cfg(unix)]
             if std::os::unix::fs::symlink(exe, &link).is_ok() {
