@@ -39,6 +39,10 @@ pub enum Mode {
     Open { path: String, render: bool },
     /// 読む形を切り替える
     Render,
+    /// 画面の側のコマンドを外から実行する
+    RunCommand(String),
+    /// コマンドの id と題名を一覧にする
+    Commands,
     /// エージェントが自分の状態を名乗る（hooks から呼ばれる）
     AgentState(String),
     /// どのペインのエージェントがどうなっているか
@@ -286,6 +290,8 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Cli {
                 cli.mode = Mode::Broadcast { text, wait: false };
             }
             "--compare" => cli.mode = Mode::Compare,
+            "--commands" => cli.mode = Mode::Commands,
+            "--run" => cli.mode = Mode::RunCommand(next_value(&args, &mut i).unwrap_or_default()),
             "--open" | "-o" => {
                 let path = next_value(&args, &mut i).unwrap_or_default();
                 cli.mode = Mode::Open {

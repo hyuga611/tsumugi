@@ -9,12 +9,16 @@
 # does not match we abort instead of typing into whatever is in front.
 param(
     [Parameter(Mandatory = $true)][string]$Script,
-    [string]$OutDir = (Join-Path $PSScriptRoot "..\target\v"),
+    [string]$OutDir = "",
     [int]$W = 1240,
     [int]$H = 800
 )
 
-$env:TMP = (Join-Path $PSScriptRoot "..\target\pstmp")
+# $PSScriptRoot は param ブロックでは空。ここで決める。
+$root = Split-Path -Parent $MyInvocation.MyCommand.Path
+if ([string]::IsNullOrEmpty($OutDir)) { $OutDir = Join-Path $root "..\target\v" }
+New-Item -ItemType Directory -Force $OutDir | Out-Null
+$env:TMP = (Join-Path $root "..\target\pstmp")
 $env:TEMP = $env:TMP
 New-Item -ItemType Directory -Force $env:TMP | Out-Null
 

@@ -503,6 +503,33 @@ pub fn compare(session: &str) -> Result<()> {
     Ok(())
 }
 
+/// 画面の側のコマンドを外から実行する。
+///
+/// **窓の中でしか起きないこと**（検索・ラベル・畳み・配色）を台本から
+/// 動かす。知らない id は先に弾く — 送っても何も起きないより、
+/// その場で「そんな id は無い」と言うほうがいい。
+pub fn run_command(session: &str, id: &str) -> Result<()> {
+    let Some(spec) = tsg_modal::REGISTRY.iter().find(|s| s.id == id) else {
+        bail!("コマンド '{id}' を知りません（一覧は tsg --commands）");
+    };
+    let (mut client, _) = attach(session)?;
+    client.send(&ClientMsg::RunCommand {
+        id: spec.id.to_string(),
+    })?;
+    std::thread::sleep(Duration::from_millis(200));
+    let _ = client.send(&ClientMsg::Detach);
+    Ok(())
+}
+
+/// コマンドの id と題名。`--run` に渡せるものの一覧。
+pub fn commands() -> Result<()> {
+    let mut out = std::io::stdout().lock();
+    for spec in tsg_modal::REGISTRY {
+        writeln!(out, "{}	{}	{}", spec.id, spec.keys.join(" "), spec.title)?;
+    }
+    Ok(())
+}
+
 /// いまのタブで見えているペイン。
 fn visible_panes(info: &SessionInfo) -> Vec<u32> {
     info.tabs

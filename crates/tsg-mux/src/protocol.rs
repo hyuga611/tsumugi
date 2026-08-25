@@ -409,6 +409,11 @@ pub enum ClientMsg {
         /// base64。
         data: String,
     },
+    /// 画面の側のコマンドを外から実行する（`tsg --run <id>`）。
+    ///
+    /// **窓の中でしか起きないこと**（検索・ラベル・畳み・配色）を台本から
+    /// 動かすための口。サーバは中身を知らず、そのまま配るだけ。
+    RunCommand { id: String },
     /// 読む形の切り替え。`on` を書かなければ反転。
     SetPreview {
         #[serde(default)]
@@ -572,6 +577,10 @@ pub enum ServerMsg {
     },
     FileClosed {
         pane: u32,
+    },
+    /// 画面の側で実行してほしいコマンド。
+    RunCommand {
+        id: String,
     },
     /// 差分を当てられなかった。クライアントは全文を送り直す。
     NeedFullFile {

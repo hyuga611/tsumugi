@@ -423,6 +423,11 @@ impl State {
                 }
             }
 
+            ClientMsg::RunCommand { id } => {
+                // サーバは中身を知らない。**そのまま配るだけ。**
+                self.broadcast(&ServerMsg::RunCommand { id });
+            }
+
             ClientMsg::SetPreview { pane, on } => {
                 let target = pane.or_else(|| self.active_pane());
                 if let Some(p) = target.and_then(|id| self.panes.get_mut(&id)) {

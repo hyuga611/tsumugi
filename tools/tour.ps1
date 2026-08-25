@@ -1,4 +1,4 @@
-# 実画面のひと通り。機能の確認と、紹介動画の絵コンテを兼ねる。
+﻿# 実画面のひと通り。機能の確認と、紹介動画の絵コンテを兼ねる。
 #
 # 使い方:
 #   1. tsumugi を 1 枚だけ開いておく
@@ -94,4 +94,4 @@ Send-Keys "theme 夜霧" 300
 Send-Keys "{ENTER}" 800
 Beat "theme-dark" "既定へ戻す"
 
-"--- 撮り終わり。target\v\tour_*.png ---"
+'--- done: target/v/tour_*.png ---'

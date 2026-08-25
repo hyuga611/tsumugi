@@ -78,6 +78,8 @@ struct App {
     /// 端末に出た絵を、どこに載せたか。`(ペイン, 絵の id) -> 面の場所`。
     /// **載せ直さない**ための控え。
     image_slots: BTreeMap<(u32, u64), tsg_render::ImageSlot>,
+    /// 外から頼まれたコマンド（`tsg --run`）。次の待ち時間に実行する。
+    queued_command: Option<&'static str>,
     /// 画面に出ているものへのラベル。空でなければラベル待ち。
     hints: Vec<Hint>,
     hint_typed: String,
@@ -144,6 +146,7 @@ impl App {
                 Some("agents") => 2,
                 _ => 0,
             },
+            queued_command: None,
             image_slots: BTreeMap::new(),
             hints: Vec::new(),
             hint_typed: String::new(),
@@ -1069,6 +1072,13 @@ impl App {
                     // 差分がずれた。黙って進まず、全文で立て直す。
                     self.resend_file(pane);
                 }
+                ServerMsg::RunCommand { id } => {
+                    // ここでは実行しない。**イベントループを持っている
+                    // ところまで持ち越す**（コマンドは窓を閉じることもある）。
+                    if let Some(spec) = tsg_modal::REGISTRY.iter().find(|s| s.id == id) {
+                        self.queued_command = Some(spec.id);
+                    }
+                }
                 ServerMsg::FileClosed { pane } => {
                     if let Some(view) = self.session.panes.get_mut(&pane) {
                         view.file = None;
@@ -1639,6 +1649,12 @@ impl App {
     }
 
     fn invoke(&mut self, id: &'static str, event_loop: &ActiveEventLoop) {
+        // 何か別のことを始めたら、出しっぱなしのラベルは消す。
+        // **残っていると本文の 1 文字目を隠したまま**になる（実機で見た）。
+        if id != "hints" && !self.hints.is_empty() {
+            self.hints.clear();
+            self.hint_typed.clear();
+        }
         if id == overlay::OPEN_PALETTE {
             self.menu.hide();
             self.palette.show();
@@ -1847,7 +1863,7 @@ impl App {
             },
             Some(OpenKind::Path) => {
                 let path = strip_position(&text).trim_matches('"').to_string();
-                self.open_file(&path);
+                self.open_or_cd(&path);
             }
             Some(OpenKind::Hash) => {
                 self.snap_to_live_tail();
@@ -1855,8 +1871,56 @@ impl App {
                 self.dispatch_insert();
                 self.status_msg = t!("プロンプトへ置きました（Enter は自分で）", "put on the prompt (press Enter yourself)").into();
             }
-            None => self.status_msg = t!(format!("{text} は開ける形ではありません"), format!("{text} is not something I can open")),
+            None => {
+                // ラベルは「在るもの」に振るので、拡張子の無いフォルダが
+                // ここへ来る。**振ったのに開けない**を作らない。
+                let path = strip_position(&text).trim_matches('"').to_string();
+                if self.resolve(&path).is_some() {
+                    self.open_or_cd(&path);
+                } else {
+                    self.status_msg = t!(
+                        format!("{text} は開ける形ではありません"),
+                        format!("{text} is not something I can open")
+                    );
+                }
+            }
         }
+    }
+
+    /// パスを実際の場所に直す。無ければ `None`。
+    fn resolve(&self, path: &str) -> Option<std::path::PathBuf> {
+        let p = std::path::Path::new(path);
+        if p.is_absolute() {
+            return p.exists().then(|| p.to_path_buf());
+        }
+        let cwd = self
+            .active_view()
+            .and_then(|v| v.term.state.cwd.clone())
+            .and_then(|u| file_url_to_path(&u))
+            .or_else(|| self.cwd.clone())?;
+        let full = std::path::Path::new(&cwd).join(p);
+        full.exists().then_some(full)
+    }
+
+    /// ファイルなら開く。フォルダならプロンプトへ `cd` を置く。
+    ///
+    /// **フォルダを「開けません」で終わらせない。** そこへ行きたいのは
+    /// 明らかなので、次の一手を置いておく（Enter は自分で押す）。
+    fn open_or_cd(&mut self, path: &str) {
+        if let Some(full) = self.resolve(path)
+            && full.is_dir()
+        {
+            self.snap_to_live_tail();
+            self.send_input(format!("cd \"{}\"", full.display()).as_bytes());
+            self.dispatch_insert();
+            self.status_msg = t!(
+                "プロンプトへ cd を置きました（Enter は自分で）",
+                "put cd on the prompt (press Enter yourself)"
+            )
+            .into();
+            return;
+        }
+        self.open_file(path);
     }
 
     /// プロンプトへ何か置いた後は入力モードにしておく（続けて打てる）。
@@ -2760,6 +2824,11 @@ impl App {
     fn show_hints(&mut self) {
         const LABELS: &[u8] = b"asdfghjklqwertyuiopzxcvbnm";
         let mut hints: Vec<Hint> = Vec::new();
+        let cwd = self
+            .active_view()
+            .and_then(|v| v.term.state.cwd.clone())
+            .and_then(|u| file_url_to_path(&u))
+            .or_else(|| self.cwd.clone());
         let visible = self.session.visible_panes();
         for id in visible {
             let Some(view) = self.session.panes.get(&id) else {
@@ -2780,7 +2849,7 @@ impl App {
                 let mut word = String::new();
                 let flush = |word: &mut String, start: usize, hints: &mut Vec<Hint>| {
                     let trimmed = word.trim_matches(|c: char| "\"'`（）()[]{}<>、。,;:!?".contains(c));
-                    if !trimmed.is_empty() && open_kind(trimmed).is_some() {
+                    if !trimmed.is_empty() && worth_labelling(trimmed, cwd.as_deref()) {
                         hints.push(Hint {
                             pane: id,
                             line,
@@ -3433,13 +3502,16 @@ impl App {
                 let view = self.session.panes.get(&h.pane)?;
                 let rect = view.text_rect();
                 let row = h.line.checked_sub(view.top)?;
+                // 行頭から始まるものは**左のふちに置く**。1 文字目に重ねると
+                // `.cargo` が `acargo` に見えて、何のラベルか分からなくなる
+                // （実機で読めなかった）。ふちが無い位置だけ重ねる。
+                let x = if h.col == 0 {
+                    view.rect.x
+                } else {
+                    rect.x + h.col
+                };
                 (row < rect.h && h.col < rect.w).then(|| {
-                    (
-                        rect.x + h.col,
-                        rect.y + row,
-                        h.label.clone(),
-                        !typed.is_empty(),
-                    )
+                    (x, rect.y + row, h.label.clone(), !typed.is_empty())
                 })
             })
             .collect();
@@ -3990,6 +4062,28 @@ fn display_width(s: &str) -> usize {
 ///
 /// 単語粒度が `textobj::at_pointer` を通るので、
 /// 「`src/main.rs:42` の上でドラッグするとパス全体から始まる」が自然に出る。
+/// ラベルを振る値打ちがあるか。
+///
+/// **実際に在るものだけに振る。** `open_kind` は Ctrl＋クリックのために
+/// 控えめに作ってある（下線が騒がしくならないよう、拡張子か区切りが要る）。
+/// ラベルでそれをやると、`crates` や `docs` のような**拡張子の無いフォルダに
+/// 振られず**、代わりに `10.0.26200.9168]` のような版番号に振られる。
+/// 開けるかどうかは、聞けば分かる。
+fn worth_labelling(text: &str, cwd: Option<&str>) -> bool {
+    if matches!(open_kind(text), Some(OpenKind::Url)) {
+        return true;
+    }
+    let head = strip_position(text).trim_matches('"');
+    if head.is_empty() || head.len() > 260 {
+        return false;
+    }
+    let path = std::path::Path::new(head);
+    if path.is_absolute() {
+        return path.exists();
+    }
+    cwd.is_some_and(|dir| std::path::Path::new(dir).join(head).exists())
+}
+
 /// 画面上の「開けるもの」1 つ。
 #[derive(Clone, Debug)]
 struct Hint {
@@ -4655,6 +4749,10 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let mut dirty = self.pump();
+        if let Some(id) = self.queued_command.take() {
+            self.invoke(id, event_loop);
+            dirty = true;
+        }
         if self.watch.changed() {
             dirty |= self.reload_config();
         }
@@ -4862,6 +4960,8 @@ fn main() -> Result<()> {
             std::process::exit(i32::from(!ok) * 2);
         }
         cli::Mode::Compare => return rpc::compare(&cli.session),
+        cli::Mode::RunCommand(id) => return rpc::run_command(&cli.session, id),
+        cli::Mode::Commands => return rpc::commands(),
         cli::Mode::Open { path, render } => return rpc::open(&cli.session, path, *render),
         cli::Mode::Render => return rpc::render(&cli.session, cli.pane),
         cli::Mode::Agents => return rpc::agents(&cli.session),

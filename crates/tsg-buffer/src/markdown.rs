@@ -28,6 +28,8 @@ pub fn render(text: &str, width: usize) -> String {
     let mut out = String::new();
     let mut lines = text.lines().peekable();
     let mut in_code: Option<String> = None;
+    // 強調が行をまたぐことがある。段落の中で持ち回す。
+    let mut bold = false;
 
     while let Some(raw) = lines.next() {
         let line = raw.trim_end();
@@ -87,7 +89,7 @@ pub fn render(text: &str, width: usize) -> String {
         if let Some(rest) = line.trim_start().strip_prefix("> ").or_else(|| {
             (line.trim() == ">").then_some("")
         }) {
-            for chunk in wrap(&inline(rest), width.saturating_sub(2)) {
+            for chunk in wrap(&inline_in(rest, &mut bold), width.saturating_sub(2)) {
                 out.push_str(&format!("{DIM}│{RESET} {ITALIC}{chunk}{RESET}\r\n"));
             }
             continue;
@@ -109,11 +111,12 @@ pub fn render(text: &str, width: usize) -> String {
         }
 
         if line.trim().is_empty() {
+            bold = false; // 段落が切れたら強調も切れる
             out.push_str("\r\n");
             continue;
         }
 
-        for chunk in wrap(&inline(line), width) {
+        for chunk in wrap(&inline_in(line, &mut bold), width) {
             out.push_str(&chunk);
             out.push_str("\r\n");
         }
@@ -241,7 +244,17 @@ fn table(rows: &[String], width: usize) -> String {
 
 /// 行内の記法。`**強調**` `` `コード` `` `[名前](url)`。
 fn inline(s: &str) -> String {
+    let mut open = false;
+    inline_in(s, &mut open)
+}
+
+/// 強調が行をまたぐことがある（引用や段落の中で）。開いたままなら
+/// **次の行も強調のまま**続ける。閉じ忘れた `**` を字のまま出さない。
+fn inline_in(s: &str, bold: &mut bool) -> String {
     let mut out = String::new();
+    if *bold {
+        out.push_str(BOLD);
+    }
     let mut rest = s;
     while !rest.is_empty() {
         // コード。**中は一切解釈しない。**
@@ -252,11 +265,19 @@ fn inline(s: &str) -> String {
             rest = &after[end + 1..];
             continue;
         }
-        if let Some(after) = rest.strip_prefix("**")
-            && let Some(end) = after.find("**")
-        {
-            out.push_str(&format!("{BOLD}{}{RESET}", &after[..end]));
-            rest = &after[end + 2..];
+        if let Some(after) = rest.strip_prefix("**") {
+            match after.find("**") {
+                Some(end) => {
+                    out.push_str(&format!("{BOLD}{}{RESET}", &after[..end]));
+                    rest = &after[end + 2..];
+                }
+                None => {
+                    // 閉じが無い。行をまたぐ強調として、ここから先を太字に。
+                    *bold = !*bold;
+                    out.push_str(if *bold { BOLD } else { RESET });
+                    rest = after;
+                }
+            }
             continue;
         }
         if let Some(after) = rest.strip_prefix('*')
@@ -288,6 +309,9 @@ fn inline(s: &str) -> String {
         let c = rest.chars().next().expect("空でないことは上で確かめた");
         out.push(c);
         rest = &rest[c.len_utf8()..];
+    }
+    if *bold {
+        out.push_str(RESET);
     }
     out
 }
@@ -525,6 +549,18 @@ mod tests {
             "URL を捨てた: {got}"
         );
         assert!(!got.contains(']'), "記法が残っている: {got}");
+    }
+
+    /// 強調が行をまたぐことがある（README の引用がそう書かれている）。
+    /// **閉じ忘れた `**` を字のまま出さない。**
+    #[test]
+    fn bold_that_spans_two_lines_does_not_leak_its_markup() {
+        let src = "> **一行目
+> 二行目**
+";
+        let got = plain(&render(src, 40));
+        assert!(!got.contains('*'), "記法が残っている: {got}");
+        assert!(got.contains("一行目") && got.contains("二行目"), "{got}");
     }
 
     #[test]
