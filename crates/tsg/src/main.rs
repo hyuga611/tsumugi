@@ -3200,12 +3200,11 @@ impl App {
                     // 出力を正規表現で当てにいかないので、嘘の印が出ない。
                     // ファイルを開いている間はプロンプトが無いので出さない。
                     for b in doc.marks().blocks() {
-                        let Some(r) = b.prompt_line.checked_sub(top) else {
+                        // **畳んだぶんを飛ばした行**に出す。文書行から素朴に
+                        // 引くと、畳んだあとも畳む前の位置に印だけ残る。
+                        let Some(r) = view.row_of(b.prompt_line, rect.h) else {
                             continue;
                         };
-                        if r >= rect.h {
-                            continue;
-                        }
                         // 記号ではなく矩形で描く。`\u{276f}` はフォントチェーンに
                         // 無いことがあり（実機で緑のマーカーだけ消えた）、
                         // 字が出るかどうかに製品の見た目を賭けない。
@@ -3233,8 +3232,7 @@ impl App {
                     // ホバー中の対象に下線（§3「ホバー: 対象のハイライト」）。
                     if let Some((hid, hr)) = self.hover
                         && hid == *id
-                        && let Some(r) = hr.start.line.checked_sub(top)
-                        && r < rect.h
+                        && let Some(r) = view.row_of(hr.start.line, rect.h)
                     {
                         let x0 = hr.start.col.min(rect.w);
                         let x1 = (hr.end.col + 1).min(rect.w);
@@ -3456,7 +3454,7 @@ impl App {
                     }
 
                     if is_active
-                        && let Some(cr) = cursor.line.checked_sub(top).filter(|r| *r < rect.h)
+                        && let Some(cr) = view.row_of(cursor.line, rect.h)
                         && cursor.col < rect.w
                     {
                         let (cx, cy) = ((rect.x + cursor.col) as f32, (rect.y + cr) as f32);

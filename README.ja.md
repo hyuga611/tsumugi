@@ -10,7 +10,7 @@
 Rust 製。いまのところ **Windows**。macOS と Linux はビルドは通りますが
 **まだ誰も動かしていません**（[いまの状態](#いまの状態)）。
 
-![tsumugi](assets/preview.png)
+![tsumugi](assets/demo.gif)
 
 ## なぜもう 1 つ端末を作るのか
 

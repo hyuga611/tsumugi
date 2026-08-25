@@ -11,7 +11,7 @@ Rust. Windows today; macOS and Linux build but are **not yet tested** (see
 
 日本語の説明は [README.ja.md](README.ja.md) にあります。
 
-![tsumugi](assets/preview.png)
+![tsumugi](assets/demo.gif)
 
 ## Why another terminal
 

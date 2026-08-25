@@ -9,6 +9,7 @@
 # does not match we abort instead of typing into whatever is in front.
 param(
     [Parameter(Mandatory = $true)][string]$Script,
+    [string]$Lang = "ja",
     [string]$OutDir = "",
     [int]$W = 1240,
     [int]$H = 800
@@ -172,4 +173,4 @@ function Save-Shot([string]$Name) {
     "shot $path ($w x $h)"
 }
 
-. $Script
+. $Script -Lang $Lang
