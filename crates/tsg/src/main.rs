@@ -79,7 +79,7 @@ struct App {
     /// **載せ直さない**ための控え。
     image_slots: BTreeMap<(u32, u64), tsg_render::ImageSlot>,
     /// 外から頼まれたコマンド（`tsg --run`）。次の待ち時間に実行する。
-    queued_command: Option<&'static str>,
+    queued_command: Option<(&'static str, Option<String>)>,
     /// 画面に出ているものへのラベル。空でなければラベル待ち。
     hints: Vec<Hint>,
     hint_typed: String,
@@ -1072,11 +1072,11 @@ impl App {
                     // 差分がずれた。黙って進まず、全文で立て直す。
                     self.resend_file(pane);
                 }
-                ServerMsg::RunCommand { id } => {
+                ServerMsg::RunCommand { id, arg } => {
                     // ここでは実行しない。**イベントループを持っている
                     // ところまで持ち越す**（コマンドは窓を閉じることもある）。
                     if let Some(spec) = tsg_modal::REGISTRY.iter().find(|s| s.id == id) {
-                        self.queued_command = Some(spec.id);
+                        self.queued_command = Some((spec.id, arg));
                     }
                 }
                 ServerMsg::FileClosed { pane } => {
@@ -2952,17 +2952,35 @@ impl App {
         } else {
             Pos::new(from.line, from.col.saturating_sub(1))
         };
+        let mut found_at = None;
         match tsg_modal::find_match(&buf, seed, &q, back) {
             Some(p) => {
                 self.engine.set_cursor(p, &buf);
                 self.status_msg.clear();
+                // **畳んだ中に見つかったら開く。** 開かないと、
+                // 件数だけ数えて行けない場所ができる。
+                found_at = Some(p.line);
             }
             None => {
                 self.engine.set_cursor(from, &buf);
                 self.status_msg = t!("見つかりません", "no match").into();
             }
         }
+        if let Some(line) = found_at {
+            self.open_fold_at(line);
+        }
         self.follow_cursor();
+    }
+
+    /// その行が畳んである中なら開く。
+    fn open_fold_at(&mut self, line: usize) {
+        let pane = self.session.active;
+        let Some(view) = self.session.panes.get_mut(&pane) else {
+            return;
+        };
+        if let Some((start, _)) = view.fold_covering(line) {
+            view.folds.retain(|(s, _)| *s != start);
+        }
     }
 
     /// いま探しているものが文書に何件あるか。
@@ -3226,14 +3244,20 @@ impl App {
 
                     for r in 0..rect.h {
                         if let Some((start, end)) = view.fold_at(at(r)) {
-                            // 畳んだ出力は 1 行の要約に置き換える。
-                            // **何行隠したかを必ず出す。** 数が分からないと、
-                            // 畳んだことに気づかないまま読み飛ばす。
+                            // 畳んだ範囲は 1 行の要約に置き換える。
+                            // **何を畳んだかと、何行隠したかを出す。**
+                            // 数だけだと、並んだときにどれがどれか分からない
+                            // （diff を 5 つ畳んで区別が付かなかった）。
                             let n = end + 1 - start;
-                            let label = t!(
-                                format!("▸ 出力 {n} 行（クリックで開く）"),
-                                format!("▸ {n} lines of output (click to open)")
-                            );
+                            let what = fold_label(&doc, start);
+                            let label = if what.is_empty() {
+                                t!(
+                                    format!("▸ {n} 行（クリックで開く）"),
+                                    format!("▸ {n} lines (click to open)")
+                                )
+                            } else {
+                                t!(format!("▸ {what}  {n} 行"), format!("▸ {what}  {n} lines"))
+                            };
                             renderer.rect(
                                 rect.x as f32,
                                 (rect.y + r) as f32,
@@ -4062,6 +4086,33 @@ fn display_width(s: &str) -> usize {
 ///
 /// 単語粒度が `textobj::at_pointer` を通るので、
 /// 「`src/main.rs:42` の上でドラッグするとパス全体から始まる」が自然に出る。
+/// 畳んだ範囲が何なのか。diff ならファイル名、端末ならコマンド。
+///
+/// **要約に「何を」を書く。** 行数だけだと、並んだときにどれがどれか
+/// 分からない（diff を 5 つ畳んで区別が付かなかった）。
+fn fold_label(buf: &dyn tsg_modal::Buffer, start: usize) -> String {
+    let head = tsg_modal::line_text(buf, start);
+    if let Some(rest) = head.strip_prefix("diff --git ") {
+        // `a/path b/path` の後ろ側を出す。
+        return rest
+            .rsplit_once(" b/")
+            .map_or_else(|| rest.to_string(), |(_, b)| b.to_string());
+    }
+    // 端末なら、その出力を生んだコマンド行。
+    let blocks = buf.marks().blocks();
+    if let Some(b) = blocks.iter().find(|b| b.output_start == Some(start))
+        && let Some(cmd) = b.command_line
+    {
+        let text = tsg_modal::line_text(buf, cmd);
+        let from = text
+            .char_indices()
+            .nth(b.command_col)
+            .map_or(0, |(i, _)| i);
+        return text[from..].trim().to_string();
+    }
+    String::new()
+}
+
 /// ラベルを振る値打ちがあるか。
 ///
 /// **実際に在るものだけに振る。** `open_kind` は Ctrl＋クリックのために
@@ -4749,8 +4800,21 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let mut dirty = self.pump();
-        if let Some(id) = self.queued_command.take() {
+        if let Some((id, arg)) = self.queued_command.take() {
             self.invoke(id, event_loop);
+            // 値を伴うものは、開いた入力欄へそのまま入れて走らせる。
+            if let Some(text) = arg
+                && self.palette.searching()
+            {
+                self.palette.query = text;
+                self.run_search();
+                self.palette.hide();
+                let n = self.search_hits();
+                self.status_msg = t!(
+                    format!("{n} 件（n で次、N で前）"),
+                    format!("{n} matches (n / N to step)")
+                );
+            }
             dirty = true;
         }
         if self.watch.changed() {
@@ -4960,7 +5024,10 @@ fn main() -> Result<()> {
             std::process::exit(i32::from(!ok) * 2);
         }
         cli::Mode::Compare => return rpc::compare(&cli.session),
-        cli::Mode::RunCommand(id) => return rpc::run_command(&cli.session, id),
+        cli::Mode::RunCommand(id) => return rpc::run_command(&cli.session, id, None),
+        cli::Mode::Search(q) => {
+            return rpc::run_command(&cli.session, "search.open", Some(q.clone()));
+        }
         cli::Mode::Commands => return rpc::commands(),
         cli::Mode::Open { path, render } => return rpc::open(&cli.session, path, *render),
         cli::Mode::Render => return rpc::render(&cli.session, cli.pane),

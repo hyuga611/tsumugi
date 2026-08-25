@@ -41,6 +41,8 @@ pub enum Mode {
     Render,
     /// 画面の側のコマンドを外から実行する
     RunCommand(String),
+    /// 外から探す（`n` `N` はそのまま効く）
+    Search(String),
     /// コマンドの id と題名を一覧にする
     Commands,
     /// エージェントが自分の状態を名乗る（hooks から呼ばれる）
@@ -291,6 +293,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Cli {
             }
             "--compare" => cli.mode = Mode::Compare,
             "--commands" => cli.mode = Mode::Commands,
+            "--search" => cli.mode = Mode::Search(next_value(&args, &mut i).unwrap_or_default()),
             "--run" => cli.mode = Mode::RunCommand(next_value(&args, &mut i).unwrap_or_default()),
             "--open" | "-o" => {
                 let path = next_value(&args, &mut i).unwrap_or_default();

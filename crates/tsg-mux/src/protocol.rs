@@ -413,7 +413,12 @@ pub enum ClientMsg {
     ///
     /// **窓の中でしか起きないこと**（検索・ラベル・畳み・配色）を台本から
     /// 動かすための口。サーバは中身を知らず、そのまま配るだけ。
-    RunCommand { id: String },
+    RunCommand {
+        id: String,
+        /// コマンドに渡す値（検索の文字列など）。要らないものは無視する。
+        #[serde(default)]
+        arg: Option<String>,
+    },
     /// 読む形の切り替え。`on` を書かなければ反転。
     SetPreview {
         #[serde(default)]
@@ -581,6 +586,8 @@ pub enum ServerMsg {
     /// 画面の側で実行してほしいコマンド。
     RunCommand {
         id: String,
+        #[serde(default)]
+        arg: Option<String>,
     },
     /// 差分を当てられなかった。クライアントは全文を送り直す。
     NeedFullFile {

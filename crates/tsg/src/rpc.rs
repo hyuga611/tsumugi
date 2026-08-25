@@ -508,13 +508,14 @@ pub fn compare(session: &str) -> Result<()> {
 /// **窓の中でしか起きないこと**（検索・ラベル・畳み・配色）を台本から
 /// 動かす。知らない id は先に弾く — 送っても何も起きないより、
 /// その場で「そんな id は無い」と言うほうがいい。
-pub fn run_command(session: &str, id: &str) -> Result<()> {
+pub fn run_command(session: &str, id: &str, arg: Option<String>) -> Result<()> {
     let Some(spec) = tsg_modal::REGISTRY.iter().find(|s| s.id == id) else {
         bail!("コマンド '{id}' を知りません（一覧は tsg --commands）");
     };
     let (mut client, _) = attach(session)?;
     client.send(&ClientMsg::RunCommand {
         id: spec.id.to_string(),
+        arg,
     })?;
     std::thread::sleep(Duration::from_millis(200));
     let _ = client.send(&ClientMsg::Detach);

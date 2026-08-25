@@ -423,9 +423,9 @@ impl State {
                 }
             }
 
-            ClientMsg::RunCommand { id } => {
+            ClientMsg::RunCommand { id, arg } => {
                 // サーバは中身を知らない。**そのまま配るだけ。**
-                self.broadcast(&ServerMsg::RunCommand { id });
+                self.broadcast(&ServerMsg::RunCommand { id, arg });
             }
 
             ClientMsg::SetPreview { pane, on } => {
