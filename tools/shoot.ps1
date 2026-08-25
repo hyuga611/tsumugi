@@ -40,7 +40,10 @@ function Beat([string]$Name, [int]$Frames = 3) {
 #
 # OSC 133 が無いと左のふち・コマンドブロック・畳みが手がかりを持てない。
 # ユーザの $PROFILE は触らず、このペインの中だけで読み込ませる。
-$si = (Resolve-Path (Join-Path $root "..\shell-integration\tsumugi.ps1")).Path
+# **人の名前が写る場所で撮らない。** 画面のプロンプトはそのまま公開物に
+# なるので、中立な場所へ置いた写しの中で撮る。
+$demo = "C:\demo\tsumugi"
+$si = (Join-Path $demo "shell-integration\tsumugi.ps1")
 Send "powershell -NoLogo -NoExit -Command `". '$si'`"\n"
 Start-Sleep -Milliseconds 2500
 Send 'Clear-Host\n'
