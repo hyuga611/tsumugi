@@ -71,6 +71,8 @@ struct App {
     help_scroll: usize,
     /// 検索を始めた場所。Esc で戻すために持つ。
     search_from: Option<Pos>,
+    /// 前回の形から組み直すか。
+    restore: bool,
     /// まだ割っていない数（`--layout agents`）。
     pending_splits: usize,
     /// 端末に出た絵を、どこに載せたか。`(ペイン, 絵の id) -> 面の場所`。
@@ -128,6 +130,8 @@ struct App {
     macro_depth: u32,
     /// 最初のペインをどこで開くか / 何を走らせるか（`--cwd` / `-e`）。
     cwd: Option<String>,
+    /// `--cwd` を明示されたか（既定で入った場所と区別する）。
+    cwd_given: bool,
     command: Option<Vec<String>>,
 }
 
@@ -140,6 +144,7 @@ impl App {
             session_name: cli.session.clone(),
             help_scroll: 0,
             search_from: None,
+            restore: cli.restore && cli.layout.is_none(),
             pending_splits: match cli.layout.as_deref() {
                 Some("agents") => 2,
                 _ => 0,
@@ -182,8 +187,21 @@ impl App {
                 .clone()
                 .or_else(|| std::env::current_dir().ok())
                 .map(|p| p.to_string_lossy().into_owned()),
+            // 「この場所を開いてくれ」と言われたのか、ただ起動した場所が
+            // 入っただけなのか。**組み直すかどうかがここで決まる**ので、
+            // 既定が入ったのと言われたのを混ぜない。
+            cwd_given: cli.cwd.is_some(),
             command: cli.command.clone(),
         }
+    }
+
+    /// 前回の形から組み直してよいか。
+    ///
+    /// **「これを開いてくれ」と言われたときは組み直さない。** `--cwd` や
+    /// `-e` を書いた人は、その場所・そのコマンドを見たくて打っている。
+    /// そこへ前回の 3 分割が出てくるのは、頼んだことと違う。
+    fn wants_restore(&self) -> bool {
+        self.restore && !self.cwd_given && self.command.is_none()
     }
 
     /// タブバーが占める行数。タブが 1 枚のときは出さない。
@@ -489,7 +507,7 @@ impl App {
         self.client = None;
         self.session = Session::default();
         self.session_name = name.to_string();
-        match connect_or_spawn(name) {
+        match connect_or_spawn(name, self.restore) {
             Ok(client) => {
                 self.client = Some(client);
                 let area = self.area();
@@ -499,6 +517,7 @@ impl App {
                     rows: area.h as u16,
                     cwd: self.cwd.clone(),
                     command: None,
+                    restore: self.wants_restore(),
                 });
                 self.status_msg = t!(
                     format!("{name} に移りました"),
@@ -1199,7 +1218,10 @@ impl App {
             .into_iter()
             .filter_map(|id| {
                 let v = self.session.panes.get(&id)?;
-                let text = v.text_rect();
+                // **ファイルを開いても PTY の桁数は変えない。** 行番号のぶん
+                // 狭くすると、シェルの折り返し位置と画面の折り返し位置が
+                // 食い違って行がにじむ。
+                let text = v.pty_rect();
                 Some((id, text.w.max(1) as u16, text.h.max(1) as u16))
             })
             .collect();
@@ -1390,7 +1412,7 @@ impl App {
                 }
                 continue;
             }
-            let width = view.text_rect().w.max(20);
+            let width = view.pty_rect().w.max(20);
             let fresh = view
                 .preview
                 .as_ref()
@@ -2848,6 +2870,7 @@ impl App {
                 pane: Some(*id),
                 state: AgentState::Working,
                 cost: None,
+                agent: None,
             });
         }
         let mut bytes = text.as_bytes().to_vec();
@@ -3076,11 +3099,13 @@ impl App {
         }
         self.hints = hints;
         self.hint_typed.clear();
-        self.status_msg = t!(
-            "ラベルの字を押すと開きます（Esc でやめる）",
-            "press a label to open it (Esc to cancel)"
-        )
-        .into();
+        if self.cfg.guides {
+            self.status_msg = t!(
+                "ラベルの字を押すと開きます（Esc でやめる）",
+                "press a label to open it (Esc to cancel)"
+            )
+            .into();
+        }
     }
 
     /// ラベルが押された。決まれば開く。
@@ -3274,6 +3299,41 @@ impl App {
                     // **見せる側と当てる側で同じ関数を通す**（`line_at`）。
                     let row_line: Vec<usize> = (0..rect.h).map(|r| view.line_at(r)).collect();
                     let at = |r: usize| row_line.get(r).copied().unwrap_or(top + r);
+
+                    // 行番号。**ファイルを開いているときだけ。** 端末の行は
+                    // コマンドの出力が積み上がったもので、番号を振っても
+                    // 指す先が無い。
+                    //
+                    // 右寄せ。桁が増えても数字の一の位が揃っていないと、
+                    // 目で追うときに引っかかる。
+                    let numbers = view.gutter().saturating_sub(session::GUTTER);
+                    if numbers > 0 {
+                        let cursor_line = self.engine.cursor().line;
+                        let last = doc.line_count();
+                        for r in 0..rect.h {
+                            let line = at(r);
+                            if line >= last {
+                                break;
+                            }
+                            if view.fold_at(line).is_some() {
+                                continue;
+                            }
+                            let text = format!("{:>w$} ", line + 1, w = numbers - 1);
+                            // いまの行だけ明るく。**どこに居るかが番号でも分かる。**
+                            let color = if cursor_line == line && is_active {
+                                th.fg
+                            } else {
+                                th.dim
+                            };
+                            renderer.text(
+                                (view.rect.x + session::GUTTER) as f32,
+                                (rect.y + r) as f32,
+                                &text,
+                                color,
+                                true,
+                            );
+                        }
+                    }
 
                     // 左ガター。OSC 133 のブロックをそのまま印にする。
                     // 出力を正規表現で当てにいかないので、嘘の印が出ない。
@@ -3834,6 +3894,7 @@ impl App {
     /// コマンドパレット。
     fn draw_palette(&mut self) {
         let th = self.theme;
+        let guides = self.cfg.guides;
         if !self.palette.open {
             return;
         }
@@ -3944,11 +4005,13 @@ impl App {
             }
         }
         // 使い方の 1 行。**一覧を出したのに動かし方が分からない**を作らない。
-        let foot = t!(
-            "↑↓ で選ぶ · Enter で実行 · Esc で閉じる · そのまま打つと絞り込み",
-            "↑↓ choose · Enter run · Esc close · type to filter"
-        );
-        r.text((x + 2) as f32, (y + shown + 2) as f32, foot, th.dim, true);
+        if guides {
+            let foot = t!(
+                "↑↓ で選ぶ · Enter で実行 · Esc で閉じる · そのまま打つと絞り込み",
+                "↑↓ choose · Enter run · Esc close · type to filter"
+            );
+            r.text((x + 2) as f32, (y + shown + 2) as f32, foot, th.dim, true);
+        }
     }
 
     /// 名前を選ぶだけの一覧（セッション切り替え）。
@@ -4026,9 +4089,12 @@ impl App {
         let hint = if !self.status_msg.is_empty() {
             self.status_msg.clone()
         } else if !pending.is_empty() {
+            // 続きのキー待ちは案内ではなく**いまの状態**。切っても出す。
             format!("{pending} …")
-        } else {
+        } else if self.cfg.guides {
             mode.hint().to_string()
+        } else {
+            String::new()
         };
 
         let tabs = self.session.info.as_ref().map_or(0, |i| i.tabs.len());
@@ -4149,6 +4215,7 @@ impl App {
 
         if scrollback_changed {
             session::set_scrollback(self.cfg.scrollback);
+            session::set_line_numbers(self.cfg.line_numbers);
             for view in self.session.panes.values_mut() {
                 view.term.state.grid.set_max_scrollback(self.cfg.scrollback);
             }
@@ -5026,7 +5093,7 @@ impl ApplicationHandler for App {
         self.cols = cols;
         self.rows = rows;
 
-        match connect_or_spawn(&self.session_name) {
+        match connect_or_spawn(&self.session_name, self.restore) {
             Ok(client) => {
                 self.client = Some(client);
                 let area = self.area();
@@ -5036,6 +5103,7 @@ impl ApplicationHandler for App {
                     rows: area.h as u16,
                     cwd: self.cwd.clone(),
                     command: self.command.clone(),
+                    restore: self.wants_restore(),
                 });
             }
             Err(e) => {
@@ -5179,7 +5247,7 @@ impl ApplicationHandler for App {
     }
 }
 
-fn connect_or_spawn(session: &str) -> Result<Client> {
+fn connect_or_spawn(session: &str, restore: bool) -> Result<Client> {
     if let Ok(c) = Client::connect(session) {
         println!("既存の mux セッション '{session}' に再接続しました");
         return Ok(c);
@@ -5189,6 +5257,9 @@ fn connect_or_spawn(session: &str) -> Result<Client> {
     let exe = std::env::current_exe().context("自分の実行ファイルの場所が分かりません")?;
     let mut cmd = std::process::Command::new(&exe);
     cmd.arg("--server").arg(session);
+    if !restore {
+        cmd.arg("--no-restore");
+    }
     detach(&mut cmd);
     cmd.spawn()
         .with_context(|| format!("mux サーバを起こせません: {}", exe.display()))?;
@@ -5347,7 +5418,7 @@ fn main() -> Result<()> {
             println!("tsumugi (tsg) {}", cli::VERSION);
             return Ok(());
         }
-        cli::Mode::Server => return tsg_mux::run(&cli.session),
+        cli::Mode::Server => return tsg_mux::server::run_with(&cli.session, cli.restore),
         cli::Mode::Send(text) => return rpc::send(&cli.session, text),
         cli::Mode::Tap => return rpc::tap(&cli.session),
         cli::Mode::List => return rpc::list(),
@@ -5373,7 +5444,13 @@ fn main() -> Result<()> {
         cli::Mode::Render => return rpc::render(&cli.session, cli.pane),
         cli::Mode::Agents => return rpc::agents(&cli.session),
         cli::Mode::AgentState(state) => {
-            return rpc::set_agent_state(&cli.session, state, cli.pane, cli.cost.clone());
+            return rpc::set_agent_state(
+                &cli.session,
+                state,
+                cli.pane,
+                cli.cost.clone(),
+                cli.agent.clone(),
+            );
         }
         cli::Mode::Wait { until, timeout } => {
             // 終了コードで答える。台本が `if tsg --wait --until blocked` と書ける。
@@ -5422,6 +5499,7 @@ fn main() -> Result<()> {
     // 桁の勘定も同じ。途中で変えると、組んだあとのグリッドと食い違う。
     tsg_term::set_ambiguous(cfg.ambiguous_width);
     session::set_scrollback(cfg.scrollback);
+    session::set_line_numbers(cfg.line_numbers);
     if let Some(w) = warning {
         eprintln!("設定: {w}（既定で起動します）");
     }

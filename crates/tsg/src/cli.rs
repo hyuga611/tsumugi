@@ -99,6 +99,13 @@ pub struct Cli {
     pub pane: Option<u32>,
     /// 起動と同時に組む配置。いまは `agents` だけ。
     pub layout: Option<String>,
+    /// 前回の形から組み直すか。`--no-restore` で切る。
+    pub restore: bool,
+    /// `--agent-state` と一緒に名乗る相手の名前（`claude` / `codex`）。
+    ///
+    /// **再起動のあとに「続きから」を出すために要る。** シェルの中で
+    /// 起こされたエージェントは、ペインのプログラムからは見えない。
+    pub agent: Option<String>,
     /// `--agent-state` と一緒に名乗る「いくら使ったか」。そのまま出す。
     pub cost: Option<String>,
 }
@@ -119,6 +126,8 @@ impl Default for Cli {
             new_window: false,
             pane: None,
             layout: None,
+            restore: true,
+            agent: None,
             cost: None,
         }
     }
@@ -140,6 +149,7 @@ tsumugi (tsg) — ターミナルの画面を vim で編集できるドキュメ
       --font-size <px>     文字の大きさ
       --lang <ja|en>       表示の言語（既定: OS に合わせる）
       --layout agents          3 分割で開く（AI エージェントを並べる用）
+      --no-restore             前回の形から組み直さずに、素の 1 ペインで開く
   -n, --new-window         tsumugi の中から起動したときも新しい窓を開く
                            （既定は、いまの窓にタブが増えて切り替わる）
       --theme <名前>       配色（夜霧 / 墨 / 白磁。英名 yogiri / sumi / hakuji でも可）
@@ -294,6 +304,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Cli {
             "--list" => cli.mode = Mode::List,
             "--rpc" => cli.mode = Mode::Rpc,
             "--layout" => cli.layout = next_value(&args, &mut i),
+            "--no-restore" => cli.restore = false,
             "--cost" => cli.cost = next_value(&args, &mut i),
             "--pane" => {
                 cli.pane = next_value(&args, &mut i).and_then(|v| v.parse().ok());
@@ -323,6 +334,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Cli {
                 let v = next_value(&args, &mut i).unwrap_or_default();
                 cli.mode = Mode::AgentState(v);
             }
+            "--agent" => cli.agent = next_value(&args, &mut i),
             "--install-agent-hooks" => {
                 cli.mode = Mode::InstallAgentHooks(next_value(&args, &mut i));
             }

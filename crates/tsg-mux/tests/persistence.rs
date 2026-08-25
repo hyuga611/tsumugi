@@ -30,6 +30,7 @@ fn attach(client: &mut Client) -> u32 {
             rows: 24,
             cwd: None,
             command: None,
+            restore: false,
         })
         .expect("Attach を送れない");
 
@@ -140,6 +141,7 @@ fn panes_survive_a_disconnected_client() {
             rows: 24,
             cwd: None,
             command: None,
+            restore: false,
         })
         .expect("再 Attach を送れない");
 
@@ -212,6 +214,7 @@ fn an_open_file_survives_a_disconnected_client() {
             rows: 24,
             cwd: None,
             command: None,
+            restore: false,
         })
         .expect("再 Attach を送れない");
 
@@ -333,6 +336,7 @@ fn protocol_version_mismatch_is_reported() {
             rows: 24,
             cwd: None,
             command: None,
+            restore: false,
         })
         .expect("Attach を送れない");
 
@@ -342,4 +346,36 @@ fn protocol_version_mismatch_is_reported() {
     assert!(matches!(msg, ServerMsg::Error { .. }));
 
     handle.shutdown();
+}
+
+/// **止めたら口を手放す。** 同じ名前ですぐ開き直せる。
+///
+/// `accept` は繋がるまで返らないので、止める合図だけでは受け側が起きない。
+/// 起こさずに終えると口を握ったままになり、次に同じ名前で開けない
+/// （実測: 6 秒待っても開けなかった）。PC を落としたあとに前回と同じ
+/// セッション名で開き直す道が、ここで塞がる。
+///
+/// **クライアントを繋いだあとは、同じプロセスの中では試せない。**
+/// 繋いだ口は両側のスレッドが握り合っていて、片方のプロセスが終わるまで
+/// 離れない。本番はクライアントが別プロセスなので、窓を閉じれば離れる。
+#[test]
+fn shutting_down_releases_the_socket() {
+    let session = unique_session("rebind");
+    let first = server::spawn(&session).expect("サーバを起こせない");
+    first.shutdown();
+
+    // 手放すまでの一瞬は待つ（受け側が起きて抜けるまで）。
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match server::spawn(&session) {
+            Ok(second) => {
+                second.shutdown();
+                return;
+            }
+            Err(e) => {
+                assert!(Instant::now() < deadline, "口を手放していない: {e:#}");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        }
+    }
 }

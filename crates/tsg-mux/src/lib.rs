@@ -6,6 +6,7 @@
 pub mod client;
 pub mod endpoint;
 pub mod protocol;
+pub mod restore;
 pub mod server;
 pub mod sessions;
 #[cfg(windows)]

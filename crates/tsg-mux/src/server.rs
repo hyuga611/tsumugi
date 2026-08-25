@@ -70,6 +70,24 @@ struct Pane {
     /// 戻らない**ようにサーバが預かる（開いているファイルと同じ扱い）。
     preview: bool,
     cost: Option<String>,
+    /// 起こしたときの引数。**再起動をまたいで組み直す**ときに使う
+    /// （`restore.rs`）。画面の中身は控えないが、これは控える。
+    command: Option<Vec<String>>,
+    /// 名乗ったエージェントの名前（`claude` / `codex`）。
+    ///
+    /// シェルの中で `claude` と打たれた場合、ペインのプログラムはシェルなので、
+    /// **フックが名乗ってくれた名前だけが手がかり**になる。
+    agent_kind: Option<String>,
+    /// 最初のプロンプトが出たら打ち込む文字列（改行は付けない）。
+    ///
+    /// 組み直したペインに「続きから」を**置くだけ**。走らせるのは人が決める。
+    /// 頼まれていないコマンドを勝手に実行しない。
+    pending_type: Option<String>,
+    /// 起こしたときの場所。OSC 7 が来ていないときの控え。
+    ///
+    /// **シェル統合を入れていない人でも、開いた場所に戻ってきてほしい。**
+    /// OSC 7 だけを頼りにすると、入れていない環境では毎回ホームで開く。
+    spawn_cwd: Option<String>,
 }
 
 /// サーバが預かるファイル。
@@ -87,6 +105,8 @@ struct ServerFile {
 
 struct State {
     session: String,
+    /// 前回の形から組み直すか。`--no-restore` で切る。
+    restore: bool,
     panes: BTreeMap<u32, Pane>,
     tabs: Vec<TabInfo>,
     active_tab: u32,
@@ -116,6 +136,7 @@ impl State {
             rows: 24,
             spawn_cwd: None,
             spawn_command: None,
+            restore: true,
         }
     }
 
@@ -180,7 +201,8 @@ impl State {
         // 中に居ると分かれば、新しい窓ではなくこのセッションのタブを開ける。
         cmd.env("TSUMUGI_SESSION", &self.session);
         cmd.env("TSUMUGI_PANE", id.to_string());
-        match cwd.filter(|c| std::path::Path::new(c).is_dir()) {
+        let spawn_cwd = cwd.filter(|c| std::path::Path::new(c).is_dir());
+        match &spawn_cwd {
             Some(dir) => cmd.cwd(dir),
             None => {
                 if let Some(home) = home_dir() {
@@ -231,15 +253,127 @@ impl State {
                 agent: None,
                 preview: false,
                 cost: None,
+                command: command.clone(),
+                agent_kind: None,
+                pending_type: None,
+                spawn_cwd,
             },
         );
         Ok(id)
     }
 
-    /// そのペインが今いるディレクトリ（OSC 7 で受け取ったもの）。
+    /// 形が変わった。控えを置き直す。
     ///
-    /// 分割や新しいタブは**今いる場所**で開くのが端末の慣例。
-    /// 追加の仕掛けは要らず、すでに解析済みの OSC 7 をそのまま使う。
+    /// **エージェントの状態が変わっただけでは書かない。** それは形ではないし、
+    /// 1 分に何度も来る。
+    fn shape_changed(&mut self) {
+        self.save_for_restore();
+    }
+
+    /// 組み直したペインへ「続きから」を置く。**押すのは人。**
+    ///
+    /// プロンプトが出てから置く。出る前に書くと、シェルが起き上がる途中の
+    /// 入力として捨てられる。プロンプトの位置は OSC 133 で分かるので、
+    /// **勘で待たずに済む**（シェル統合が入っていなければ置かない。
+    /// 見えない相手へ当て推量で打ち込むより、何もしないほうがいい）。
+    fn type_pending(&mut self, pane: u32) {
+        let Some(p) = self.panes.get_mut(&pane) else {
+            return;
+        };
+        if p.pending_type.is_none() || p.term.state.marks.blocks().is_empty() {
+            return;
+        }
+        let Some(line) = p.pending_type.take() else {
+            return;
+        };
+        let _ = p.writer.write_all(line.as_bytes());
+        let _ = p.writer.flush();
+    }
+
+    /// 組み直すための控えを置く。**画面の中身は書かない**（`restore.rs`）。
+    ///
+    /// 形が変わるたびに置き直す。落ちるときに書こうとしても、電源が
+    /// 落ちた場合は間に合わない。
+    fn save_for_restore(&self) {
+        let panes = self
+            .panes
+            .values()
+            .filter(|p| p.alive)
+            .map(|p| crate::restore::SavedPane {
+                id: p.id,
+                cwd: self.pane_cwd(p.id),
+                command: p.command.clone(),
+                agent: p.agent_kind.clone(),
+            })
+            .collect();
+        crate::restore::save(
+            &self.session,
+            &crate::restore::Saved {
+                version: crate::restore::VERSION,
+                tabs: self.tabs.clone(),
+                active_tab: self.active_tab,
+                panes,
+            },
+        );
+    }
+
+    /// 控えから組み直す。**戻せなかったペインは飛ばす**（1 つも戻せなければ
+    /// 素の 1 ペインで開く）。
+    fn restore_from(&mut self, saved: crate::restore::Saved, cols: u16, rows: u16) -> bool {
+        let mut made: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
+        for p in &saved.panes {
+            // 「続きから」で起こす。会話の記録を持っているのは相手なので、
+            // こちらは開き方だけを知っていればいい。
+            let command = p
+                .command
+                .as_ref()
+                .map(|c| crate::restore::resume_command(c));
+            let Ok(id) = self.spawn_pane_in(cols, rows, p.cwd.clone(), command) else {
+                continue;
+            };
+            // シェルの中で起こされていた相手には、続きから開く 1 行を
+            // **プロンプトに置くだけ**にする（押すのは人）。
+            if p.command.is_none()
+                && let Some(line) = p.agent.as_deref().and_then(crate::restore::resume_line)
+                && let Some(pane) = self.panes.get_mut(&id)
+            {
+                pane.agent_kind = p.agent.clone();
+                pane.pending_type = Some(line);
+            }
+            made.insert(p.id, id);
+        }
+        if made.is_empty() {
+            return false;
+        }
+        // 木の中の古い id を新しい id へ置き換える。戻せなかったものは畳む。
+        self.tabs = saved
+            .tabs
+            .into_iter()
+            .filter_map(|t| {
+                let layout = remap_layout(&t.layout, &made)?;
+                Some(TabInfo {
+                    id: t.id,
+                    active_pane: made
+                        .get(&t.active_pane)
+                        .copied()
+                        .unwrap_or_else(|| layout.panes().first().copied().unwrap_or_default()),
+                    layout,
+                    zoom: None,
+                })
+            })
+            .collect();
+        if self.tabs.is_empty() {
+            return false;
+        }
+        self.active_tab = if self.tabs.iter().any(|t| t.id == saved.active_tab) {
+            saved.active_tab
+        } else {
+            self.tabs[0].id
+        };
+        self.next_tab = self.tabs.iter().map(|t| t.id).max().unwrap_or(0) + 1;
+        true
+    }
+
     /// 今のタブでアクティブなペイン。
     fn active_pane(&self) -> Option<u32> {
         self.tabs
@@ -248,8 +382,17 @@ impl State {
             .map(|t| t.active_pane)
     }
 
+    /// そのペインが今いるディレクトリ（OSC 7 で受け取ったもの）。
+    ///
+    /// 分割や新しいタブは**今いる場所**で開くのが端末の慣例。
+    /// 追加の仕掛けは要らず、すでに解析済みの OSC 7 をそのまま使う。
     fn pane_cwd(&self, pane: u32) -> Option<String> {
-        let url = self.panes.get(&pane)?.term.state.cwd.as_deref()?;
+        let p = self.panes.get(&pane)?;
+        let Some(url) = p.term.state.cwd.as_deref() else {
+            // OSC 7 が来ていない（シェル統合を入れていない）。
+            // **開いた場所を覚えているので、そこを答える。**
+            return p.spawn_cwd.clone();
+        };
         parse_file_url(url)
     }
 
@@ -341,6 +484,7 @@ impl State {
                 rows,
                 cwd,
                 command,
+                restore,
             } => {
                 if version != PROTOCOL_VERSION {
                     self.send_to(
@@ -360,13 +504,27 @@ impl State {
                     self.rows = rows;
                 }
                 if self.tabs.is_empty() {
-                    // 起動時の指定は最初のペインにだけ効く。
-                    // 再アタッチで既にペインがあるなら、そこは触らない。
-                    self.spawn_cwd = cwd;
-                    self.spawn_command = command;
                     let (c, r) = (self.cols, self.rows);
-                    self.new_tab(c, r)?;
-                    self.spawn_command = None;
+                    // 前回の形が残っていれば、そこから組み直す。
+                    //
+                    // **`-e` や `--cwd` を明示して開いたときは組み直さない。**
+                    // 「これを開いてくれ」と言われているのに前回の形が出るのは、
+                    // 頼んだことと違う。その判断は打った側にしかできないので、
+                    // `restore` として渡ってくる（`command` はここでも見る。
+                    // これは既定で入ることが無い）。
+                    let restored = (restore && command.is_none() && self.restore)
+                        .then(|| crate::restore::load(&self.session))
+                        .flatten()
+                        .is_some_and(|saved| self.restore_from(saved, c, r));
+                    if !restored {
+                        // 起動時の指定は最初のペインにだけ効く。
+                        // 再アタッチで既にペインがあるなら、そこは触らない。
+                        self.spawn_cwd = cwd;
+                        self.spawn_command = command;
+                        self.new_tab(c, r)?;
+                        self.spawn_command = None;
+                    }
+                    self.save_for_restore();
                 }
                 let info = self.info();
                 self.send_to(
@@ -389,20 +547,35 @@ impl State {
                 }
             }
 
-            ClientMsg::SetAgentState { pane, state, cost } => {
+            ClientMsg::SetAgentState {
+                pane,
+                state,
+                cost,
+                agent,
+            } => {
                 // ペインの指定が無ければ、いま選ばれているところ。
                 // hooks は自分がどのペインに居るか知らないので、これが既定。
                 let target = pane.or_else(|| self.active_pane());
+                let mut named = false;
                 if let Some(p) = target.and_then(|id| self.panes.get_mut(&id)) {
                     let changed = p.agent != Some(state) || (cost.is_some() && p.cost != cost);
                     p.agent = Some(state);
                     if cost.is_some() {
                         p.cost = cost;
                     }
+                    // 名乗った相手を覚える。**これが再起動のあとの
+                    // 「続きから」になる。**
+                    if agent.is_some() && p.agent_kind != agent {
+                        p.agent_kind = agent;
+                        named = true;
+                    }
                     if changed {
                         let info = self.info();
                         self.broadcast(&ServerMsg::Layout(info));
                     }
+                }
+                if named {
+                    self.save_for_restore();
                 }
             }
 
@@ -479,6 +652,7 @@ impl State {
                 }
                 let info = self.info();
                 self.broadcast(&ServerMsg::Layout(info));
+                self.shape_changed();
             }
 
             ClientMsg::ClosePane { pane } => {
@@ -494,6 +668,7 @@ impl State {
                 self.tabs.retain(|t| !t.layout.panes().is_empty());
                 let info = self.info();
                 self.broadcast(&ServerMsg::Layout(info));
+                self.shape_changed();
             }
 
             ClientMsg::ResizeSplit { pane, delta } => {
@@ -504,6 +679,7 @@ impl State {
                 {
                     let info = self.info();
                     self.broadcast(&ServerMsg::Layout(info));
+                    self.shape_changed();
                 }
             }
 
@@ -639,6 +815,7 @@ impl State {
                 }
                 let info = self.info();
                 self.broadcast(&ServerMsg::Layout(info));
+                self.shape_changed();
                 self.broadcast(&ServerMsg::FileState {
                     pane: new_pane,
                     path: None,
@@ -665,6 +842,7 @@ impl State {
                     tab.active_pane = b;
                     let info = self.info();
                     self.broadcast(&ServerMsg::Layout(info));
+                    self.shape_changed();
                 }
             }
 
@@ -673,6 +851,7 @@ impl State {
                     t.layout.equalize();
                     let info = self.info();
                     self.broadcast(&ServerMsg::Layout(info));
+                    self.shape_changed();
                 }
             }
 
@@ -712,6 +891,7 @@ impl State {
                 made?;
                 let info = self.info();
                 self.broadcast(&ServerMsg::Layout(info));
+                self.shape_changed();
             }
 
             ClientMsg::SelectTab { tab } => {
@@ -753,9 +933,18 @@ impl State {
                 }
             },
             Event::PtyOutput { pane, data } => {
+                // 場所が変わったら控えも置き直す（`cd` して落ちたとき、
+                // 前の場所で開き直すのは頼んだことと違う）。**変わった
+                // ときだけ**書く — 出力のたびに書いたら意味が無い。
+                let before = self.panes.get(&pane).and_then(|p| p.term.state.cwd.clone());
                 if let Some(p) = self.panes.get_mut(&pane) {
                     p.term.feed(&data);
                 }
+                let after = self.panes.get(&pane).and_then(|p| p.term.state.cwd.clone());
+                if before != after {
+                    self.save_for_restore();
+                }
+                self.type_pending(pane);
                 let msg = ServerMsg::Output {
                     pane,
                     data: encode_bytes(&data),
@@ -767,6 +956,9 @@ impl State {
                     p.alive = false;
                 }
                 self.broadcast(&ServerMsg::PaneExited { pane });
+                // 終わったペインは控えから外す。**自分で `exit` したものを
+                // 次の起動で開き直さない。**
+                self.shape_changed();
             }
             Event::Stop => return false,
         }
@@ -779,11 +971,35 @@ impl State {
 pub struct ServerHandle {
     pub session: String,
     tx: Sender<Event>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ServerHandle {
+    /// 止める。**口も手放す**ので、同じ名前ですぐ開き直せる。
+    ///
+    /// 受け側は `accept` で止まっていて、合図だけでは起きない。
+    /// 捨て玉を 1 本繋いで起こす。繋がらないならもう終わっている。
     pub fn shutdown(&self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = self.tx.send(Event::Stop);
+
+        // **1 回では起こせないことがある。** 込み合っていると接続そのものが
+        // 弾かれる（Windows なら「使用中」）。1 本も通らないまま諦めると、
+        // 受け側は止まったまま口を握り続ける。
+        //
+        // 呼んだ側を待たせない。止めたことはもう伝わっていて、
+        // ここから先は後片付けでしかない。
+        let session = self.session.clone();
+        let _ = thread::Builder::new()
+            .name("tsg-mux-wake".into())
+            .spawn(move || {
+                for _ in 0..200 {
+                    if Endpoint::for_session(&session).is_ok_and(|e| e.connect().is_ok()) {
+                        return;
+                    }
+                    thread::sleep(std::time::Duration::from_millis(25));
+                }
+            });
     }
 }
 
@@ -792,9 +1008,22 @@ impl ServerHandle {
 // 繋ぎに来て「接続できない」で落ちるのを避けるため（実際に踏んだ）。
 // 開くところまでは呼び出し側の同期処理にして、accept ループだけを別スレッドへ渡す。
 
-fn accept_loop(listener: interprocess::local_socket::Listener, tx: Sender<Event>) {
+/// 接続を受け続ける。**止まれと言われたら、次の 1 本で抜ける。**
+///
+/// `accept` は繋がるまで返らない。合図だけでは抜けられないので、
+/// 止める側が捨て玉を 1 本繋いで起こす（`ServerHandle::shutdown`）。
+/// ここで抜けないと口を握ったままになり、同じ名前で開き直せない。
+fn accept_loop(
+    listener: interprocess::local_socket::Listener,
+    tx: Sender<Event>,
+    stop: &std::sync::atomic::AtomicBool,
+) {
+    use std::sync::atomic::Ordering;
     let mut next_id = 1u64;
     for conn in listener.incoming() {
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
         let Ok(stream) = conn else { continue };
         let Ok(write_half) = stream.try_clone() else {
             continue;
@@ -836,16 +1065,25 @@ fn accept_loop(listener: interprocess::local_socket::Listener, tx: Sender<Event>
 }
 
 /// listener を起こし、イベントの受け口を返す。
-fn setup(session: &str) -> Result<(Sender<Event>, mpsc::Receiver<Event>, Endpoint)> {
+type Setup = (
+    Sender<Event>,
+    mpsc::Receiver<Event>,
+    Endpoint,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+);
+
+fn setup(session: &str) -> Result<Setup> {
     let (tx, rx) = mpsc::channel::<Event>();
     let endpoint = Endpoint::for_session(session)?;
     // バインドはここで済ませる。返った時点で接続を受けられることを保証する。
     let listener = endpoint.bind()?;
     let t = tx.clone();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let s = stop.clone();
     thread::Builder::new()
         .name("tsg-mux-listener".into())
-        .spawn(move || accept_loop(listener, t))?;
-    Ok((tx, rx, endpoint))
+        .spawn(move || accept_loop(listener, t, &s))?;
+    Ok((tx, rx, endpoint, stop))
 }
 
 fn state_loop(state: &mut State, rx: mpsc::Receiver<Event>) {
@@ -857,11 +1095,17 @@ fn state_loop(state: &mut State, rx: mpsc::Receiver<Event>) {
     for pane in state.panes.values_mut() {
         let _ = pane.pty.kill();
     }
+    // **自分から終えたときは控えを捨てる。** ここまで来たということは
+    // 「終わりにする」と言われたということ。次の起動で前の形が出てきたら、
+    // 終えたはずのものが戻ってくることになる。
+    //
+    // 電源が落ちた場合はここを通らない。控えが残るのはそのときだけでいい。
+    crate::restore::clear(&state.session);
 }
 
 /// サーバを別スレッドで起こす（テストと、同一プロセスからの利用向け）。
 pub fn spawn(session: &str) -> Result<ServerHandle> {
-    let (tx, rx, endpoint) = setup(session)?;
+    let (tx, rx, endpoint, stop) = setup(session)?;
     let mut state = State::new(session.to_string(), tx.clone());
     thread::Builder::new()
         .name("tsg-mux-state".into())
@@ -872,20 +1116,56 @@ pub fn spawn(session: &str) -> Result<ServerHandle> {
     Ok(ServerHandle {
         session: session.to_string(),
         tx,
+        stop,
     })
 }
 
 /// サーバをこのプロセスの本体として回す（`tsg --server` 用）。
 /// state ループが終わるまで返らない。
 pub fn run(session: &str) -> Result<()> {
-    let (tx, rx, endpoint) = setup(session)?;
+    run_with(session, true)
+}
+
+/// `restore` を切ると、前回の形から組み直さずに素の 1 ペインで開く。
+pub fn run_with(session: &str, restore: bool) -> Result<()> {
+    let (tx, rx, endpoint, _stop) = setup(session)?;
     // 一覧に出せるよう、生きている間だけ控えを置く（`sessions` の説明を参照）
     crate::sessions::register(session);
     let mut state = State::new(session.to_string(), tx);
+    state.restore = restore;
     state_loop(&mut state, rx);
     crate::sessions::unregister(session);
     endpoint.cleanup();
     Ok(())
+}
+
+/// 木の中のペイン id を置き換える。戻せなかったペインは取り除く。
+///
+/// **1 つも残らない枝は消す。** 空の枝を残すと、割り付けで幅 0 のペインが
+/// できて、そこへは二度と行けなくなる。
+fn remap_layout(layout: &Layout, made: &std::collections::BTreeMap<u32, u32>) -> Option<Layout> {
+    match layout {
+        Layout::Leaf { pane } => made.get(pane).map(|id| Layout::leaf(*id)),
+        Layout::Split {
+            dir,
+            children,
+            weights,
+        } => {
+            let kept: Vec<Layout> = children
+                .iter()
+                .filter_map(|c| remap_layout(c, made))
+                .collect();
+            match kept.len() {
+                0 => None,
+                1 => kept.into_iter().next(),
+                _ => Some(Layout::Split {
+                    dir: *dir,
+                    children: kept,
+                    weights: weights.clone(),
+                }),
+            }
+        }
+    }
 }
 
 /// 同じディレクトリへ書いてから置き換える。
@@ -996,4 +1276,60 @@ fn home_dir() -> Option<String> {
     std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
         .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn leaf(id: u32) -> Layout {
+        Layout::leaf(id)
+    }
+
+    /// 葉を並べた木を組む。`split` は「その葉を割る」形なので、
+    /// 試験からはこの形のほうが読める。
+    fn row(ids: &[u32]) -> Layout {
+        let mut t = leaf(ids[0]);
+        for w in ids.windows(2) {
+            assert!(t.split(w[0], w[1], Dir::Horizontal), "分割できない");
+        }
+        t
+    }
+
+    fn made(pairs: &[(u32, u32)]) -> std::collections::BTreeMap<u32, u32> {
+        pairs.iter().copied().collect()
+    }
+
+    /// 戻せたペインは新しい id へ置き換わる。
+    #[test]
+    fn a_restored_pane_keeps_its_place_in_the_tree() {
+        let tree = row(&[1, 2]);
+        let out = remap_layout(&tree, &made(&[(1, 10), (2, 11)])).expect("木ごと消えた");
+        assert_eq!(out.panes(), vec![10, 11]);
+    }
+
+    /// **戻せなかったペインは枝ごと消す。**
+    ///
+    /// 空の枝を残すと、割り付けで幅 0 のペインができて、そこへは
+    /// 二度と行けなくなる。
+    #[test]
+    fn a_pane_that_could_not_be_restored_leaves_no_empty_branch() {
+        let tree = row(&[1, 2]);
+        let out = remap_layout(&tree, &made(&[(1, 10)])).expect("残った 1 つも消えた");
+        assert_eq!(out.panes(), vec![10], "戻せなかったぶんが残っている");
+
+        assert!(
+            remap_layout(&tree, &made(&[])).is_none(),
+            "1 つも戻せないのに木が残っている"
+        );
+    }
+
+    /// 入れ子でも同じ。中の枝が空になったら、その枝ごと消える。
+    #[test]
+    fn an_inner_branch_collapses_when_it_empties() {
+        let mut tree = row(&[1, 2]);
+        assert!(tree.split(2, 3, Dir::Vertical), "内側を割れない");
+        let out = remap_layout(&tree, &made(&[(1, 10)])).expect("木ごと消えた");
+        assert_eq!(out.panes(), vec![10]);
+    }
 }

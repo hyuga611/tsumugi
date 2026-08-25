@@ -123,12 +123,56 @@ fn new_terminal(cols: usize, rows: usize) -> Terminal {
     t
 }
 
+/// 行番号を出すか。**プロセス全体で 1 つ**（設定の読み直しで変わる）。
+///
+/// ペインを作る場所すべてへ設定を配って回らないための置き方で、
+/// スクロールバックの上限と同じ扱い。
+static LINE_NUMBERS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_line_numbers(on: bool) {
+    LINE_NUMBERS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn line_numbers() -> bool {
+    LINE_NUMBERS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 impl PaneView {
-    /// 本文の領域。ガターを除いた残り。
+    /// 左のふちの幅。印のぶんと、ファイルを開いていれば行番号のぶん。
     ///
-    /// **PTY に伝える桁数もこれ**。ここがずれると、シェルの折り返し位置と
-    /// 画面の折り返し位置が食い違って行がにじむ。
+    /// **端末には行番号を出さない。** 端末の「行」はコマンドの出力が
+    /// 積み上がったもので、番号を振っても指す先が無い。ファイルは違う。
+    pub fn gutter(&self) -> usize {
+        GUTTER + self.number_width()
+    }
+
+    /// 行番号に使う桁数（区切りの空白を含む）。出さないなら 0。
+    fn number_width(&self) -> usize {
+        if !line_numbers() || self.file.is_none() || self.preview.is_some() {
+            return 0;
+        }
+        // 一番大きい番号が収まるだけ。3 桁のファイルに 5 桁ぶん空けない。
+        let last = self.buffer().line_count().max(1);
+        let digits = last.to_string().len().max(2);
+        digits + 1
+    }
+
+    /// 本文の領域。ふちを除いた残り。
+    ///
+    /// **PTY に伝える桁数はこれではない**（`pty_rect`）。ファイルを開いた
+    /// だけでシェルの桁数が変わると、折り返しの位置がずれて行がにじむ。
     pub fn text_rect(&self) -> Rect {
+        let g = self.gutter();
+        Rect {
+            x: self.rect.x + g,
+            y: self.rect.y,
+            w: self.rect.w.saturating_sub(g),
+            h: self.rect.h,
+        }
+    }
+
+    /// PTY に伝える大きさ。**開いているファイルに左右されない。**
+    pub fn pty_rect(&self) -> Rect {
         Rect {
             x: self.rect.x + GUTTER,
             y: self.rect.y,

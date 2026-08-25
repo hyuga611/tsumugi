@@ -41,6 +41,14 @@ impl Agent {
             Self::Codex => "Codex",
         }
     }
+
+    /// `--agent` に渡す名前。**再起動のあとに「続きから」を出すのに使う。**
+    fn id(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
 }
 
 /// 名前が無ければ、入っているものを全部。
@@ -93,7 +101,18 @@ fn events(a: Agent) -> &'static [(&'static str, &'static str)] {
 }
 
 /// 呼ばせる 1 行。`tsg` は PATH に居る前提（`--install` が入れる）。
-fn command_for(state: &str) -> String {
+///
+/// 名前まで名乗らせる。**シェルの中で起こされた相手は、名乗り以外に
+/// 手がかりが無い**（ペインのプログラムはシェルなので）。再起動のあとに
+/// 「続きから」を出せるかどうかがここで決まる。
+fn command_for(a: Agent, state: &str) -> String {
+    format!("tsg --agent-state {state} --agent {}", a.id())
+}
+
+/// 名前を名乗らせる前の書き方。**入れ替えるために覚えておく。**
+///
+/// 消さずに足すと、同じ状態を 2 回報告することになる。
+fn legacy_command_for(state: &str) -> String {
     format!("tsg --agent-state {state}")
 }
 
@@ -116,7 +135,9 @@ pub fn install(name: Option<&str>) -> Result<Report> {
         let mut root = read_json(&path)?;
         let mut added = 0usize;
         for (event, state) in events(a) {
-            if add_hook(&mut root, event, &command_for(state)) {
+            // 古い書き方が入っていたら入れ替える（足すだけだと二重に報告する）。
+            remove_hook(&mut root, event, &legacy_command_for(state));
+            if add_hook(&mut root, event, &command_for(a, state)) {
                 added += 1;
             }
         }
@@ -162,7 +183,10 @@ pub fn uninstall(name: Option<&str>) -> Result<Report> {
         let mut root = read_json(&path)?;
         let mut removed = 0usize;
         for (event, state) in events(a) {
-            if remove_hook(&mut root, event, &command_for(state)) {
+            // 古い書き方で入っている人も居る。両方外す。
+            if remove_hook(&mut root, event, &command_for(a, state))
+                | remove_hook(&mut root, event, &legacy_command_for(state))
+            {
                 removed += 1;
             }
         }

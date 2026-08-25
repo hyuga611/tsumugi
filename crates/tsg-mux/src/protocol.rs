@@ -11,7 +11,7 @@
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -389,6 +389,14 @@ pub enum ClientMsg {
         /// シェルの代わりに走らせるもの（`-e`）。
         #[serde(default)]
         command: Option<Vec<String>>,
+        /// 前回の形から組み直してよいか。
+        ///
+        /// **決めるのはクライアント。** `cwd` は「起動した場所」が既定で
+        /// 入るので、サーバから見ると指定の有無を区別できない。
+        /// 「この場所を開いてくれ」と言われたのか、ただ既定が入っただけなのかは
+        /// 打った側にしか分からない。
+        #[serde(default)]
+        restore: bool,
     },
     /// エージェントが自分の状態を名乗る（`tsg --agent-state` と hooks）。
     ///
@@ -400,6 +408,13 @@ pub enum ClientMsg {
         /// 「$0.42」「12.3k tok」のような、そのまま出す文字列。
         #[serde(default)]
         cost: Option<String>,
+        /// 名乗った相手（`claude` / `codex`）。
+        ///
+        /// **どのエージェントが居たかが分かると、再起動のあとに
+        /// 「続きから」を出せる。** シェルの中で起こされた場合、ペインの
+        /// プログラムはシェルなので、ここでしか分からない。
+        #[serde(default)]
+        agent: Option<String>,
     },
     /// 同じ入力を複数のペインへ。**エージェントを並べて同じ問いを投げる**ための口。
     Broadcast {

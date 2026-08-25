@@ -45,6 +45,17 @@ pub struct Config {
     /// 使うテーマの名前。表示と `:theme` のために持つ。
     pub theme_name: String,
     pub theme: Theme,
+    /// 案内の一行を出すか（「そのまま打てます」「Esc で読むモードへ」など）。
+    ///
+    /// **慣れた人には邪魔になる。** 覚えてしまえば読む必要が無く、
+    /// 下の行がずっと文字で埋まっているだけになる。切れるようにしておく。
+    /// 結果の知らせ（「保存しました」）は案内ではないので、切っても出る。
+    pub guides: bool,
+    /// ファイルを開いたときに左へ行番号を出すか。
+    ///
+    /// **端末には出さない。** 端末の「行」はコマンドの出力が積み上がった
+    /// もので、番号を振っても指す先が無い。
+    pub line_numbers: bool,
     /// 差し替えたキー。**既定は消さず、上に重ねる**（`keymap.rs`）。
     pub keys: tsg_modal::Keymap,
 }
@@ -62,6 +73,8 @@ impl Default for Config {
             lang: detect_lang(),
             theme_name: theme::DEFAULT_THEME.to_string(),
             theme: Theme::default(),
+            guides: true,
+            line_numbers: true,
             keys: tsg_modal::Keymap::default(),
         }
     }
@@ -115,6 +128,10 @@ struct ThemeFile {
 struct Ui {
     /// `"ja"` / `"en"` / `"auto"`。
     lang: Option<String>,
+    /// 案内の一行を出すか。
+    guides: Option<bool>,
+    /// ファイルを開いたときに行番号を出すか。
+    line_numbers: Option<bool>,
 }
 
 /// `ambiguous_width` を読む。`"narrow"` / `"wide"` と `1` / `2` の両方を通す。
@@ -210,6 +227,11 @@ pub fn template() -> String {
 [ui]
 # 表示の言語。"ja" / "en" / "auto"（既定は OS に合わせる）。
 # lang = "auto"
+# 下の行に出る案内（「そのまま打てます」「Esc で読むモードへ」など）。
+# 覚えてしまったら false に。保存や失敗の知らせは、切っても出ます。
+# guides = {guides}
+# ファイルを開いたとき、左に行番号を出す（端末の画面には出ません）。
+# line_numbers = {nums}
 
 [scrollback]
 # さかのぼって読める行数。
@@ -239,6 +261,8 @@ pub fn template() -> String {
         blur = d.blur,
         size = d.font_size,
         lig = d.ligatures,
+        guides = d.guides,
+        nums = d.line_numbers,
         sb = d.scrollback,
         theme = d.theme_name,
         themes = theme::names().join(" / "),
@@ -349,6 +373,8 @@ impl Config {
                 .unwrap_or(d.scrollback)
                 .clamp(100, 1_000_000),
             lang: f.ui.lang.as_deref().and_then(Lang::parse).unwrap_or(d.lang),
+            guides: f.ui.guides.unwrap_or(d.guides),
+            line_numbers: f.ui.line_numbers.unwrap_or(d.line_numbers),
             theme_name: name,
             theme,
             keys,

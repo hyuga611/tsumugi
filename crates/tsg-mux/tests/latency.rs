@@ -37,6 +37,7 @@ fn ipc_round_trip_stays_within_the_latency_budget() {
             rows: 24,
             cwd: None,
             command: None,
+            restore: false,
         })
         .expect("Attach を送れない");
     client

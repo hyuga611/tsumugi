@@ -47,6 +47,9 @@ fn attach(session: &str) -> Result<(Client, SessionInfo)> {
         rows: NO_SIZE.1,
         cwd: None,
         command: None,
+        // 台本から覗くだけの口。**組み直しは窓を持つ側の仕事**で、
+        // ここから前回の形を出してしまうと、覗いただけで画面が変わる。
+        restore: false,
     })?;
     let reply = client
         .wait_for(TIMEOUT, |m| {
@@ -289,6 +292,7 @@ pub fn set_agent_state(
     state: &str,
     pane: Option<u32>,
     cost: Option<String>,
+    agent: Option<String>,
 ) -> Result<()> {
     let Some(state) = AgentState::parse(state) else {
         bail!("状態 '{state}' を知りません（working / blocked / done / failed / idle）");
@@ -297,7 +301,12 @@ pub fn set_agent_state(
         // 走っていないセッションへの報告は、黙って捨てる。
         return Ok(());
     };
-    client.send(&ClientMsg::SetAgentState { pane, state, cost })?;
+    client.send(&ClientMsg::SetAgentState {
+        pane,
+        state,
+        cost,
+        agent,
+    })?;
     std::thread::sleep(Duration::from_millis(120));
     let _ = client.send(&ClientMsg::Detach);
     Ok(())
@@ -363,6 +372,7 @@ pub fn prompt(session: &str, text: &str, pane: Option<u32>, and_wait: bool) -> R
         pane: Some(target),
         state: AgentState::Working,
         cost: None,
+        agent: None,
     })?;
     client.send(&ClientMsg::Input {
         pane: target,
@@ -429,6 +439,7 @@ pub fn broadcast(session: &str, text: &str, and_wait: bool) -> Result<bool> {
             pane: Some(*id),
             state: AgentState::Working,
             cost: None,
+            agent: None,
         })?;
     }
     client.send(&ClientMsg::Broadcast {

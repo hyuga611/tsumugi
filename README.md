@@ -89,7 +89,11 @@ Open it and press **F1**. The help starts with what the mouse alone can do.
 `Space o` folds a command's output; the folded line says what it hid.
 
 **Panes and sessions** — split, zoom, swap, resize, tabs, named sessions,
-detach and reattach. `Space S` lists what is running.
+detach and reattach. `Space S` lists what is running. Closing the window
+leaves your shells and agents running. **Losing the machine doesn't: the
+layout and each pane's directory come back on the next launch** (the screen
+contents are never written to disk). For an agent, the resume line is placed
+at the prompt — pressing it is your call.
 
 **Reading output** — syntax highlighting, `git diff` in colour (`Space g`),
 Markdown rendered in place (`Space m`), images (Kitty graphics and Sixel),
@@ -187,9 +191,9 @@ layers are platform-independent — but the window decoration, IME, and
 `--install` are written against Windows APIs, and **nobody has run it there
 yet**. Treat those platforms as untested rather than supported.
 
-Not done yet: cross-line syntax highlighting, remote/SSH domains, session
-restore across a reboot. Ligatures work but could not be verified here (no
-ligature font on the development machine; `tsg --diagnose` will tell you).
+Not done yet: cross-line syntax highlighting, remote/SSH domains. Ligatures
+work but could not be verified here (no ligature font on the development
+machine; `tsg --diagnose` will tell you).
 
 ## Security
 
