@@ -159,6 +159,13 @@ pub enum MuxRequest {
     Broadcast,
     /// いまの場所の `git diff` を色付きで開く（`Space g`）。
     GitDiff,
+    /// 差分のかたまりを 1 つ採用する / 取り消す（`Space G` / `Space R`）。
+    ///
+    /// **見て終わりの差分は、結局もう一度どこかで同じ判断をすることになる。**
+    /// エージェントが書いたものを、その場で採否できるようにする。
+    ApplyHunk {
+        stage: bool,
+    },
     /// いまのコマンドの出力を畳む / 開く（`Space o`）。
     ToggleFold,
     /// 画面の出力を全部畳む / 全部開く（`Space O`）。
@@ -493,6 +500,22 @@ pub const REGISTRY: &[CommandSpec] = &[
         in_palette: true,
     },
     CommandSpec {
+        id: "git.stage_hunk",
+        title: "このかたまりを採用する（次のコミットへ）",
+        title_en: "Stage this hunk",
+        keys: &["Space G"],
+        mouse: MousePath::Menu("ファイル"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "git.revert_hunk",
+        title: "このかたまりを取り消す（2 回押す）",
+        title_en: "Revert this hunk (press twice)",
+        keys: &["Space R"],
+        mouse: MousePath::Menu("ファイル"),
+        in_palette: true,
+    },
+    CommandSpec {
         id: "agent.broadcast",
         title: "見えているペイン全部へ同じ指示を投げる",
         title_en: "Send one prompt to every visible pane",
@@ -520,7 +543,7 @@ pub const REGISTRY: &[CommandSpec] = &[
         id: "hints",
         title: "画面のパス・URL にラベルを振って開く",
         title_en: "Label the paths and URLs on screen, then jump",
-        keys: &["Space l"],
+        keys: &["Space t"],
         mouse: MousePath::Menu("ファイル"),
         in_palette: true,
     },

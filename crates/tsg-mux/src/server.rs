@@ -19,7 +19,6 @@ use std::thread;
 
 use anyhow::{Context, Result};
 use interprocess::TryClone;
-use interprocess::local_socket::traits::ListenerExt as _;
 
 use crate::endpoint::Endpoint;
 use tsg_pty::{CommandBuilder, PtySession};
@@ -49,6 +48,12 @@ enum Event {
     PtyExit {
         pane: u32,
     },
+    /// 時計。**外で書き換えられたファイルに気づく**ためだけにある。
+    ///
+    /// 監視の仕掛けを入れる手もあるが、OS ごとに癖があり、
+    /// 編集中のファイル 1 つ 2 つを見るためには重い。1 秒に 1 回
+    /// 更新時刻を見れば足りる。
+    Tick,
     Stop,
 }
 
@@ -101,6 +106,11 @@ struct ServerFile {
     title: String,
     text: String,
     dirty: bool,
+    /// 最後に読んだ / 書いたときのディスク側の状態（更新時刻と大きさ）。
+    ///
+    /// **エージェントは開いている裏でファイルを書き換える。** 気づかないと、
+    /// 古い中身を見ながら直して、保存した瞬間に相手の仕事を消す。
+    stamp: Option<(std::time::SystemTime, u64)>,
 }
 
 struct State {
@@ -288,6 +298,61 @@ impl State {
         };
         let _ = p.writer.write_all(line.as_bytes());
         let _ = p.writer.flush();
+    }
+
+    /// 外で書き換えられたファイルを読み直す。
+    ///
+    /// **エージェントは開いている裏でファイルを書き換える。** 気づかないと、
+    /// 古い中身を見ながら直して、保存した瞬間に相手の仕事を消す。
+    ///
+    /// 直しかけ（`dirty`）のものは読み直さない。**打ったものを黙って
+    /// 捨てない。** 代わりに「外で変わった」と知らせて、どうするかは人が決める。
+    fn reload_changed_files(&mut self) {
+        let mut reloaded: Vec<(u32, String, String, String)> = Vec::new();
+        let mut clashed: Vec<u32> = Vec::new();
+        for p in self.panes.values_mut() {
+            let Some(f) = p.file.as_mut() else {
+                continue;
+            };
+            let Some(path) = f.path.clone() else {
+                continue;
+            };
+            let Some(now) = disk_stamp(&path) else {
+                continue; // 消された。開いている中身はそのまま残す
+            };
+            if f.stamp == Some(now) {
+                continue;
+            }
+            f.stamp = Some(now);
+            if f.dirty {
+                clashed.push(p.id);
+                continue;
+            }
+            let Ok(text) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            if text == f.text {
+                continue; // 触られただけで中身は同じ
+            }
+            f.text = text.clone();
+            reloaded.push((p.id, path.display().to_string(), f.title.clone(), text));
+        }
+        for (pane, path, title, text) in reloaded {
+            self.broadcast(&ServerMsg::FileState {
+                pane,
+                path: Some(path),
+                title,
+                text,
+                dirty: false,
+            });
+        }
+        for pane in clashed {
+            self.broadcast(&ServerMsg::Error {
+                message: format!(
+                    "ペイン {pane}: 開いているファイルが外で書き換えられました（直しかけなので読み直していません）"
+                ),
+            });
+        }
     }
 
     /// 組み直すための控えを置く。**画面の中身は書かない**（`restore.rs`）。
@@ -721,6 +786,7 @@ impl State {
                         title: title.clone(),
                         text: text.clone(),
                         dirty: false,
+                        stamp: disk_stamp(std::path::Path::new(&path)),
                     });
                 }
                 self.broadcast(&ServerMsg::FileState {
@@ -794,6 +860,8 @@ impl State {
                 match write_atomically(&path, &text) {
                     Ok(()) => {
                         f.dirty = false;
+                        // 自分で書いたぶんを「外で変わった」と誤らない。
+                        f.stamp = disk_stamp(&path);
                         let path = path.display().to_string();
                         self.broadcast(&ServerMsg::FileSaved { pane, path });
                     }
@@ -821,6 +889,7 @@ impl State {
                         title: title.clone(),
                         text: text.clone(),
                         dirty: true,
+                        stamp: None,
                     });
                 }
                 if let Some(tab) = self.tab_of(pane) {
@@ -974,6 +1043,7 @@ impl State {
                 // 次の起動で開き直さない。**
                 self.shape_changed();
             }
+            Event::Tick => self.reload_changed_files(),
             Event::Stop => return false,
         }
         true
@@ -991,29 +1061,11 @@ pub struct ServerHandle {
 impl ServerHandle {
     /// 止める。**口も手放す**ので、同じ名前ですぐ開き直せる。
     ///
-    /// 受け側は `accept` で止まっていて、合図だけでは起きない。
-    /// 捨て玉を 1 本繋いで起こす。繋がらないならもう終わっている。
+    /// 受け側は待たない受け方をしているので、合図を立てれば次に目を開けた
+    /// ときに気づく（`accept_loop`）。
     pub fn shutdown(&self) {
         self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = self.tx.send(Event::Stop);
-
-        // **1 回では起こせないことがある。** 込み合っていると接続そのものが
-        // 弾かれる（Windows なら「使用中」）。1 本も通らないまま諦めると、
-        // 受け側は止まったまま口を握り続ける。
-        //
-        // 呼んだ側を待たせない。止めたことはもう伝わっていて、
-        // ここから先は後片付けでしかない。
-        let session = self.session.clone();
-        let _ = thread::Builder::new()
-            .name("tsg-mux-wake".into())
-            .spawn(move || {
-                for _ in 0..200 {
-                    if Endpoint::for_session(&session).is_ok_and(|e| e.connect().is_ok()) {
-                        return;
-                    }
-                    thread::sleep(std::time::Duration::from_millis(25));
-                }
-            });
     }
 }
 
@@ -1022,23 +1074,43 @@ impl ServerHandle {
 // 繋ぎに来て「接続できない」で落ちるのを避けるため（実際に踏んだ）。
 // 開くところまでは呼び出し側の同期処理にして、accept ループだけを別スレッドへ渡す。
 
-/// 接続を受け続ける。**止まれと言われたら、次の 1 本で抜ける。**
+/// 接続を受け続ける。**止まれと言われたら、待たずに抜ける。**
 ///
-/// `accept` は繋がるまで返らない。合図だけでは抜けられないので、
-/// 止める側が捨て玉を 1 本繋いで起こす（`ServerHandle::shutdown`）。
-/// ここで抜けないと口を握ったままになり、同じ名前で開き直せない。
+/// `accept` を塞いだまま待つと、止める合図に気づけない。気づかないと
+/// 口を握ったままになり、同じ名前で開き直せない（実測: 6 秒待っても
+/// 開けなかった）。捨て玉を繋いで起こす手もあるが、込み合っていると
+/// その接続自体が弾かれて、起こせないことがある。
+///
+/// **待たない受け方にして、合図を自分で見に行く。** 1 秒に 20 回
+/// 目を開けるだけなので、寝ている間の負担にはならない。
 fn accept_loop(
     listener: interprocess::local_socket::Listener,
     tx: Sender<Event>,
     stop: &std::sync::atomic::AtomicBool,
 ) {
+    use interprocess::local_socket::traits::Listener as _;
+    use interprocess::local_socket::ListenerNonblockingMode;
     use std::sync::atomic::Ordering;
+
+    // 受けるところだけ待たない。**繋がったあとの読み書きは今までどおり**
+    // （待たない読み書きにすると、全部の経路を書き換えることになる）。
+    let polling = listener
+        .set_nonblocking(ListenerNonblockingMode::Accept)
+        .is_ok();
+
     let mut next_id = 1u64;
-    for conn in listener.incoming() {
+    loop {
         if stop.load(Ordering::SeqCst) {
             break;
         }
-        let Ok(stream) = conn else { continue };
+        let stream = match listener.accept() {
+            Ok(s) => s,
+            Err(e) if polling && e.kind() == std::io::ErrorKind::WouldBlock => {
+                thread::sleep(std::time::Duration::from_millis(50));
+                continue;
+            }
+            Err(_) => continue,
+        };
         let Ok(write_half) = stream.try_clone() else {
             continue;
         };
@@ -1097,6 +1169,18 @@ fn setup(session: &str) -> Result<Setup> {
     thread::Builder::new()
         .name("tsg-mux-listener".into())
         .spawn(move || accept_loop(listener, t, &s))?;
+
+    // 時計。**外で書き換えられたファイルに気づく**ためだけにある。
+    // 送り先が消えたら終わる（サーバが止まったということ）。
+    let tick = tx.clone();
+    thread::Builder::new()
+        .name("tsg-mux-tick".into())
+        .spawn(move || {
+            while tick.send(Event::Tick).is_ok() {
+                thread::sleep(std::time::Duration::from_secs(1));
+            }
+        })?;
+
     Ok((tx, rx, endpoint, stop))
 }
 
@@ -1284,6 +1368,15 @@ fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// ディスク側の状態（更新時刻と大きさ）。読めなければ `None`。
+///
+/// **大きさも見る。** 更新時刻の粒度は環境で違い、同じ秒の中の
+/// 書き換えを取りこぼすことがある。
+fn disk_stamp(path: &std::path::Path) -> Option<(std::time::SystemTime, u64)> {
+    let m = std::fs::metadata(path).ok()?;
+    Some((m.modified().ok()?, m.len()))
 }
 
 fn home_dir() -> Option<String> {

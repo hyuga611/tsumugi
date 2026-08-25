@@ -132,6 +132,15 @@ struct App {
     cwd: Option<String>,
     /// `--cwd` を明示されたか（既定で入った場所と区別する）。
     cwd_given: bool,
+    /// 差分を取った場所。かたまりを当て直すときに同じ場所で走らせる。
+    diff_cwd: Option<String>,
+    /// 取り消し待ちのかたまり。**2 回押させる**ための控え。
+    pending_revert: Option<String>,
+    /// 次に届く差分で、最初のかたまりへカーソルを置く。
+    ///
+    /// **開いた瞬間に採否できる場所に居てほしい。** 1 行目はファイルの
+    /// 見出しで、そこでは `Space G` が効かない。
+    want_first_hunk: bool,
     command: Option<Vec<String>>,
 }
 
@@ -191,6 +200,9 @@ impl App {
             // 入っただけなのか。**組み直すかどうかがここで決まる**ので、
             // 既定が入ったのと言われたのを混ぜない。
             cwd_given: cli.cwd.is_some(),
+            diff_cwd: None,
+            pending_revert: None,
+            want_first_hunk: false,
             command: cli.command.clone(),
         }
     }
@@ -436,6 +448,10 @@ impl App {
             }
             MuxRequest::GitDiff => {
                 self.show_git_diff();
+                None
+            }
+            MuxRequest::ApplyHunk { stage } => {
+                self.apply_hunk(stage);
                 None
             }
             MuxRequest::Broadcast => {
@@ -1092,23 +1108,58 @@ impl App {
                     dirty,
                 } => {
                     let area = self.area();
+                    // 同じファイルが届いたのは**読み直し**（外で書き換えられた）。
+                    // 開き直しではないので、見ている場所を頭へ戻さない。
+                    let same = self
+                        .session
+                        .panes
+                        .get(&pane)
+                        .and_then(|v| v.file.as_ref())
+                        .is_some_and(|f| {
+                            f.path.as_deref() == path.as_deref().map(std::path::Path::new)
+                                && f.path.is_some()
+                        });
+                    let keep = same.then(|| (self.engine.cursor(), self.session.active));
                     let view = self
                         .session
                         .panes
                         .entry(pane)
                         .or_insert_with(|| PaneView::new(area.w, area.h));
+                    let top_before = view.top;
                     let mut file = tsg_modal::FileBuffer::from_text(&text, tsg_term::ambiguous());
                     file.path = path.as_deref().map(std::path::PathBuf::from);
                     file.dirty = dirty;
                     view.file = Some(file);
                     view.title = title.clone();
-                    view.top = 0;
+                    view.top = if same { top_before } else { 0 };
                     view.follow_tail = false;
                     // 開いた直後のカーソルは文書の頭。端末に居たときの位置を
                     // そのまま持ち込むと、`A` が思わぬ行に効く（実機で踏んだ）。
                     let buf = view.buffer();
-                    self.engine.set_cursor(Pos::default(), &buf);
-                    self.session.active = pane;
+                    match keep {
+                        // 読み直し。**短くなっていたら端で止める。**
+                        Some((at, active)) => {
+                            self.engine.set_cursor(tsg_buffer::clamp(&buf, at), &buf);
+                            self.session.active = active;
+                            self.status_msg = t!(
+                                format!("{title} を読み直しました（外で変わりました）"),
+                                format!("reloaded {title} (changed outside)")
+                            );
+                        }
+                        None => {
+                            // 差分なら最初のかたまりへ。1 行目は見出しで、
+                            // そこでは採否のキーが効かない。
+                            let at = if std::mem::take(&mut self.want_first_hunk) {
+                                text.lines()
+                                    .position(|l| l.starts_with("@@"))
+                                    .map_or(Pos::default(), |l| Pos::new(l, 0))
+                            } else {
+                                Pos::default()
+                            };
+                            self.engine.set_cursor(tsg_buffer::clamp(&buf, at), &buf);
+                            self.session.active = pane;
+                        }
+                    }
                     got = true;
                     self.status_msg =
                         t!(format!("{title} を開きました"), format!("opened {title}"));
@@ -2988,6 +3039,8 @@ impl App {
                 return;
             }
         };
+        self.diff_cwd = cwd;
+        self.want_first_hunk = true;
         let text = String::from_utf8_lossy(&out.stdout).to_string();
         if text.trim().is_empty() {
             self.status_msg = t!("変更はありません", "no changes").into();
@@ -3000,6 +3053,69 @@ impl App {
             title: "diff".to_string(),
             text,
         });
+    }
+
+    /// diff のかたまりを 1 つ、採用する / 取り消す。
+    ///
+    /// **エージェントが書いたものを、その場で採否できるようにする。**
+    /// 見て終わりの差分は、結局もう一度どこかで同じ判断をすることになる。
+    ///
+    /// `stage` なら `git apply --cached`（次のコミットへ入れる）。
+    /// そうでなければ `--reverse`（作業ツリーから取り消す）。
+    /// **取り消しは書いたものを消す**ので、2 回押させる。
+    fn apply_hunk(&mut self, stage: bool) {
+        let Some(view) = self.session.panes.get(&self.session.active) else {
+            return;
+        };
+        let Some(file) = view.file.as_ref() else {
+            self.status_msg = t!(
+                "差分の画面で使ってください（Space g）",
+                "use this on a diff view (Space g)"
+            )
+            .into();
+            return;
+        };
+        let text = file.text();
+        let line = self.engine.cursor().line;
+        let Some(patch) = hunk_at(&text, line) else {
+            self.status_msg = t!(
+                "かたまりの中にカーソルを置いてください",
+                "put the cursor inside a hunk"
+            )
+            .into();
+            return;
+        };
+
+        // 取り消しは 2 回。**1 回目は何をするかを見せるだけ。**
+        if !stage && self.pending_revert.as_deref() != Some(patch.as_str()) {
+            self.pending_revert = Some(patch.clone());
+            let head = patch.lines().nth(1).unwrap_or("").to_string();
+            self.status_msg = t!(
+                format!("もう一度押すと取り消します: {head}"),
+                format!("press again to revert: {head}")
+            );
+            return;
+        }
+        self.pending_revert = None;
+
+        match apply_patch(self.diff_cwd.as_deref(), &patch, stage) {
+            Ok(()) => {
+                self.status_msg = if stage {
+                    t!("採用しました", "staged").into()
+                } else {
+                    t!("取り消しました", "reverted").into()
+                };
+                // 当てたぶんを画面へ反映する。**古い差分を見ながら
+                // 2 回当てない。**
+                self.show_git_diff();
+            }
+            Err(why) => {
+                self.status_msg = t!(
+                    format!("当てられません: {why}"),
+                    format!("could not apply: {why}")
+                );
+            }
+        }
     }
 
     /// 見えているペイン全部へ同じ文を投げる。
@@ -4582,6 +4698,94 @@ fn fold_label(buf: &dyn tsg_modal::Buffer, start: usize) -> String {
 /// ラベルでそれをやると、`crates` や `docs` のような**拡張子の無いフォルダに
 /// 振られず**、代わりに `10.0.26200.9168]` のような版番号に振られる。
 /// 開けるかどうかは、聞けば分かる。
+/// かたまりを 1 つ、git に当ててもらう。
+///
+/// `stage` なら次のコミットへ入れる（`--cached`）。そうでなければ
+/// 作業ツリーから取り消す（`--reverse`）。
+///
+/// `--unidiff-zero` は、前後の行が動いていても行番号のずれだけなら通すため。
+/// **差分を出してから当てるまでの間に、エージェントがもう一行足していることがある。**
+fn apply_patch(dir: Option<&str>, patch: &str, stage: bool) -> Result<(), String> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("apply");
+    if stage {
+        cmd.arg("--cached");
+    } else {
+        cmd.arg("--reverse");
+    }
+    cmd.args(["--unidiff-zero", "-"]);
+    if let Some(dir) = dir {
+        cmd.current_dir(dir);
+    }
+    cmd.stdin(std::process::Stdio::piped());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let out = cmd
+        .spawn()
+        .and_then(|mut c| {
+            use std::io::Write as _;
+            if let Some(mut w) = c.stdin.take() {
+                w.write_all(patch.as_bytes())?;
+            }
+            c.wait_with_output()
+        })
+        .map_err(|e| format!("git を実行できません: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let why = String::from_utf8_lossy(&out.stderr);
+    Err(why.lines().next().unwrap_or("").to_string())
+}
+
+/// diff の中から、その行を含む 1 かたまり（hunk）だけを取り出す。
+///
+/// **エージェントが書いたものを、かたまりごとに採否できるようにする**ための道具。
+/// `git apply` に食わせられる形にするので、ファイルの見出し（`diff --git` から
+/// `+++` まで）と、選んだ `@@` の 1 つだけを繋げて返す。
+///
+/// かたまりの外（見出しの上など）に居るときは `None`。**当てずっぽうで
+/// 隣のかたまりを当てない。**
+fn hunk_at(diff: &str, line: usize) -> Option<String> {
+    let lines: Vec<&str> = diff.lines().collect();
+    if line >= lines.len() {
+        return None;
+    }
+    // その行を含む `@@` の始まり。
+    let start = (0..=line).rev().find(|i| lines[*i].starts_with("@@"))?;
+    // 途中に次のファイルの見出しが挟まっていたら、そのかたまりの中ではない。
+    if (start..=line).any(|i| lines[i].starts_with("diff --git")) {
+        return None;
+    }
+    // 終わり。次の `@@` か次のファイルの手前まで。
+    let end = ((start + 1)..lines.len())
+        .find(|i| lines[*i].starts_with("@@") || lines[*i].starts_with("diff --git"))
+        .unwrap_or(lines.len());
+
+    // 見出し。`diff --git` から `+++` まで（`index` や `old mode` も含む）。
+    let head = (0..start)
+        .rev()
+        .find(|i| lines[*i].starts_with("diff --git"))?;
+    let head_end = ((head + 1)..start)
+        .find(|i| lines[*i].starts_with("+++"))
+        .map_or(start, |i| i + 1);
+
+    let mut out = String::new();
+    for l in &lines[head..head_end] {
+        out.push_str(l);
+        out.push('\n');
+    }
+    for l in &lines[start..end] {
+        out.push_str(l);
+        out.push('\n');
+    }
+    Some(out)
+}
+
 /// `/古い/新しい/フラグ` を割る。`\/` は区切りではなく `/` の字。
 ///
 /// **区切りを含む文字列を置けないと使えない。** パスを置き換えるのは
@@ -6013,6 +6217,119 @@ mod tests {
         );
         assert_eq!(open_kind("1234567890"), None, "数字だけをハッシュにしない");
         assert_eq!(open_kind("abc"), None, "3 桁ではハッシュと言えない");
+    }
+
+    /// 実際の `git diff` の形から、そのかたまりだけを取り出す。
+    #[test]
+    fn a_hunk_is_taken_with_its_file_header() {
+        let diff = "\
+diff --git a/f.txt b/f.txt
+index b64b08c..aec15aa 100644
+--- a/f.txt
++++ b/f.txt
+@@ -1,5 +1,5 @@
+ a
+-b
++B CHANGED
+ c
+@@ -15,6 +15,6 @@ n
+ o
+-r
++R CHANGED
+ s
+";
+        // 2 つ目のかたまりの中（`+R CHANGED` の行）
+        let got = hunk_at(diff, 12).expect("取り出せない");
+        assert!(
+            got.starts_with("diff --git a/f.txt b/f.txt\n"),
+            "見出しが無い"
+        );
+        assert!(
+            got.contains("@@ -15,6 +15,6 @@"),
+            "選んだかたまりが入っていない"
+        );
+        assert!(
+            !got.contains("+B CHANGED"),
+            "隣のかたまりまで持ってきている:\n{got}"
+        );
+    }
+
+    /// 見出しの上や、かたまりの外では**何も返さない**。
+    #[test]
+    fn outside_a_hunk_nothing_is_taken() {
+        let diff = "\
+diff --git a/f.txt b/f.txt
+--- a/f.txt
++++ b/f.txt
+@@ -1,2 +1,2 @@
+-a
++A
+";
+        assert!(hunk_at(diff, 0).is_none(), "見出しの上で拾っている");
+        assert!(hunk_at(diff, 999).is_none(), "行の外で拾っている");
+        assert!(hunk_at(diff, 4).is_some(), "かたまりの中で拾えない");
+    }
+
+    /// **取り出した形が、そのまま `git apply` に通る。**
+    ///
+    /// 形だけ合っていても git が受けなければ意味が無いので、
+    /// 本物のリポジトリを作って当ててみる。
+    #[test]
+    fn the_taken_hunk_is_something_git_accepts() {
+        let dir = std::env::temp_dir().join(format!("tsumugi-hunk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("作れない");
+        let at = dir.display().to_string();
+
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .output()
+        };
+        if git(&["init", "-q", "."]).is_err() {
+            eprintln!("git が無いので飛ばします");
+            return;
+        }
+        let _ = git(&["config", "user.email", "t@e.x"]);
+        let _ = git(&["config", "user.name", "t"]);
+        let body: String = ('a'..='t').map(|c| format!("{c}\n")).collect();
+        std::fs::write(dir.join("f.txt"), &body).expect("書けない");
+        let _ = git(&["add", "-A"]);
+        let _ = git(&["commit", "-qm", "init"]);
+
+        // 2 か所直す。**離れているので、かたまりが 2 つになる。**
+        let changed = body
+            .replace("b\n", "B CHANGED\n")
+            .replace("r\n", "R CHANGED\n");
+        std::fs::write(dir.join("f.txt"), &changed).expect("書けない");
+
+        let out = git(&["diff", "--color=never", "--no-ext-diff"]).expect("diff が取れない");
+        let diff = String::from_utf8_lossy(&out.stdout).to_string();
+        let hunks = diff.lines().filter(|l| l.starts_with("@@")).count();
+        assert_eq!(hunks, 2, "かたまりが 2 つになっていない:\n{diff}");
+
+        // 2 つ目のかたまりの中の行を選ぶ。
+        let line = diff
+            .lines()
+            .position(|l| l.starts_with("+R CHANGED"))
+            .expect("2 つ目が無い");
+        let patch = hunk_at(&diff, line).expect("取り出せない");
+
+        apply_patch(Some(&at), &patch, true).expect("git が受け付けない");
+
+        let staged = git(&["diff", "--cached"]).expect("取れない");
+        let staged = String::from_utf8_lossy(&staged.stdout);
+        assert!(
+            staged.contains("+R CHANGED"),
+            "選んだかたまりが入っていない"
+        );
+        assert!(
+            !staged.contains("+B CHANGED"),
+            "選んでいないかたまりまで入っている:\n{staged}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `s/古い/新しい/` を割る。

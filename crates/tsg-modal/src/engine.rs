@@ -743,6 +743,18 @@ impl Engine {
             'p' => MuxRequest::PrevTab,
             'd' => MuxRequest::Detach,
             'Q' => MuxRequest::Shutdown,
+            // 画面を読むための道具。**一覧に載っている以上、押せば効く。**
+            'g' => MuxRequest::GitDiff,
+            'G' => MuxRequest::ApplyHunk { stage: true },
+            'R' => MuxRequest::ApplyHunk { stage: false },
+            'b' => MuxRequest::Broadcast,
+            'o' => MuxRequest::ToggleFold,
+            'O' => MuxRequest::FoldAll(true),
+            'U' => MuxRequest::FoldAll(false),
+            'm' => MuxRequest::TogglePreview,
+            'f' => MuxRequest::PaneFiles,
+            'a' => MuxRequest::NextAgent,
+            't' => MuxRequest::Hints,
             // 配置モードから直接エディタを開く（`modal-spec.md` §9）
             'e' => return Some(Command::Palette("e ")),
             _ => return Some(Command::EnterNormal),
@@ -808,6 +820,8 @@ impl Engine {
             "fold.toggle" => Command::Mux(MuxRequest::ToggleFold),
             "agent.broadcast" => Command::Mux(MuxRequest::Broadcast),
             "git.diff" => Command::Mux(MuxRequest::GitDiff),
+            "git.stage_hunk" => Command::Mux(MuxRequest::ApplyHunk { stage: true }),
+            "git.revert_hunk" => Command::Mux(MuxRequest::ApplyHunk { stage: false }),
             "fold.all" => Command::Mux(MuxRequest::FoldAll(true)),
             "search.next" => Command::Move {
                 motion: Motion::SearchNext,
@@ -2546,5 +2560,58 @@ mod tests {
         );
 
         assert_eq!(a.yanked(), b.yanked());
+    }
+}
+
+#[cfg(test)]
+mod space_keys {
+    use super::*;
+
+    /// `Space` のあとに続くキーが、一覧に書いてある通りに効くか。
+    ///
+    /// **一覧に載っているのに効かないキーは、無いのと同じではなく質が悪い。**
+    /// 押した人は自分が間違えたと思う。
+    #[test]
+    fn every_space_key_in_the_list_actually_does_something() {
+        let missing: Vec<&str> = crate::command::REGISTRY
+            .iter()
+            .filter(|c| {
+                // **1 つでも効かないキーがあれば挙げる。** 「だいたい効く」は
+                // 押した人には効かないのと同じ。
+                c.keys
+                    .iter()
+                    .filter_map(|k| k.strip_prefix("Space ")?.chars().next())
+                    .any(|ch| {
+                        let mut e = Engine::new();
+                        e.mode = Mode::Layout;
+                        // 何も起きない = 通常モードへ戻るだけ
+                        matches!(e.resolve_layout(ch), Some(Command::EnterNormal))
+                    })
+            })
+            .map(|c| c.id)
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "Space のキーが効いていない: {missing:?}"
+        );
+    }
+
+    /// 同じキーを 2 つのコマンドが名乗っていないか。
+    ///
+    /// **これが今回の穴の作られ方だった。** `Space l` をペイン移動と
+    /// ラベルの両方が名乗っていて、先に読まれるほうしか効かず、
+    /// 一覧には両方載っていた。
+    #[test]
+    fn no_two_commands_claim_the_same_key() {
+        let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
+        let mut clashes: Vec<String> = Vec::new();
+        for c in crate::command::REGISTRY {
+            for k in c.keys {
+                if let Some(other) = seen.insert(k, c.id) {
+                    clashes.push(format!("{k}: {other} と {}", c.id));
+                }
+            }
+        }
+        assert!(clashes.is_empty(), "同じキーを名乗っている: {clashes:?}");
     }
 }
