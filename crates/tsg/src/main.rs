@@ -67,6 +67,8 @@ struct App {
     watch: reload::Watch,
     client: Option<Client>,
     session_name: String,
+    /// 使い方の画面をどこまで送ったか。低いウィンドウでも最後まで読める。
+    help_scroll: usize,
     session: Session,
     engine: Engine,
     clipboard: Option<arboard::Clipboard>,
@@ -119,6 +121,7 @@ impl App {
             renderer: None,
             client: None,
             session_name: cli.session.clone(),
+            help_scroll: 0,
             session: Session::default(),
             engine: Engine::new(),
             theme: cfg.theme,
@@ -1529,7 +1532,7 @@ impl App {
             (None, Some(n)) => format!(" ▶ {n} "),
             (None, None) => format!(" ● {} ", t!("記録", "rec")),
         };
-        vec![
+        let mut out = vec![
             (
                 format!(" ≡ {} ", t!("メニュー", "menu")),
                 StatusTarget::Palette,
@@ -1539,7 +1542,17 @@ impl App {
             // モードの帯もボタン。押すと入力 ⇄ 読むが切り替わる。
             // キーを覚えていない人が、モードを行き来する唯一の手段になる。
             (format!("  {}  ", self.engine.mode().label()), StatusTarget::Mode),
-        ]
+        ];
+        // ファイルを開いているあいだだけ、戻る道を常に出しておく。
+        // **ここが無いと帰れない。** `:q` も右クリックメニューも知らない人には、
+        // エディタになったペインが行き止まりに見える（実機で行き止まった）。
+        if self.active_view().is_some_and(|v| v.file.is_some()) {
+            out.push((
+                format!(" ✕ {} ", t!("端末へ戻る", "back to shell")),
+                StatusTarget::CloseFile,
+            ));
+        }
+        out
     }
 
     /// モードの色。帯・カーソル・区切り線で同じ色を使う。
@@ -1572,6 +1585,10 @@ impl App {
                     tsg_modal::Command::EnterInsert(tsg_modal::InsertAt::Here)
                 };
                 self.dispatch(cmd, event_loop);
+                return;
+            }
+            StatusTarget::CloseFile => {
+                self.invoke("file.close", event_loop);
                 return;
             }
             StatusTarget::Macro => {
@@ -1773,6 +1790,19 @@ impl App {
             return;
         }
 
+        if self.engine.help_visible() {
+            self.scroll_help(if lines < 0 { -3 } else { 3 });
+            return;
+        }
+
+        // 一覧が開いているあいだは、ホイールはその一覧を動かす。
+        // ここが無いと**後ろの本文が動くだけ**で、出ている一覧はびくともしない。
+        if self.palette.open || self.picker.open || self.menu.open {
+            let step = if lines < 0 { -1 } else { 1 };
+            let _ = self.move_overlay(step);
+            return;
+        }
+
         let (col, row) = self.cell_at(self.pointer);
 
         if self.mouse_goes_to_child() {
@@ -1817,6 +1847,23 @@ impl App {
 
     fn on_key(&mut self, event_loop: &ActiveEventLoop, key: Key, text: Option<String>) {
         self.update_view();
+
+        // 使い方を読んでいる最中の上下だけは、閉じずに送る。
+        // それ以外のキーは今までどおり閉じる（engine が決めている）。
+        if self.engine.help_visible() {
+            let step = match &key {
+                Key::Named(NamedKey::ArrowDown) => 1,
+                Key::Named(NamedKey::ArrowUp) => -1,
+                Key::Named(NamedKey::PageDown) => 8,
+                Key::Named(NamedKey::PageUp) => -8,
+                _ => 0,
+            };
+            if step != 0 {
+                self.scroll_help(step);
+                return;
+            }
+            self.help_scroll = 0;
+        }
 
         if self.palette.open || self.menu.open || self.picker.open {
             self.overlay_key(&key, text.as_deref(), event_loop);
@@ -1987,6 +2034,17 @@ impl App {
         }
     }
 
+    /// 使い方の画面を送る。行数は組み立ててから数えるので、必ず最後まで行ける。
+    fn scroll_help(&mut self, delta: isize) {
+        let avail = self.rows.saturating_sub(3);
+        let max = help_lines().len().saturating_sub(avail);
+        let next = (self.help_scroll as isize + delta).clamp(0, max as isize);
+        self.help_scroll = next as usize;
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
     fn move_overlay(&mut self, delta: isize) -> overlay::Action {
         if self.picker.open {
             return self.picker.move_by(delta);
@@ -2018,6 +2076,7 @@ impl App {
         let selection = self.engine.selection();
         let visible = self.session.visible_panes();
         let help = self.engine.help_visible();
+        let help_scroll = self.help_scroll;
         let cursor_engine = self.engine.cursor();
         let preedit = self.preedit.clone();
         let (cols, rows) = (self.cols, self.rows);
@@ -2029,7 +2088,7 @@ impl App {
             renderer.begin();
 
             if help {
-                draw_help(renderer, &th, cols, rows);
+                draw_help(renderer, &th, cols, rows, help_scroll);
             } else {
                 for id in &visible {
                     let Some(view) = self.session.panes.get(id) else {
@@ -2327,19 +2386,22 @@ impl App {
         if !self.menu.open {
             return;
         }
+        // 上に 1 行（タブ）、下に 1 行（ステータス）を空ける。
+        // 入り切らない分は切り捨てず、`fit` がたどれる形に詰める。
+        self.menu.fit(self.rows.saturating_sub(3));
         let (x, y) = self.menu.at;
         let (w, h) = (self.menu.width(), self.menu.height());
         // 画面からはみ出さない位置へ寄せる
         let x = x.min(self.cols.saturating_sub(w));
         // ステータス行に食い込ませない（最後の項目が押せなくなる）
         let y = y.min(self.rows.saturating_sub(h + 2));
-        let rows: Vec<(overlay::Row, bool)> = self
-            .menu
-            .rows()
+        let (start, view) = self.menu.view();
+        let rows: Vec<(overlay::Row, bool)> = view
             .iter()
             .enumerate()
-            .map(|(i, r)| (r.clone(), self.menu.selected == Some(i)))
+            .map(|(i, r)| (r.clone(), self.menu.selected == Some(start + i)))
             .collect();
+        let (above, below) = self.menu.hidden();
         self.menu.at = (x, y);
 
         let Some(r) = self.renderer.as_mut() else {
@@ -2370,6 +2432,14 @@ impl App {
                 }
             }
         }
+        // 隠れている分があることを見せる。**出ていない項目は無いのと同じ**なので、
+        // せめて「まだ続く」と分かる印を置く。
+        if above > 0 {
+            r.text(x as f32, y as f32, "▲", th.accent, true);
+        }
+        if below > 0 {
+            r.text(x as f32, (y + h).saturating_sub(1) as f32, "▼", th.accent, true);
+        }
     }
 
     /// コマンドパレット。
@@ -2380,8 +2450,9 @@ impl App {
         }
         let (x, y) = self.palette_origin();
         let w = self.palette_width();
-        let max_rows = self.rows.saturating_sub(y + 3).min(14);
-        let shown = self.palette.items().len().min(max_rows);
+        let max_rows = self.rows.saturating_sub(y + 3).min(16);
+        let total = self.palette.items().len();
+        let shown = total.min(max_rows);
         let query = format!(": {}", self.palette.query);
         let q = self.palette.query.trim_start();
         let hint = if self.pending_pipe.is_some() {
@@ -2394,21 +2465,21 @@ impl App {
         } else {
             t!("一致するものがありません", "nothing matches").to_string()
         };
-        let rows: Vec<(String, String, bool)> = self
-            .palette
-            .items()
+        // 選んでいる項目が窓の中に来るように寄せてから切り取る。
+        let selected = self.palette.selected;
+        let (start, view) = self.palette.view(shown);
+        let rows: Vec<(String, String, bool)> = view
             .iter()
-            .take(shown)
             .enumerate()
             .map(|(i, it)| {
                 (
                     it.title.to_string(),
                     it.keys.clone(),
-                    i == self.palette.selected,
+                    start + i == selected,
                 )
             })
             .collect();
-        let total = self.palette.items().len();
+        let below = total.saturating_sub(start + shown);
 
         let Some(r) = self.renderer.as_mut() else {
             return;
@@ -2437,9 +2508,21 @@ impl App {
                 r.text((x + w).saturating_sub(kw + 1) as f32, ry, keys, th.dim, true);
             }
         }
+        // 上下に隠れている件数。**「ほか N 件」だけだと下に降りられると思えない**ので、
+        // いま何番目を見ているかも出す。
         if total > shown {
-            let more = t!(format!("ほか {} 件", total - shown), format!("{} more", total - shown));
+            let more = t!(
+                format!("{} / {} 件（↑↓ でたどれます）", selected + 1, total),
+                format!("{} of {} (use ↑↓)", selected + 1, total)
+            );
             r.text((x + 2) as f32, (y + shown + 1) as f32, &more, th.dim, true);
+            // 印は本文の左（x, x+1）に置く。題名は x+2 から始まるので重ならない。
+            if start > 0 {
+                r.text(x as f32, (y + 1) as f32, "▲", th.accent, true);
+            }
+            if below > 0 {
+                r.text(x as f32, (y + shown) as f32, "▼", th.accent, true);
+            }
         }
         // 使い方の 1 行。**一覧を出したのに動かし方が分からない**を作らない。
         let foot = t!(
@@ -2457,17 +2540,17 @@ impl App {
         }
         let (x, y) = self.palette_origin();
         let w = self.palette_width();
-        let max_rows = self.rows.saturating_sub(y + 3).min(14);
-        let shown = self.picker.items.len().min(max_rows);
+        let max_rows = self.rows.saturating_sub(y + 3).min(16);
+        let total = self.picker.items.len();
+        let shown = total.min(max_rows);
         let title = self.picker.title.clone();
         let here = self.session_name.clone();
-        let rows: Vec<(String, bool, bool)> = self
-            .picker
-            .items
+        let selected = self.picker.selected;
+        let (start, view) = self.picker.view(shown);
+        let rows: Vec<(String, bool, bool)> = view
             .iter()
-            .take(shown)
             .enumerate()
-            .map(|(i, name)| (name.clone(), i == self.picker.selected, *name == here))
+            .map(|(i, name)| (name.clone(), start + i == selected, *name == here))
             .collect();
 
         let Some(r) = self.renderer.as_mut() else {
@@ -2555,6 +2638,9 @@ impl App {
                 }
                 StatusTarget::Macro if recording => {
                     renderer.text(x as f32, status_row, label, th.rec_on, true);
+                }
+                StatusTarget::CloseFile => {
+                    renderer.text(x as f32, status_row, label, th.accent, true);
                 }
                 _ => renderer.text(x as f32, status_row, label, th.status_fg, true),
             }
@@ -2660,6 +2746,11 @@ impl App {
         };
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
+        }
+        // まだ無ければ雛形を置いてから開く。**空のファイルが出てくると、
+        // 何が書けるのか分からないまま行き止まる**（実機で行き止まった）。
+        if !path.exists() {
+            let _ = std::fs::write(&path, config::template());
         }
         self.open_file(&path.to_string_lossy());
     }
@@ -2989,6 +3080,8 @@ enum StatusTarget {
     Macro,
     /// 入力の所有権を取り返す
     Ownership,
+    /// エディタを閉じて端末へ戻る
+    CloseFile,
 }
 
 /// ボタンの並びから当たりを引く。列の計算を描画と共有するのが要点。
@@ -3063,47 +3156,27 @@ fn truncate_width(s: &str, max: usize) -> String {
 /// **キーの一覧から書かない。** 初めて開いた人が知りたいのは
 /// 「マウスで何ができるか」と「モードとは何か」で、キーはその後でいい。
 /// 全部の一覧はコマンドパレットが持っているので、ここでは代表だけ出す。
-fn draw_help(renderer: &mut Renderer, th: &Theme, cols: usize, rows: usize) {
-    let (title, body, note, panel) = (th.help_title, th.help_body, th.help_note, th.help_bg);
+/// 使い方の 1 行。**先に組み立ててから窓に切る**ので、入り切らない行が
+/// 黙って消えることがない。
+enum HelpLine {
+    Title(&'static str),
+    Note(&'static str),
+    Pair(&'static str, &'static str),
+    Blank,
+}
 
-    renderer.rect(0.0, 0.0, cols as f32, rows as f32, panel);
-
-    let x = 4.0;
-    let mut row = 1.0f32;
-    let line = |renderer: &mut Renderer, row: &mut f32, text: &str, color: [f32; 4]| {
-        if (*row as usize) < rows.saturating_sub(1) {
-            renderer.text(x, *row, text, color, true);
-        }
-        *row += 1.0;
-    };
-    // 「見出し / 説明」の 2 段組。列を固定すると読む目が迷わない。
-    let col2 = (cols / 3).clamp(18, 30);
-    let pair = |renderer: &mut Renderer, row: &mut f32, a: &str, b: &str| {
-        if (*row as usize) < rows.saturating_sub(1) {
-            renderer.text(x + 2.0, *row, a, body, true);
-            renderer.text(x + 2.0 + col2 as f32, *row, b, note, true);
-        }
-        *row += 1.0;
-    };
-
-    line(renderer, &mut row, "tsumugi", title);
-    line(
-        renderer,
-        &mut row,
-        t!(
+/// 使い方の中身。マウスでできることから始める。
+fn help_lines() -> Vec<HelpLine> {
+    use HelpLine::{Blank, Note, Pair, Title};
+    let mut v = vec![
+        Title("tsumugi"),
+        Note(t!(
             "ターミナルの画面を、そのまま読んで・選んで・編集できます",
             "read, select and edit the terminal screen itself"
-        ),
-        note,
-    );
-    row += 1.0;
-
-    line(
-        renderer,
-        &mut row,
-        t!("■ マウスだけで使えます", "■ The mouse is enough"),
-        title,
-    );
+        )),
+        Blank,
+        Title(t!("■ マウスだけで使えます", "■ The mouse is enough")),
+    ];
     for (a, b) in [
         (
             t!("クリック", "click"),
@@ -3138,16 +3211,10 @@ fn draw_help(renderer: &mut Renderer, th: &Theme, cols: usize, rows: usize) {
             t!("押すと 入力 ⇄ 読む が切り替わる", "click to toggle typing / reading"),
         ),
     ] {
-        pair(renderer, &mut row, a, b);
+        v.push(Pair(a, b));
     }
-    row += 1.0;
-
-    line(
-        renderer,
-        &mut row,
-        t!("■ 2 つのモードがあります", "■ Two modes"),
-        title,
-    );
+    v.push(Blank);
+    v.push(Title(t!("■ 2 つのモードがあります", "■ Two modes")));
     for (a, b) in [
         (
             t!("入力", "typing"),
@@ -3166,16 +3233,21 @@ fn draw_help(renderer: &mut Renderer, th: &Theme, cols: usize, rows: usize) {
             "",
         ),
     ] {
-        pair(renderer, &mut row, a, b);
+        v.push(Pair(a, b));
     }
-    row += 1.0;
-
-    line(
-        renderer,
-        &mut row,
-        t!("■ キーで速くしたくなったら", "■ When you want to go faster"),
-        title,
-    );
+    v.push(Blank);
+    v.push(Title(t!("■ ファイルを開いたら", "■ Once a file is open")));
+    for (a, b) in [
+        (
+            t!("下の ✕ 端末へ戻る", "the ✕ below"),
+            t!("エディタを閉じて、元のシェルへ戻る", "close the editor and go back to the shell"),
+        ),
+        (":w  /  :q", t!("保存 / 端末へ戻る", "save / back to the shell")),
+    ] {
+        v.push(Pair(a, b));
+    }
+    v.push(Blank);
+    v.push(Title(t!("■ キーで速くしたくなったら", "■ When you want to go faster")));
     for (a, b) in [
         ("j  k", t!("下 / 上へ", "down / up")),
         ("V  →  y", t!("行を選んでコピー", "select a line, then copy")),
@@ -3185,28 +3257,57 @@ fn draw_help(renderer: &mut Renderer, th: &Theme, cols: usize, rows: usize) {
         ("Space", t!("画面を分割・切り替え", "split and switch panes")),
         ("F1", t!("この画面", "this screen")),
     ] {
-        pair(renderer, &mut row, a, b);
+        v.push(Pair(a, b));
     }
-    row += 1.0;
+    v.push(Blank);
+    v.push(Note(t!(
+        "ウィンドウを閉じてもシェルは死にません。開き直せば続きから使えます。",
+        "closing the window does not kill your shells; reopen to continue"
+    )));
+    v
+}
 
-    line(
-        renderer,
-        &mut row,
+/// 使い方。`scroll` 行目から、入るだけ描く。
+///
+/// **最後の 1 行（閉じ方）は必ず出す。** ここが切れると、開いた人が
+/// 閉じ方を知らないまま取り残される（低いウィンドウで実際に切れていた）。
+fn draw_help(renderer: &mut Renderer, th: &Theme, cols: usize, rows: usize, scroll: usize) {
+    let (title, body, note, panel) = (th.help_title, th.help_body, th.help_note, th.help_bg);
+    renderer.rect(0.0, 0.0, cols as f32, rows as f32, panel);
+
+    let lines = help_lines();
+    let x = 4.0;
+    let col2 = (cols / 3).clamp(18, 30) as f32;
+    // 上下に 1 行ずつ余白、最下行は閉じ方に使う。
+    let avail = rows.saturating_sub(3);
+    let scroll = scroll.min(lines.len().saturating_sub(avail));
+
+    for (i, l) in lines.iter().skip(scroll).take(avail).enumerate() {
+        let ry = (i + 1) as f32;
+        match l {
+            HelpLine::Title(t) => renderer.text(x, ry, t, title, true),
+            HelpLine::Note(t) => renderer.text(x, ry, t, note, true),
+            HelpLine::Pair(a, b) => {
+                renderer.text(x + 2.0, ry, a, body, true);
+                renderer.text(x + 2.0 + col2, ry, b, note, true);
+            }
+            HelpLine::Blank => {}
+        }
+    }
+
+    let rest = lines.len().saturating_sub(scroll + avail);
+    let foot = if rest > 0 || scroll > 0 {
         t!(
-            "ウィンドウを閉じてもシェルは死にません。開き直せば続きから使えます。",
-            "closing the window does not kill your shells; reopen to continue"
-        ),
-        note,
-    );
-    line(
-        renderer,
-        &mut row,
+            format!("↑↓ でスクロール（あと {rest} 行） · どれかキーを押す / クリックすると閉じます"),
+            format!("↑↓ to scroll ({rest} more) · press any key or click to close")
+        )
+    } else {
         t!(
-            "どれかキーを押す / クリックすると閉じます",
-            "press any key or click to close"
-        ),
-        note,
-    );
+            "どれかキーを押す / クリックすると閉じます".to_string(),
+            "press any key or click to close".to_string()
+        )
+    };
+    renderer.text(x, rows.saturating_sub(1) as f32, &foot, note, true);
 }
 
 // ---------------------------------------------------------------------------

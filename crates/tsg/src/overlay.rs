@@ -66,6 +66,22 @@ pub enum Action {
     None,
 }
 
+/// 選んでいる項目が窓の外へ出ないように、見せ始めの位置を寄せる。
+///
+/// **一覧は必ずここを通す。** M8 まで、パレットは頭から 14 件を切り取って
+/// 出すだけだった。↓ で 15 件目へ動くと選択が画面の外へ消え、Enter が
+/// 何を実行するのか分からなくなる（実機で踏んだ）。
+fn scroll_into_view(offset: &mut usize, selected: usize, height: usize) {
+    if height == 0 {
+        return;
+    }
+    if selected < *offset {
+        *offset = selected;
+    } else if selected >= *offset + height {
+        *offset = selected + 1 - height;
+    }
+}
+
 // ---------------------------------------------------------------------------
 // コマンドパレット
 // ---------------------------------------------------------------------------
@@ -75,6 +91,8 @@ pub struct Palette {
     pub open: bool,
     pub query: String,
     pub selected: usize,
+    /// 見せ始めの位置。`view()` が選択に合わせて寄せる。
+    offset: usize,
     items: Vec<Item>,
 }
 
@@ -83,7 +101,15 @@ impl Palette {
         self.open = true;
         self.query.clear();
         self.selected = 0;
+        self.offset = 0;
         self.refresh();
+    }
+
+    /// 高さ `height` の窓に収まる範囲。選んでいる項目は必ずこの中に入る。
+    pub fn view(&mut self, height: usize) -> (usize, &[Item]) {
+        scroll_into_view(&mut self.offset, self.selected, height);
+        let end = (self.offset + height).min(self.items.len());
+        (self.offset, &self.items[self.offset.min(end)..end])
     }
 
     pub fn hide(&mut self) {
@@ -113,11 +139,13 @@ impl Palette {
             .map(Item::of)
             .collect();
         self.selected = self.selected.min(self.items.len().saturating_sub(1));
+        self.offset = self.offset.min(self.selected);
     }
 
     pub fn push(&mut self, c: char) -> Action {
         self.query.push(c);
         self.selected = 0;
+        self.offset = 0;
         self.refresh();
         Action::Redraw
     }
@@ -127,6 +155,7 @@ impl Palette {
             return Action::Close;
         }
         self.selected = 0;
+        self.offset = 0;
         self.refresh();
         Action::Redraw
     }
@@ -147,9 +176,9 @@ impl Palette {
         }
     }
 
-    /// 一覧のどの行がクリックされたか。`row` は一覧の先頭を 0 とした行。
+    /// 一覧のどの行がクリックされたか。`row` は**見えている**先頭を 0 とした行。
     pub fn click(&mut self, row: usize) -> Action {
-        match self.items.get(row) {
+        match self.items.get(self.offset + row) {
             Some(item) => Action::Run(item.id),
             None => Action::None,
         }
@@ -173,6 +202,10 @@ pub struct Menu {
     pub at: (usize, usize),
     pub selected: Option<usize>,
     rows: Vec<Row>,
+    /// 見せ始めの行。窓に入り切らないときだけ 0 より大きくなる。
+    offset: usize,
+    /// 実際に描く行数。`fit()` が窓の高さから決める。
+    view_h: usize,
 }
 
 impl Menu {
@@ -208,9 +241,40 @@ impl Menu {
         }));
         self.at = at;
         self.selected = None;
+        self.offset = 0;
+        self.view_h = self.rows.len();
         self.open = true;
     }
 
+    /// 窓に入る高さへ詰める。**入り切らない分は切り捨てず、たどれるようにする。**
+    ///
+    /// 以前は縦に入らないと下がそのまま画面外へ出ていた。項目が 29 行あるので、
+    /// 少し低いウィンドウでは「セッション」と「すべてのコマンド…」に手が届かなかった。
+    pub fn fit(&mut self, max_h: usize) {
+        self.view_h = self.rows.len().min(max_h.max(1));
+        if let Some(sel) = self.selected {
+            scroll_into_view(&mut self.offset, sel, self.view_h);
+        }
+        let max_off = self.rows.len().saturating_sub(self.view_h);
+        self.offset = self.offset.min(max_off);
+    }
+
+    /// 見えている行（`offset` からの `view_h` 行）。
+    pub fn view(&self) -> (usize, &[Row]) {
+        let end = (self.offset + self.view_h).min(self.rows.len());
+        (self.offset, &self.rows[self.offset.min(end)..end])
+    }
+
+    /// 上 / 下に隠れている行数。
+    pub fn hidden(&self) -> (usize, usize) {
+        (
+            self.offset,
+            self.rows.len().saturating_sub(self.offset + self.view_h),
+        )
+    }
+
+    /// 全部の行（見えていない分も含む）。テストと数え上げ用。
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn rows(&self) -> &[Row] {
         &self.rows
     }
@@ -240,15 +304,20 @@ impl Menu {
             .max(24)
     }
 
+    /// 描く高さ。`fit()` を通したあとは窓に入る高さ。
     pub fn height(&self) -> usize {
-        self.rows.len()
+        if self.view_h == 0 {
+            self.rows.len()
+        } else {
+            self.view_h
+        }
     }
 
-    /// 画面座標がメニューの何行目か。外なら `None`。
+    /// 画面座標がメニューの何行目か（一覧の先頭を 0 とする）。外なら `None`。
     pub fn row_at(&self, col: usize, row: usize) -> Option<usize> {
         let (x, y) = self.at;
         let inside = col >= x && col < x + self.width() && row >= y && row < y + self.height();
-        inside.then(|| row - y)
+        inside.then(|| self.offset + (row - y))
     }
 
     pub fn hover(&mut self, col: usize, row: usize) -> Action {
@@ -285,10 +354,27 @@ impl Menu {
             i = (i + delta).rem_euclid(n);
             if matches!(self.rows[i as usize], Row::Item(_)) {
                 self.selected = Some(i as usize);
+                scroll_into_view(&mut self.offset, i as usize, self.view_h);
+                self.snap_header();
                 return Action::Redraw;
             }
         }
         Action::None
+    }
+
+    /// 先頭が見出しの直下なら、見出しごと見せる。
+    /// 一番上の項目を選んだときに「編集」だけ切れて見えるのを避ける。
+    fn snap_header(&mut self) {
+        if self.offset == 0 || self.view_h == 0 {
+            return;
+        }
+        if !matches!(self.rows.get(self.offset - 1), Some(Row::Header(_))) {
+            return;
+        }
+        let sel = self.selected.unwrap_or(self.offset);
+        if sel < self.offset - 1 + self.view_h {
+            self.offset -= 1;
+        }
     }
 
     /// 今選んでいる項目の id。
@@ -311,6 +397,7 @@ pub struct Picker {
     pub title: String,
     pub items: Vec<String>,
     pub selected: usize,
+    offset: usize,
 }
 
 impl Picker {
@@ -318,7 +405,15 @@ impl Picker {
         self.title = title.to_string();
         self.items = items;
         self.selected = 0;
+        self.offset = 0;
         self.open = true;
+    }
+
+    /// 高さ `height` の窓に収まる範囲。
+    pub fn view(&mut self, height: usize) -> (usize, &[String]) {
+        scroll_into_view(&mut self.offset, self.selected, height);
+        let end = (self.offset + height).min(self.items.len());
+        (self.offset, &self.items[self.offset.min(end)..end])
     }
 
     pub fn hide(&mut self) {
@@ -341,9 +436,9 @@ impl Picker {
         }
     }
 
-    /// 一覧の何行目か（先頭を 0 とする）。外なら閉じる。
+    /// 一覧の何行目か（**見えている**先頭を 0 とする）。外なら閉じる。
     pub fn click(&mut self, row: usize) -> Action {
-        match self.items.get(row) {
+        match self.items.get(self.offset + row) {
             Some(name) => Action::Pick(name.clone()),
             None => Action::Close,
         }
@@ -516,5 +611,101 @@ mod tests {
             .max()
             .unwrap();
         assert!(m.width() > widest, "題名が枠からはみ出す");
+    }
+
+    // -- 窓に入り切らないときの回帰 -----------------------------------------
+    //
+    // M8 まで、どの一覧も「頭から N 件を切り取る」だけだった。↓ で N 件目より
+    // 下へ動くと選択が画面の外へ消え、Enter が何を実行するのか分からなくなる。
+
+    #[test]
+    fn the_palette_keeps_the_selection_inside_the_window() {
+        let mut p = Palette::default();
+        p.show();
+        let h = 5;
+        for _ in 0..20 {
+            p.move_by(1);
+            let sel = p.selected;
+            let (start, view) = p.view(h);
+            assert!(view.len() <= h);
+            assert!(
+                sel >= start && sel < start + view.len(),
+                "選んだ {sel} 件目が窓 {start}..{} の外へ出た",
+                start + view.len()
+            );
+        }
+    }
+
+    #[test]
+    fn a_palette_click_lands_on_the_row_you_can_see() {
+        let mut p = Palette::default();
+        p.show();
+        let h = 5;
+        for _ in 0..8 {
+            p.move_by(1);
+        }
+        let (start, view) = p.view(h);
+        let want = view[1].id;
+        assert!(start > 0, "この時点では窓は動いているはず");
+        assert_eq!(p.click(1), Action::Run(want), "見えている行と実行が食い違う");
+    }
+
+    #[test]
+    fn the_picker_keeps_the_selection_inside_the_window() {
+        let mut p = Picker::default();
+        p.show("s", (0..30).map(|i| format!("s{i}")).collect());
+        for _ in 0..25 {
+            p.move_by(1);
+            let sel = p.selected;
+            let (start, view) = p.view(6);
+            assert!(sel >= start && sel < start + view.len(), "選択が窓の外");
+        }
+        p.move_by(-1);
+        let sel = p.selected;
+        let (start, view) = p.view(6);
+        assert_eq!(view[sel - start], format!("s{sel}"));
+    }
+
+    #[test]
+    fn every_menu_item_is_reachable_in_a_short_window() {
+        let mut m = Menu::default();
+        m.show((0, 0), true);
+        let total = m.rows().len();
+        m.fit(6);
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..total * 2 {
+            m.step(1);
+            let sel = m.selected.unwrap();
+            let (start, view) = m.view();
+            assert!(
+                sel >= start && sel < start + view.len(),
+                "選んだ行が見えていない"
+            );
+            seen.insert(sel);
+        }
+        let items = m
+            .rows()
+            .iter()
+            .filter(|r| matches!(r, Row::Item(_)))
+            .count();
+        assert_eq!(seen.len(), items, "たどり着けない項目がある");
+    }
+
+    #[test]
+    fn a_menu_click_lands_on_the_row_you_can_see_after_scrolling() {
+        let mut m = Menu::default();
+        m.show((0, 2), true);
+        m.fit(6);
+        for _ in 0..10 {
+            m.step(1);
+        }
+        let (start, view) = m.view();
+        assert!(start > 0);
+        // 画面の 3 行目（y=2 の 1 つ下）を押したら、そこに見えている項目が動く
+        let want = match &view[1] {
+            Row::Item(i) => i.id,
+            Row::Header(_) => unreachable!("見出しの直後は項目"),
+        };
+        assert_eq!(m.click(2, 3), Action::Run(want));
     }
 }

@@ -126,6 +126,58 @@ pub fn path() -> Option<PathBuf> {
     Some(base?.join("tsumugi").join("config.toml"))
 }
 
+/// まだ設定ファイルが無いときに置く雛形。
+///
+/// **空のファイルを開いても何も分からない。** 何が書けて、いまの既定が何かを
+/// その場で読めるようにするために、すべてコメントで並べておく。
+/// 全部コメントなので、読み直しても既定のままで、消しても壊れない。
+pub fn template() -> String {
+    let d = Config::default();
+    format!(
+        r##"# tsumugi の設定。すべて任意です。
+# 行頭の # を外すと効きます。保存した瞬間に反映されます（言語だけは次の起動から）。
+# 書けるものの一覧は tsg --help にもあります。
+
+[window]
+# 背景の不透明度。1.0 で不透明。
+# opacity = {opacity}
+# 背景をぼかす（Windows 11 / macOS）。
+# blur = {blur}
+
+[font]
+# 文字の大きさ（px）。Ctrl＋ホイールでも変えられます。
+# size = {size}
+# -> や != を 1 つの字形に組む（字体が持っていれば）。
+# ligatures = {lig}
+
+[ui]
+# 表示の言語。"ja" / "en" / "auto"（既定は OS に合わせる）。
+# lang = "auto"
+
+[scrollback]
+# さかのぼって読める行数。
+# lines = {sb}
+
+[theme]
+# 配色の名前。{themes}
+# name = "{theme}"
+
+# 個別の色だけ変えたいとき。#rrggbb / #rrggbbaa / #rgb。
+# [theme.colors]
+# background = "#11131a"
+# foreground = "#d8dee9"
+# accent     = "#e0a54a"
+"##,
+        opacity = d.opacity,
+        blur = d.blur,
+        size = d.font_size,
+        lig = d.ligatures,
+        sb = d.scrollback,
+        theme = d.theme_name,
+        themes = theme::names().join(" / "),
+    )
+}
+
 impl Config {
     /// 設定ファイルを読む。無ければ既定。壊れていれば既定＋警告。
     pub fn load() -> (Self, Option<String>) {
@@ -241,6 +293,20 @@ mod tests {
 
     fn warning(s: &str) -> Option<String> {
         Config::from_file(&toml::from_str::<File>(s).expect("読めない")).1
+    }
+
+    /// 雛形は**そのままで読めて、既定と同じ**でなければならない。
+    /// 「設定ファイルを開く」で置いたものが、開いた瞬間に警告を出すのは論外。
+    #[test]
+    fn the_template_reads_back_as_the_default() {
+        let t = template();
+        let cfg = parsed(&t);
+        assert_eq!(cfg, Config::default(), "雛形を置くだけで設定が変わる");
+        assert_eq!(warning(&t), None, "雛形が警告を出す");
+        assert!(
+            t.lines().filter(|l| l.starts_with('#')).count() > 10,
+            "雛形に説明が足りない"
+        );
     }
 
     #[test]
