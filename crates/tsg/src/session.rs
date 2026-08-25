@@ -398,7 +398,23 @@ impl PaneView {
     }
 
     /// 再アタッチ時の画面復元。行を流し込んで写しを組み直す。
-    pub fn restore(&mut self, lines: &[String], cols: usize, rows: usize) {
+    ///
+    /// `alt` が空でなければ、相手は全画面アプリの最中。**そこまで含めて
+    /// 組み直す** — primary を流し込んでから alt へ入り、alt の画面を
+    /// 絶対位置で置く。ここを省くと、写しは alt に居ることを知らないまま
+    /// アプリの絵を履歴の続きとして持ち、アプリが終わって `?1049l` が
+    /// 来ても戻す先が無いので消えない。Esc とマウスの行き先
+    /// （`key_owner` / `mouse_owner`）も alt かどうかで決まるので、
+    /// 知らないままだとキーが子へ届かない。
+    pub fn restore(
+        &mut self,
+        lines: &[String],
+        cursor: (usize, usize),
+        alt: &[String],
+        alt_cursor: (usize, usize),
+        cols: usize,
+        rows: usize,
+    ) {
         self.term = new_terminal(cols, rows);
         let mut data = String::new();
         for line in lines {
@@ -406,6 +422,32 @@ impl PaneView {
             data.push_str("\r\n");
         }
         self.term.feed(data.as_bytes());
+
+        // primary のカーソルを置き直す。**戻ったときに書き始める場所**なので、
+        // 流し込んだ末尾に置きっぱなしにすると、プロンプトが別の行から始まる。
+        let scrollback = self.term.state.grid.scrollback_len();
+        let row = cursor
+            .0
+            .saturating_sub(scrollback)
+            .min(rows.saturating_sub(1));
+        self.term
+            .feed(format!("\x1b[{};{}H", row + 1, cursor.1 + 1).as_bytes());
+
+        if !alt.is_empty() {
+            self.term.feed(b"\x1b[?1049h");
+            for (i, line) in alt.iter().take(rows).enumerate() {
+                self.term.feed(format!("\x1b[{};1H", i + 1).as_bytes());
+                self.term.feed(line.as_bytes());
+            }
+            self.term.feed(
+                format!(
+                    "\x1b[{};{}H",
+                    alt_cursor.0.min(rows.saturating_sub(1)) + 1,
+                    alt_cursor.1.min(cols.saturating_sub(1)) + 1
+                )
+                .as_bytes(),
+            );
+        }
         self.follow_tail = true;
     }
 }
@@ -787,7 +829,14 @@ mod tests {
         // サーバは SGR 付きの ANSI を送る（protocol.rs 版 2）。
         // 復元路が素通しになっていると、再アタッチで色だけ落ちる。
         let mut v = PaneView::new(40, 5);
-        v.restore(&["\x1b[1;31mERROR\x1b[0m: boom".to_string()], 40, 5);
+        v.restore(
+            &["\x1b[1;31mERROR\x1b[0m: boom".to_string()],
+            (0, 0),
+            &[],
+            (0, 0),
+            40,
+            5,
+        );
 
         let line = v.term.state.grid.document_line(0).unwrap();
         assert_eq!(line.text(), "ERROR: boom");
@@ -859,11 +908,52 @@ mod tests {
         assert_eq!(s.visible_panes(), vec![1]);
     }
 
+    /// **全画面アプリの最中に繋ぎ直しても、alt screen のまま復元する。**
+    ///
+    /// 混ぜて 1 本の文書として受けると、写しは alt に居ることを知らない。
+    /// アプリの絵が履歴の続きとして焼き付き、`?1049l` が来ても戻す先が
+    /// 無いので消えない。Esc とマウスの行き先も alt かどうかで決まるので、
+    /// 知らないままだとキーが子へ届かない（実機で踏んだ）。
+    #[test]
+    fn restore_comes_back_into_the_alt_screen_when_the_pane_is_in_one() {
+        let mut v = PaneView::new(40, 5);
+        let history: Vec<String> = (0..3).map(|i| format!("prompt {i}")).collect();
+        let alt: Vec<String> = vec![
+            "TUI top".to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+            "TUI bottom".to_string(),
+        ];
+        v.restore(&history, (2, 9), &alt, (4, 3), 40, 5);
+
+        assert!(v.term.state.grid.is_alt(), "alt に戻っていない");
+        assert_eq!(v.term.state.key_owner(), tsg_term::InputOwner::Child);
+        let screen = v.term.state.grid.document_text();
+        assert!(screen.contains("TUI top"), "alt の中身が無い: {screen}");
+        assert!(
+            !screen.contains("prompt 0"),
+            "履歴が alt screen に焼き付いている: {screen}"
+        );
+        assert_eq!(
+            (v.term.state.grid.cursor.row, v.term.state.grid.cursor.col),
+            (4, 3),
+            "alt のカーソルが違う"
+        );
+
+        // アプリが終われば、履歴のほうへ戻る。
+        v.term.feed(b"\x1b[?1049l");
+        assert!(!v.term.state.grid.is_alt());
+        let back = v.term.state.grid.document_text();
+        assert!(back.contains("prompt 0"), "履歴が戻っていない: {back}");
+        assert!(!back.contains("TUI top"), "alt の中身が残っている: {back}");
+    }
+
     #[test]
     fn restore_rebuilds_the_document_from_lines() {
         let mut v = PaneView::new(40, 5);
         let lines: Vec<String> = (0..12).map(|i| format!("line {i}")).collect();
-        v.restore(&lines, 40, 5);
+        v.restore(&lines, (11, 0), &[], (0, 0), 40, 5);
         let text = v.term.state.grid.document_text();
         assert!(text.contains("line 0"), "古い行が失われている");
         assert!(text.contains("line 11"), "新しい行が入っていない");

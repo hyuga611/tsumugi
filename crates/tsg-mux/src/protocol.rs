@@ -11,7 +11,7 @@
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -590,9 +590,21 @@ pub enum ServerMsg {
     /// 復元路のために別の描画コードを持たずに済む（版 2 からこの形）。
     Snapshot {
         pane: u32,
+        /// primary（履歴 + primary の画面）。**alt の行は混ぜない。**
         lines: Vec<String>,
         cursor_line: usize,
         cursor_col: usize,
+        /// alt screen に居るなら、その画面の行。居ないなら空。
+        ///
+        /// **混ぜて 1 本の文書として送ると、受けた側は alt に居ることを
+        /// 知らないまま復元する。** そうなると全画面アプリの絵が履歴の
+        /// 続きとして焼き付き、アプリが終わって `?1049l` が来ても
+        /// 戻す先が無いので消えない（実機で踏んだ）。
+        #[serde(default)]
+        alt: Vec<String>,
+        /// alt screen 上のカーソル（画面内の行・桁）。
+        #[serde(default)]
+        alt_cursor: (usize, usize),
     },
     /// ペインの実サイズが変わった。
     ///

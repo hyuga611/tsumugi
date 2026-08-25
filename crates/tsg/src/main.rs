@@ -1180,7 +1180,14 @@ impl App {
                         }
                     }
                 }
-                ServerMsg::Snapshot { pane, lines, .. } => {
+                ServerMsg::Snapshot {
+                    pane,
+                    lines,
+                    cursor_line,
+                    cursor_col,
+                    alt,
+                    alt_cursor,
+                } => {
                     let area = self.area();
                     let (w, h) = self
                         .session
@@ -1192,7 +1199,7 @@ impl App {
                         .panes
                         .entry(pane)
                         .or_insert_with(|| PaneView::new(w, h))
-                        .restore(&lines, w, h);
+                        .restore(&lines, (cursor_line, cursor_col), &alt, alt_cursor, w, h);
                 }
                 ServerMsg::FileState {
                     pane,

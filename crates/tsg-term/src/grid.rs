@@ -193,6 +193,18 @@ pub struct Cursor {
 /// 1 万行はおよそ 400 画面分。実用で足りて、80 桁なら数十 MB に収まる。
 pub const DEFAULT_MAX_SCROLLBACK: usize = 10_000;
 
+/// alt screen に入っている間、退避しておく primary の状態。
+///
+/// **画面だけでは足りない。** 保存カーソル（DECSC）とスクロール領域も
+/// 画面ごとの持ちもので、alt の中の `ESC 7` や `CSI r` に上書きされると、
+/// 戻ったときにシェルのプロンプトが別の行から書き始める（実機で踏んだ）。
+struct SavedScreen {
+    lines: Vec<Line>,
+    saved_cursor: Cursor,
+    scroll_top: usize,
+    scroll_bot: usize,
+}
+
 pub struct Grid {
     pub cols: usize,
     pub rows: usize,
@@ -201,7 +213,7 @@ pub struct Grid {
     /// 現在アクティブな画面（primary か alt のどちらか）
     screen: Vec<Line>,
     /// alt screen に入っている間、primary の内容をここへ退避する
-    saved_primary: Option<Vec<Line>>,
+    saved_primary: Option<SavedScreen>,
     /// primary から押し出された行。alt screen では増えない
     scrollback: Vec<Line>,
 
@@ -586,7 +598,13 @@ impl Grid {
                     self.screen[r] = blank_line.clone();
                 }
             }
-            3 => self.scrollback.clear(),
+            3 => {
+                // 履歴を捨てる（`ESC[3J`）。**捨てた分を数えて渡す。**
+                // 印（OSC 133）と絵は絶対行番号で持っているので、黙って
+                // 消すと全部ずれる。上限超過で捨てるときと同じ道を通す。
+                self.dropped += self.scrollback.len();
+                self.scrollback.clear();
+            }
             _ => {}
         }
     }
@@ -640,25 +658,106 @@ impl Grid {
 
     pub fn enter_alt(&mut self) {
         if self.is_alt() {
+            // すでに alt。**画面は消す。** 2 度目の `?1049h` で何もしないと、
+            // 前のアプリが描いたものが下に残ったまま次のアプリが描き始める。
+            self.erase_display(2);
+            self.cursor = Cursor::default();
             return;
         }
         let blank = self.blank_line();
-        let primary = std::mem::replace(
+        let lines = std::mem::replace(
             &mut self.screen,
             (0..self.rows).map(|_| blank.clone()).collect(),
         );
-        self.saved_primary = Some(primary);
+        self.saved_primary = Some(SavedScreen {
+            lines,
+            saved_cursor: self.saved_cursor,
+            scroll_top: self.scroll_top,
+            scroll_bot: self.scroll_bot,
+        });
+        // 保存カーソルとスクロール領域は**画面ごと**。alt は素の状態から始める。
+        self.saved_cursor = Cursor::default();
+        self.scroll_top = 0;
+        self.scroll_bot = self.rows.saturating_sub(1);
         self.cursor = Cursor::default();
     }
 
     pub fn leave_alt(&mut self) {
-        if let Some(primary) = self.saved_primary.take() {
-            self.screen = primary;
+        let Some(saved) = self.saved_primary.take() else {
+            return;
+        };
+        self.screen = saved.lines;
+        self.saved_cursor = saved.saved_cursor;
+        self.scroll_top = saved.scroll_top.min(self.rows.saturating_sub(1));
+        self.scroll_bot = saved
+            .scroll_bot
+            .max(self.scroll_top)
+            .min(self.rows.saturating_sub(1));
+    }
+
+    // ---- 退避してある primary（再アタッチの復元に使う） -------------------
+
+    /// いま primary として持っている画面。alt に居るなら退避したほう。
+    fn primary_screen(&self) -> &[Line] {
+        match &self.saved_primary {
+            Some(saved) => &saved.lines,
+            None => &self.screen,
         }
+    }
+
+    /// primary だけで数えた文書の長さ（履歴 + primary 画面）。
+    pub fn primary_len(&self) -> usize {
+        self.scrollback.len() + self.primary_screen().len()
+    }
+
+    /// primary だけで数えた絶対行の、SGR 付きの行。
+    pub fn primary_line_ansi(&self, index: usize) -> Option<String> {
+        if index < self.scrollback.len() {
+            self.scrollback.get(index).map(Line::ansi)
+        } else {
+            self.primary_screen()
+                .get(index - self.scrollback.len())
+                .map(Line::ansi)
+        }
+    }
+
+    /// primary 側のカーソル（絶対行, 桁）。
+    ///
+    /// alt に居るあいだは、`?1049l` で戻る先（保存カーソル）がそれにあたる。
+    /// **いま見えているカーソルではない。**
+    pub fn primary_cursor(&self) -> (usize, usize) {
+        let c = if self.is_alt() {
+            self.saved_cursor
+        } else {
+            self.cursor
+        };
+        (self.scrollback.len() + c.row, c.col)
+    }
+
+    /// alt screen の行。alt に居なければ空。
+    pub fn alt_lines_ansi(&self) -> Vec<String> {
+        if !self.is_alt() {
+            return Vec::new();
+        }
+        self.screen.iter().map(Line::ansi).collect()
     }
 
     pub fn reset(&mut self) {
         *self = Grid::new(self.cols, self.rows, self.amb);
+    }
+
+    /// ソフトリセット（DECSTR）。**画面と履歴は消さない。**
+    ///
+    /// 消すのは「次に書く人の前提」だけ — カーソル・保存カーソル・
+    /// スクロール領域・いまの SGR。画面まで消すと、素へ戻したいだけの
+    /// アプリが履歴を吹き飛ばす。
+    pub fn soft_reset(&mut self) {
+        self.cursor = Cursor::default();
+        self.saved_cursor = Cursor::default();
+        self.scroll_top = 0;
+        self.scroll_bot = self.rows.saturating_sub(1);
+        self.pen = Attrs::default();
+        self.pen_link = 0;
     }
 
     /// ウィンドウのリサイズに追従する。
@@ -795,11 +894,13 @@ impl Grid {
         for line in &mut self.scrollback {
             line.cells.resize(cols, Cell::default());
         }
-        if let Some(primary) = &mut self.saved_primary {
-            for line in primary.iter_mut() {
+        if let Some(saved) = &mut self.saved_primary {
+            for line in saved.lines.iter_mut() {
                 line.cells.resize(cols, Cell::default());
             }
-            primary.resize_with(rows, || Line::new(cols));
+            saved.lines.resize_with(rows, || Line::new(cols));
+            saved.scroll_top = 0;
+            saved.scroll_bot = rows - 1;
         }
 
         // 行数の増減をどちらの端で吸収するかは、見た目を左右する。

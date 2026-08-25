@@ -580,8 +580,9 @@ impl Perform for TermState {
             'c' => {
                 self.reply(b"[?62;4;22c");
             }
-            // Device Status Report
-            'n' => {
+            // Device Status Report。**`CSI > Ps n` は別物**（修飾キーの設定を戻す）。
+            // 答えると、子プロセスの読み口に頼まれていない返事が流れ込む。
+            'n' if intermediates.is_empty() => {
                 match p0(params, 0) {
                     5 => self.reply(b"[0n"), // 元気です
                     6 => {
@@ -620,6 +621,22 @@ impl Perform for TermState {
             '@' => self.grid.insert_chars(p1(params, 0)),
             'S' => self.grid.scroll_up(p1(params, 0)),
             'T' => self.grid.scroll_down(p1(params, 0)),
+            // ソフトリセット（DECSTR。`CSI ! p`）。
+            //
+            // **終わるときに端末を素へ戻すアプリが実際に居る。** 受け取らないと、
+            // スクロール領域や保存カーソルが前のアプリのまま残り、次に来た
+            // シェルのプロンプトが妙な行から書き始める。
+            'p' if intermediates.first() == Some(&b'!') => {
+                self.grid.soft_reset();
+                self.line_drawing = false;
+                self.cursor_style = 0;
+            }
+            // SCOSC / SCORC。`ESC 7` / `ESC 8` と同じ場所を使う（xterm と同じ）。
+            //
+            // **中間バイトが付いていたら別物。** `CSI < u` は kitty の
+            // キーボードモードを戻す指示で、カーソルの話ではない。
+            's' if intermediates.is_empty() => self.grid.save_cursor(),
+            'u' if intermediates.is_empty() => self.grid.restore_cursor(),
             'r' => {
                 let top = p1(params, 0) - 1;
                 let bot = params
@@ -631,7 +648,13 @@ impl Perform for TermState {
                     .unwrap_or(self.grid.rows - 1);
                 self.grid.set_scroll_region(top, bot);
             }
-            'm' => self.set_sgr(params),
+            // SGR。**中間バイトが付いていたら SGR ではない。**
+            //
+            // `CSI > 4 m`（XTMODKEYS）は修飾キーの送り方の指示で、
+            // 全画面アプリが終わるときに出す。これを SGR 4 として読むと
+            // **下線が点きっぱなし**になり、そのあと画面に出るものが
+            // 全部下線付きで描かれる（実機で踏んだ。消えるまで気づけない）。
+            'm' if intermediates.is_empty() => self.set_sgr(params),
             _ => {}
         }
     }
@@ -652,8 +675,18 @@ impl Perform for TermState {
                 self.grid.carriage_return();
             }
             b'c' => {
+                // RIS。**画面だけ戻しても素には戻らない。** マウスレポートや
+                // 括弧付き貼り付けが点いたままだと、素へ戻したつもりの
+                // シェルへ `[<35;10;5M` のような報告が流れ込む。
                 self.grid.reset();
                 self.marks.clear();
+                self.modes = Modes::default();
+                self.images.clear();
+                self.pending_image = None;
+                self.sixel = None;
+                self.links.clear();
+                self.line_drawing = false;
+                self.cursor_style = 0;
             }
             _ => {}
         }
@@ -1060,6 +1093,189 @@ mod tests {
             "alt screen 上のマークが記録されている"
         );
         assert_eq!(t.state.marks.blocks().len(), 1);
+    }
+
+    /// **履歴を捨てる（`ESC[3J`）ときも、印を一緒に寄せる。**
+    ///
+    /// Claude Code のような全画面アプリは起動時に `ESC[2J ESC[3J ESC[H` を
+    /// 出す。捨てた行数を数えずに履歴だけ消すと、ガターの印・畳み・絵が
+    /// まとめて別の行を指す（実機で踏んだ）。
+    #[test]
+    fn clearing_the_scrollback_moves_the_marks_with_it() {
+        let mut t = Terminal::new(20, 3, AmbiguousWidth::Narrow);
+        // 画面より多く出して履歴を作り、プロンプトの印を置く。
+        t.feed(b"one\r\ntwo\r\nthree\r\n\x1b]133;A\x07$ \x1b]133;B\x07");
+        let before = t.state.marks.all()[0].line;
+        assert!(t.state.grid.scrollback_len() > 0, "履歴ができていない");
+        let text_at_mark = t.state.grid.line_ansi(before).unwrap_or_default();
+
+        let dropped = t.state.grid.scrollback_len();
+        t.feed(b"\x1b[3J");
+
+        assert_eq!(t.state.grid.scrollback_len(), 0);
+        let after = t.state.marks.all()[0].line;
+        assert_eq!(after, before - dropped, "印が捨てた分だけ寄っていない");
+        assert_eq!(
+            t.state.grid.line_ansi(after).unwrap_or_default(),
+            text_at_mark,
+            "印が別の行を指している"
+        );
+    }
+
+    /// **保存カーソルは画面ごと。**
+    ///
+    /// alt screen の中の `ESC 7` が `?1049h` の保存を上書きすると、
+    /// アプリが終わったあとシェルのプロンプトが別の行から書き始める。
+    #[test]
+    fn the_alt_screen_has_its_own_saved_cursor() {
+        let mut t = Terminal::new(20, 6, AmbiguousWidth::Narrow);
+        t.feed(b"\x1b[3;5H"); // シェルはここに居た
+        t.feed(b"\x1b[?1049h");
+        t.feed(b"\x1b[6;1H\x1b7"); // 全画面アプリが自分の都合で保存する
+        t.feed(b"\x1b[?1049l");
+
+        assert_eq!(
+            (t.state.grid.cursor.row, t.state.grid.cursor.col),
+            (2, 4),
+            "alt の中の ESC 7 に保存カーソルを奪われている"
+        );
+    }
+
+    /// **スクロール領域も画面ごと。**
+    ///
+    /// alt で領域を絞ったまま終わったアプリのあと、シェルが画面の一部の
+    /// 中だけで巻き上がる。
+    #[test]
+    fn the_scroll_region_does_not_leak_out_of_the_alt_screen() {
+        let mut t = Terminal::new(20, 6, AmbiguousWidth::Narrow);
+        t.feed(b"\x1b[?1049h");
+        t.feed(b"\x1b[2;4r"); // 全画面アプリが領域を絞る
+        t.feed(b"\x1b[?1049l");
+
+        // 領域が残っていれば、最下行での改行は画面の一部だけを巻き上げる。
+        t.feed(b"\x1b[6;1Hlast\r\nnext");
+        let text = t.state.grid.document_text();
+        assert!(
+            text.contains("last") && text.contains("next"),
+            "スクロール領域が alt から漏れている: {text}"
+        );
+    }
+
+    /// ソフトリセット（`CSI ! p`）を受け取る。**画面と履歴は消さない。**
+    #[test]
+    fn a_soft_reset_puts_the_terminal_back_without_erasing_the_history() {
+        let mut t = Terminal::new(20, 6, AmbiguousWidth::Narrow);
+        t.feed(b"keep me\r\n");
+        t.feed(b"\x1b[2;4r\x1b[3;3H\x1b7\x1b[1;31m");
+        t.feed(b"\x1b[!p");
+
+        assert_eq!((t.state.grid.cursor.row, t.state.grid.cursor.col), (0, 0));
+        assert_eq!(t.state.grid.pen, Attrs::default(), "SGR が残っている");
+        assert!(
+            t.state.grid.document_text().contains("keep me"),
+            "ソフトリセットで中身まで消えている"
+        );
+        // 領域が全画面に戻っているので、最下行の改行で全部が巻き上がる。
+        t.feed(b"\x1b[6;1Hbottom\r\nafter");
+        let text = t.state.grid.document_text();
+        assert!(text.contains("bottom") && text.contains("after"), "{text}");
+    }
+
+    /// `CSI s` / `CSI u`（SCOSC / SCORC）。**受け取らないと桁がずれる。**
+    #[test]
+    fn the_cursor_can_be_saved_and_restored_with_csi_s_and_u() {
+        let mut t = Terminal::new(20, 6, AmbiguousWidth::Narrow);
+        t.feed(b"\x1b[4;7H\x1b[s");
+        t.feed(b"\x1b[1;1Hoverwritten");
+        t.feed(b"\x1b[u");
+        assert_eq!((t.state.grid.cursor.row, t.state.grid.cursor.col), (3, 6));
+    }
+
+    /// RIS（`ESC c`）は**モードまで素へ戻す**。
+    ///
+    /// マウスレポートが点いたままだと、素へ戻したつもりのシェルへ
+    /// `[<35;10;5M` のような報告が流れ込む。
+    #[test]
+    fn a_full_reset_also_turns_the_modes_back_off() {
+        let mut t = Terminal::new(20, 6, AmbiguousWidth::Narrow);
+        t.feed(b"\x1b[?1002h\x1b[?1006h\x1b[?2004h");
+        assert_ne!(t.state.modes.mouse, MouseTracking::Off);
+        t.feed(b"\x1bc");
+        assert_eq!(t.state.modes.mouse, MouseTracking::Off);
+        assert!(!t.state.modes.bracketed_paste);
+    }
+
+    /// 2 度目の `?1049h` で alt screen を消す。
+    ///
+    /// 前のアプリが `?1049l` を出さずに死ぬことがある（Ctrl-C で殺した
+    /// とき）。消さないと、次のアプリの絵の下に前の絵が残る。
+    #[test]
+    fn entering_the_alt_screen_again_starts_from_a_clean_one() {
+        let mut t = Terminal::new(20, 6, AmbiguousWidth::Narrow);
+        t.feed(b"\x1b[?1049h");
+        t.feed(b"\x1b[1;1Hleftover from the app that died");
+        t.feed(b"\x1b[?1049h");
+        let text = t.state.grid.document_text();
+        assert!(!text.contains("leftover"), "前の絵が残っている: {text}");
+    }
+
+    /// 再アタッチ用の控えは、**履歴と alt screen を混ぜない**。
+    #[test]
+    fn the_snapshot_keeps_the_history_and_the_alt_screen_apart() {
+        let mut t = Terminal::new(20, 4, AmbiguousWidth::Narrow);
+        t.feed(b"history one\r\nhistory two\r\n");
+        t.feed(b"\x1b[?1049h\x1b[2J\x1b[1;1HTUI");
+
+        let primary: Vec<String> = (0..t.state.grid.primary_len())
+            .filter_map(|i| t.state.grid.primary_line_ansi(i))
+            .collect();
+        assert!(
+            primary.iter().any(|l| l.contains("history one")),
+            "履歴が控えから落ちている: {primary:?}"
+        );
+        assert!(
+            !primary.iter().any(|l| l.contains("TUI")),
+            "alt の中身が履歴に混ざっている: {primary:?}"
+        );
+        let alt = t.state.grid.alt_lines_ansi();
+        assert!(alt.iter().any(|l| l.contains("TUI")), "alt が空: {alt:?}");
+        assert_eq!(alt.len(), 4, "alt は画面ぶんの行数で送る");
+    }
+
+    /// **中間バイト付きの `m` は SGR ではない。**
+    ///
+    /// `CSI > 4 m`（XTMODKEYS）は全画面アプリが終わるときに出す。SGR 4 と
+    /// 読むと下線が点きっぱなしになり、そのあと出るものが全部下線付きで
+    /// 描かれる。`CSI < u`（kitty のキーボードモードを戻す）も同じで、
+    /// カーソルの復元と取り違えると桁が飛ぶ。
+    #[test]
+    fn a_csi_with_an_intermediate_byte_is_not_sgr_or_a_cursor_restore() {
+        let mut t = Terminal::new(20, 6, AmbiguousWidth::Narrow);
+        t.feed(b"\x1b[>5n");
+        assert!(
+            t.state.replies.is_empty(),
+            "CSI > 5 n に DSR として答えている"
+        );
+        t.feed(b"\x1b[>4m");
+        assert_eq!(
+            t.state.grid.pen,
+            Attrs::default(),
+            "CSI > 4 m を SGR 4（下線）として読んでいる"
+        );
+        t.feed(b"x");
+        assert!(
+            !t.state.grid.document_line(0).unwrap().cells[0]
+                .attrs
+                .has(Attrs::UNDERLINE),
+            "下線が点いている"
+        );
+
+        t.feed(b"\x1b[4;7H\x1b[s\x1b[1;1H\x1b[<u");
+        assert_eq!(
+            (t.state.grid.cursor.row, t.state.grid.cursor.col),
+            (0, 0),
+            "CSI < u をカーソルの復元として読んでいる"
+        );
     }
 
     fn attrs_at(t: &Terminal, row: usize, col: usize) -> Attrs {

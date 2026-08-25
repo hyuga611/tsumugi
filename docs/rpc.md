@@ -98,7 +98,7 @@ $ printf '' | tsg -s work --rpc
 ## 4. プロトコル
 
 JSON Lines（1 行 1 メッセージ、UTF-8）。判別は `"t"` フィールド。
-いまの版は **8**。
+いまの版は **12**。
 
 > **生バイトを送る。** グリッドの差分ではなく PTY の生バイトを流し、
 > クライアントは自前の `tsg-term` で解析して自分のグリッドを作る。
@@ -140,7 +140,7 @@ JSON Lines（1 行 1 メッセージ、UTF-8）。判別は `"t"` フィール�
 | `t` | 引数 | いつ来るか |
 |---|---|---|
 | `attached` | `version`, `session` | `attach` の返事 |
-| `snapshot` | `pane`, `lines`, `cursor_line`, `cursor_col` | アタッチ時。各行は **SGR 付きの ANSI** |
+| `snapshot` | `pane`, `lines`, `cursor_line`, `cursor_col`, `alt`, `alt_cursor` | アタッチ時。各行は **SGR 付きの ANSI**。`lines` は primary だけ、`alt` は全画面アプリの最中ならその画面 |
 | `output` | `pane`, `data`(base64) | PTY が何か出したとき |
 | `resized` | `pane`, `cols`, `rows` | ペインの実サイズが変わったとき |
 | `layout` | `SessionInfo` | 木が変わったとき |
@@ -183,6 +183,7 @@ JSON Lines（1 行 1 メッセージ、UTF-8）。判別は `"t"` フィール�
 
 | 版 | 変えたこと |
 |---|---|
+| 12 | `snapshot` に `alt` / `alt_cursor` を足した（alt screen を履歴と混ぜない） |
 | 8 | `attach` の `cols` / `rows` に 0（＝大きさを持ち込まない）を足した |
 | 7 | ファイル編集の差分化（`edit_file`） |
 | 2 | 再アタッチの復元を生バイトの再送から `snapshot` へ |

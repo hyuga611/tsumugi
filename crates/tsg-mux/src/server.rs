@@ -565,22 +565,33 @@ impl State {
         let p = self.panes.get(&pane)?;
         let grid = &p.term.state.grid;
 
+        // **primary だけを文書として送る。** alt screen の行を混ぜると、
+        // 受けた側は alt に居ることを知らないまま 1 本の文書として復元し、
+        // 全画面アプリの絵が履歴に焼き付く。
+        //
         // 末尾の空行は送らない。送ると再アタッチのたびに画面が下へ押し出される。
-        let mut end = grid.document_len();
+        let mut end = grid.primary_len();
         while end > 0
             && grid
-                .document_line(end - 1)
-                .is_some_and(|l| l.ansi().is_empty())
+                .primary_line_ansi(end - 1)
+                .is_some_and(|l| l.is_empty())
         {
             end -= 1;
         }
         let start = end.saturating_sub(SNAPSHOT_MAX_LINES);
 
+        // alt に居るなら、primary のカーソルは「戻ったときに書き始める場所」。
+        let (cursor_line, cursor_col) = grid.primary_cursor();
+
         Some(ServerMsg::Snapshot {
             pane,
-            lines: (start..end).filter_map(|i| grid.line_ansi(i)).collect(),
-            cursor_line: grid.cursor_absolute().saturating_sub(start),
-            cursor_col: grid.cursor.col,
+            lines: (start..end)
+                .filter_map(|i| grid.primary_line_ansi(i))
+                .collect(),
+            cursor_line: cursor_line.saturating_sub(start),
+            cursor_col,
+            alt: grid.alt_lines_ansi(),
+            alt_cursor: (grid.cursor.row, grid.cursor.col),
         })
     }
 

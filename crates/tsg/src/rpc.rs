@@ -172,10 +172,13 @@ pub fn capture(session: &str, pane: Option<u32>) -> Result<()> {
         TIMEOUT,
         |m| matches!(m, ServerMsg::Snapshot { pane, .. } if *pane == want),
     );
-    let Some(ServerMsg::Snapshot { lines, .. }) = found else {
+    let Some(ServerMsg::Snapshot { lines, alt, .. }) = found else {
         bail!("ペイン {want} の中身が返りません");
     };
 
+    // 全画面アプリの最中なら、**見えているのは alt screen のほう**。
+    // 履歴と混ぜて出すと、窓と食い違う。
+    let lines = if alt.is_empty() { lines } else { alt };
     let mut out = std::io::stdout().lock();
     for line in lines {
         writeln!(out, "{}", strip_ansi(&line))?;
@@ -559,7 +562,8 @@ pub fn compare(session: &str) -> Result<()> {
             |m| matches!(m, ServerMsg::Snapshot { pane, .. } if *pane == id),
         );
         match found {
-            Some(ServerMsg::Snapshot { lines, .. }) => {
+            Some(ServerMsg::Snapshot { lines, alt, .. }) => {
+                let lines = if alt.is_empty() { lines } else { alt };
                 for line in lines {
                     writeln!(out, "{}", strip_ansi(&line))?;
                 }
