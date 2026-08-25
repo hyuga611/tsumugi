@@ -308,6 +308,35 @@ tsg --open README.md --render
 tsumugi の中で `tsg` と打つと、窓は増えずに**いまの窓のタブが増えて
 切り替わる**。今までどおり窓を開きたいときは `-n`。
 
+## 探す・飛ぶ・畳む
+
+- `/` `?` で探す。**打つたびに飛び**、一致が光る。`n` `N` でたどる。
+  Esc で探し始めた場所へ戻る
+- `Space l` で画面のパス・URL に `a s d f …` のラベルが付く。1 キーで開く。
+  フォルダならプロンプトへ `cd` が置かれる
+- `Space o` でコマンドの出力を畳む（`Space O` で全部、`Space U` で全部開く）。
+  畳んだ行には**何を畳んだか**が出る。`Space g` の diff はファイル単位
+- `Space g` で `git diff` を色付きで開く
+
+## 絵を出す
+
+Kitty graphics protocol に対応している。`timg -p kitty` や
+`chafa -f kitty`、matplotlib の kitty backend がそのまま出る。
+絵はドキュメントの行に貼られるので、スクロールすると一緒に動く。
+Sixel はまだ無い。
+
+## 外から動かす
+
+```
+tsg --commands                   # 動かせるコマンドの id 一覧
+tsg --run search.open            # 画面の側のコマンドを外から実行
+tsg --search "TODO"              # 外から探す（n / N でたどれる）
+tsg --open README.md --render    # 走っている窓でファイルを開く
+tsg --broadcast "テストを直して" --wait
+tsg --compare                    # 各ペインの返事を 1 枚に並べる
+tsg --layout agents              # 3 分割で開く
+```
+
 ## 次の一手
 
 行をまたぐ構文強調（いまは 1 行で完結する字句解析）。合字は実機で確かめていない
