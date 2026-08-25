@@ -49,6 +49,30 @@ fn attach(client: &mut Client) -> u32 {
     }
 }
 
+/// プロンプトが出るまで待つ。
+///
+/// **どの記号で終わるかはシェル次第**（cmd は `>`、sh は `$`、root は `#`）。
+/// 1 つずつ順に待つと、最初の待ちで時間を使い切って次に回らない。
+/// まとめて 1 回のループで見る。
+fn wait_prompt(client: &Client, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    let mut seen = String::new();
+    while Instant::now() < deadline {
+        match client.recv_timeout(Duration::from_millis(200)) {
+            Some(ServerMsg::Output { data, .. }) => {
+                if let Some(bytes) = decode_bytes(&data) {
+                    seen.push_str(&String::from_utf8_lossy(&bytes));
+                }
+                if seen.contains('>') || seen.contains('$') || seen.contains('#') {
+                    return true;
+                }
+            }
+            Some(_) | None => continue,
+        }
+    }
+    false
+}
+
 /// 出力に `needle` が現れるまで待つ。
 fn wait_output(client: &Client, needle: &str, timeout: Duration) -> bool {
     let deadline = Instant::now() + timeout;
@@ -81,9 +105,9 @@ fn panes_survive_a_disconnected_client() {
         let pane = attach(&mut client);
 
         // シェルのプロンプトが出るまで待つ（起動直後は入力を取りこぼす）
+        // 冷えた CI の走者では、最初のプロンプトが出るまで時間がかかる。
         assert!(
-            wait_output(&client, ">", Duration::from_secs(15))
-                || wait_output(&client, "$", Duration::from_secs(1)),
+            wait_prompt(&client, Duration::from_secs(60)),
             "シェルのプロンプトが出ない"
         );
 
