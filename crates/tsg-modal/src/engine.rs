@@ -871,6 +871,7 @@ impl Engine {
             // （`:e` と同じ欄で受ける）。
             "layout.tabname" => Command::Palette("tabname "),
             "edit.substitute" => Command::Palette("s/"),
+            "search.project" => Command::Palette("grep "),
             "motion.goto_line" => Command::Palette(""),
             "file.save" => Command::File(FileAction::Save),
             "file.close" => Command::File(FileAction::Close),
@@ -1403,11 +1404,13 @@ impl Engine {
                 fx
             }
             InsertAt::Below => {
-                self.cursor = Pos::new(line + 1, 0);
+                // 上の行の字下げを引き継ぐ。**桁 0 から打ち直させない。**
+                let pad = indent_of(buf, line);
+                self.cursor = Pos::new(line + 1, pad.chars().count());
                 let mut fx = entered;
                 fx.push(Effect::Insert {
                     at: Pos::new(line, width),
-                    text: "\n".into(),
+                    text: format!("\n{pad}"),
                     cursor: Some(self.cursor),
                 });
                 fx
@@ -1415,19 +1418,29 @@ impl Engine {
             InsertAt::Above => {
                 // 行 0 の上は「先頭に改行を差す」。それ以外は「前の行の下に開ける」
                 // に落とすと、同じ 1 本の経路で済む。
+                //
+                // 開ける行の字下げは**いまの行**に合わせる（上ではなく）。
+                // `O` は「この行の上に、この行と同じ深さで」が期待どおり。
+                let pad = indent_of(buf, line);
+                let col = pad.chars().count();
                 let (at, cursor) = if line == 0 {
-                    (Pos::new(0, 0), Pos::new(0, 0))
+                    (Pos::new(0, 0), Pos::new(0, col))
                 } else {
                     (
                         Pos::new(line - 1, line_width(buf, line - 1)),
-                        Pos::new(line, 0),
+                        Pos::new(line, col),
                     )
                 };
                 self.cursor = cursor;
                 let mut fx = entered;
+                let text = if line == 0 {
+                    format!("{pad}\n")
+                } else {
+                    format!("\n{pad}")
+                };
                 fx.push(Effect::Insert {
                     at,
-                    text: "\n".into(),
+                    text,
                     cursor: Some(cursor),
                 });
                 fx
@@ -2311,8 +2324,8 @@ mod tests {
                     }
                     Effect::Insert { at, text, cursor } => {
                         let end = self.file.insert(*at, text);
-                        let next = self.file.clamp(cursor.unwrap_or(end));
-                        self.engine.set_cursor(next, &self.file);
+                        // ホストと同じ扱い（丸めるのは `set_cursor`）。
+                        self.engine.set_cursor(cursor.unwrap_or(end), &self.file);
                     }
                     Effect::MacroReplay(keys) => {
                         let keys = keys.clone();
@@ -2568,6 +2581,54 @@ mod tests {
 
         assert_eq!(a.yanked(), b.yanked());
     }
+
+    /// `o` は**上の行の字下げを引き継ぐ**。桁 0 から打ち直させない。
+    #[test]
+    fn opening_a_line_below_keeps_the_indent() {
+        let mut h = FileHarness::new("fn main() {\n    let a = 1;\n}\n");
+        h.engine.set_cursor(Pos::new(1, 4), &h.file);
+        h.keys("o");
+        assert_eq!(
+            h.file.line(2),
+            "    ",
+            "字下げが引き継がれていない（全文: {:?}）",
+            h.file.text()
+        );
+        assert_eq!(h.engine.cursor(), Pos::new(2, 4));
+    }
+
+    /// `O` は**いまの行**の字下げに合わせる（上の行ではなく）。
+    #[test]
+    fn opening_a_line_above_matches_this_line() {
+        let mut h = FileHarness::new("fn main() {\n    let a = 1;\n}\n");
+        h.engine.set_cursor(Pos::new(1, 4), &h.file);
+        h.keys("O");
+        assert_eq!(h.file.line(1), "    ", "字下げが合っていない");
+        assert_eq!(h.engine.cursor(), Pos::new(1, 4));
+    }
+
+    /// タブで下げてあればタブのまま。**書き方を勝手に変えない。**
+    #[test]
+    fn a_tab_indent_stays_a_tab() {
+        let mut h = FileHarness::new("fn main() {\n\tlet a = 1;\n}\n");
+        h.engine.set_cursor(Pos::new(1, 1), &h.file);
+        h.keys("o");
+        let cells: Vec<String> = h
+            .file
+            .cells(1)
+            .map(|c| c.iter().take(3).map(|x| x.text.clone()).collect())
+            .unwrap_or_default();
+        assert_eq!(h.file.line(2), "\t", "セル: {cells:?}");
+    }
+
+    /// 字下げの無い行から開けたら、字下げも無い。
+    #[test]
+    fn no_indent_stays_no_indent() {
+        let mut h = FileHarness::new("a\nb\n");
+        h.engine.set_cursor(Pos::new(0, 0), &h.file);
+        h.keys("o");
+        assert_eq!(h.file.line(1), "");
+    }
 }
 
 #[cfg(test)]
@@ -2621,4 +2682,20 @@ mod space_keys {
         }
         assert!(clashes.is_empty(), "同じキーを名乗っている: {clashes:?}");
     }
+}
+
+/// その行の頭の空白（そのまま次の行へ引き継ぐ）。
+///
+/// **タブと空白を混ぜない。** 上の行がタブで下げてあればタブ、
+/// 空白なら空白。こちらで「正しい字下げ」を決めると、そのファイルの
+/// 書き方と食い違う。
+fn indent_of(buf: &dyn Buffer, line: usize) -> String {
+    let Some(cells) = buf.cells(line) else {
+        return String::new();
+    };
+    cells
+        .iter()
+        .map(|c| c.text.as_str())
+        .take_while(|t| *t == " " || *t == "\t")
+        .collect()
 }

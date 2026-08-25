@@ -576,6 +576,14 @@ pub const REGISTRY: &[CommandSpec] = &[
         in_palette: true,
     },
     CommandSpec {
+        id: "search.project",
+        title: "プロジェクト全体を探す（:grep 語）",
+        title_en: "Search the whole project (:grep WORD)",
+        keys: &[":grep"],
+        mouse: MousePath::Menu("編集"),
+        in_palette: true,
+    },
+    CommandSpec {
         id: "search.regex",
         title: "正規表現で探す（g/ で開く）",
         title_en: "Search with a regular expression (g/)",

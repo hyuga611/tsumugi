@@ -149,6 +149,8 @@ struct App {
     pending_revert: Option<String>,
     /// いま出している補完の候補。
     completions: Vec<tsg_lsp::Completion>,
+    /// 検索結果を出したときの起点（相対パスを解くのに要る）。
+    grep_root: Option<String>,
     /// 開いたら飛ぶ行き先（定義が別のファイルにあったとき）。
     pending_jump: Option<(String, usize, usize)>,
     /// 次に届く差分で、最初のかたまりへカーソルを置く。
@@ -219,6 +221,7 @@ impl App {
             diff_cwd: None,
             pending_revert: None,
             completions: Vec::new(),
+            grep_root: None,
             pending_jump: None,
             want_first_hunk: false,
             command: cli.command.clone(),
@@ -695,7 +698,12 @@ impl App {
         let end = file.insert(at, text);
         // 行き先を決めるのはエンジン。ここで場合分けすると、貼り方を
         // 増やすたびに条件が増える。
-        let next = file.clamp(cursor.unwrap_or(end));
+        //
+        // **ここで丸めない。** 通常モードの丸め方は「最後の字の上」までで、
+        // 空白だけの行では桁 0 に戻る。`o` で字下げを入れた直後にそれをやると、
+        // 入れた字下げの手前へ引き戻されて、打った字が頭に入る。
+        // モードに合った丸め方は `set_cursor` が知っている。
+        let next = cursor.unwrap_or(end);
         let buf = view.buffer();
         self.engine.set_cursor(next, &buf);
     }
@@ -1907,6 +1915,14 @@ impl App {
             self.save_file(Some(path.to_string()));
             return true;
         }
+        // プロジェクト全体を探す。結果から**そのまま飛べる**。
+        if let Some(what) = q.strip_prefix("grep").map(str::trim)
+            && !what.is_empty()
+        {
+            self.palette.hide();
+            self.grep_project(what);
+            return true;
+        }
         // タブに名前を付ける。中の題名では区別が付かないときに要る。
         if let Some(name) = q.strip_prefix("tabname").map(str::trim) {
             self.palette.hide();
@@ -2072,6 +2088,97 @@ impl App {
         });
     }
 
+    /// プロジェクト全体を探す。結果から**そのまま飛べる**。
+    ///
+    /// 端末の中で `rg` を打てば結果は出るが、そこから開くのは手作業になる。
+    /// 「探して、開いて、直す」が一続きになっていないと、探すたびに
+    /// 目とカーソルの往復が要る。
+    ///
+    /// **道具は借りる。** `rg` が居ればそれ、無ければ `git grep`。
+    /// 自前で木を歩くと、無視するファイルの決まり（`.gitignore`）を
+    /// 自前で持つことになる。
+    fn grep_project(&mut self, pattern: &str) {
+        let pattern = pattern.trim();
+        if pattern.is_empty() {
+            return;
+        }
+        let dir = self.search_root();
+        let Some((program, args)) = grep_command(pattern) else {
+            self.status_msg = t!(
+                "rg も git も見つかりません",
+                "neither rg nor git is available"
+            )
+            .into();
+            return;
+        };
+        let mut cmd = std::process::Command::new(&program);
+        cmd.args(&args);
+        if let Some(dir) = dir.as_deref() {
+            cmd.current_dir(dir);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let out = match cmd.output() {
+            Ok(o) => o,
+            Err(e) => {
+                self.status_msg = t!(
+                    format!("{program} を実行できません: {e}"),
+                    format!("cannot run {program}: {e}")
+                );
+                return;
+            }
+        };
+        // **数は絞る。** 何千行も一覧に積むと、選ぶ前に読めなくなる。
+        let text = String::from_utf8_lossy(&out.stdout);
+        let hits: Vec<String> = text.lines().take(500).map(str::to_string).collect();
+        if hits.is_empty() {
+            self.status_msg = t!(
+                format!("見つかりません: {pattern}"),
+                format!("no match: {pattern}")
+            );
+            return;
+        }
+        self.grep_root = dir;
+        self.menu.hide();
+        self.palette.hide();
+        self.picker.show(
+            t!(
+                format!("{pattern}（{} 件・Enter で開く）", hits.len()),
+                format!("{pattern} ({} hits, Enter to open)", hits.len())
+            )
+            .as_str(),
+            hits,
+            overlay::PickKind::Grep,
+        );
+    }
+
+    /// 探す起点。**いま居る場所**（ペインの cwd）。無ければ起動した場所。
+    fn search_root(&self) -> Option<String> {
+        self.active_view()
+            .and_then(|v| v.term.state.cwd.clone())
+            .and_then(|u| file_url_to_path(&u))
+            .or_else(|| self.cwd.clone())
+    }
+
+    /// 検索結果の 1 行（`パス:行:本文`）を開く。
+    fn open_grep_hit(&mut self, line: &str) {
+        let Some((path, at)) = split_grep_hit(line) else {
+            return;
+        };
+        // 相対のまま開くと、いまの場所によって別のファイルを指す。
+        let full = match self.grep_root.as_deref() {
+            Some(root) if std::path::Path::new(&path).is_relative() => {
+                std::path::Path::new(root).join(&path).display().to_string()
+            }
+            _ => path,
+        };
+        self.pending_jump = Some((full.clone(), at.saturating_sub(1), 0));
+        self.open_file(&full);
+    }
+
     /// タブに名前を付ける（空で外す）。
     fn rename_tab(&mut self, name: &str) {
         let Some(tab) = self.session.info.as_ref().map(|i| i.active_tab) else {
@@ -2218,6 +2325,7 @@ impl App {
                     overlay::PickKind::Session => self.switch_session(&name),
                     overlay::PickKind::Path => self.open_file(&name),
                     overlay::PickKind::Completion => self.insert_completion(at),
+                    overlay::PickKind::Grep => self.open_grep_hit(&name),
                 }
             }
             overlay::Action::Close => {
@@ -5067,6 +5175,64 @@ fn hunk_at(diff: &str, line: usize) -> Option<String> {
     Some(out)
 }
 
+/// 探すのに使う道具と引数。`rg` があればそれ、無ければ `git grep`。
+///
+/// **自前で木を歩かない。** 無視するファイルの決まり（`.gitignore`）を
+/// 自前で持つことになり、結果が道具ごとに食い違う。
+fn grep_command(pattern: &str) -> Option<(String, Vec<String>)> {
+    let has = |p: &str| {
+        std::process::Command::new(p)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok()
+    };
+    if has("rg") {
+        return Some((
+            "rg".into(),
+            // `-n` 行番号、`--no-heading` 1 行 1 件、`-S` 大文字を打った
+            // ときだけ区別（探し窓と同じ約束）。
+            ["-n", "--no-heading", "-S", "--color=never", "--", pattern]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+        ));
+    }
+    if has("git") {
+        return Some((
+            "git".into(),
+            ["grep", "-n", "-I", "--no-color", "-e", pattern]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+        ));
+    }
+    None
+}
+
+/// `パス:行:本文` を割る。**Windows のドライブ名で割らない。**
+///
+/// `C:\dev\a.rs:12:foo` の最初の `:` はドライブ名の区切り。そこで割ると
+/// パスが `C` になって、何も開けない。
+fn split_grep_hit(line: &str) -> Option<(String, usize)> {
+    let mut at = 0usize;
+    loop {
+        let rest = line.get(at..)?;
+        let i = at + rest.find(':')?;
+        // ドライブ名（`C:`）は飛ばす。
+        let is_drive = i == 1 && line.as_bytes()[0].is_ascii_alphabetic();
+        if !is_drive {
+            let after = line.get(i + 1..)?;
+            let end = after.find(':').unwrap_or(after.len());
+            if let Ok(n) = after[..end].parse::<usize>() {
+                return Some((line[..i].to_string(), n));
+            }
+        }
+        at = i + 1;
+    }
+}
+
 /// 同じファイルを指しているか。区切りとドライブ名の大小を吸収する。
 fn same_file(a: &str, b: &str) -> bool {
     let norm = |s: &str| {
@@ -6601,6 +6767,61 @@ diff --git a/f.txt b/f.txt
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **本物の道具で探せて、その結果がそのまま割れる。**
+    ///
+    /// 引数の形が違えば結果は出ないし、出ても割れなければ開けない。
+    /// 2 つは繋がっているので、繋がったまま試す。
+    #[test]
+    fn the_chosen_tool_returns_something_we_can_open() {
+        let Some((program, args)) = grep_command("PROTOCOL_VERSION") else {
+            eprintln!("rg も git も無いので飛ばします");
+            return;
+        };
+        let Ok(out) = std::process::Command::new(&program)
+            .args(&args)
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+        else {
+            eprintln!("{program} を実行できないので飛ばします");
+            return;
+        };
+        let text = String::from_utf8_lossy(&out.stdout);
+        let Some(first) = text.lines().next() else {
+            eprintln!("このリポジトリで見つからないので飛ばします");
+            return;
+        };
+        let hit = split_grep_hit(first);
+        assert!(hit.is_some(), "結果を割れない: {first}");
+        let (path, line) = hit.expect("割れている");
+        assert!(!path.is_empty() && line > 0, "path={path} line={line}");
+    }
+
+    /// 検索結果の 1 行を割る。**Windows のドライブ名で割らない。**
+    #[test]
+    fn a_grep_hit_splits_at_the_line_number_not_the_drive() {
+        assert_eq!(
+            split_grep_hit("src/main.rs:42:fn main() {"),
+            Some(("src/main.rs".to_string(), 42))
+        );
+        // `C:` の `:` は行番号の区切りではない
+        assert_eq!(
+            split_grep_hit(r"C:\dev.rs:7:let x = 1;"),
+            Some((r"C:\dev.rs".to_string(), 7))
+        );
+        // 本文に `:` が入っていても、最初の数字で決まる
+        assert_eq!(
+            split_grep_hit("a.rs:3:let m: Map = x;"),
+            Some(("a.rs".to_string(), 3))
+        );
+    }
+
+    /// 行番号の無い行は開けない。**当てずっぽうで開かない。**
+    #[test]
+    fn a_line_without_a_number_is_not_opened() {
+        assert!(split_grep_hit("no colon here").is_none());
+        assert!(split_grep_hit("a.rs:not-a-number:x").is_none());
     }
 
     /// `s/古い/新しい/` を割る。

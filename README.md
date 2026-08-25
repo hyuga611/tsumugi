@@ -95,6 +95,12 @@ layout and each pane's directory come back on the next launch** (the screen
 contents are never written to disk). For an agent, the resume line is placed
 at the prompt — pressing it is your call.
 
+**Finding and fixing** — `/` matches exactly what you typed, `g/` takes a
+regular expression. `:grep WORD` searches the whole project and opens straight
+from the results (`rg` if you have it, `git grep` otherwise). `:123` jumps to a
+line, `s/old/new/` (`%s` for the whole file) substitutes. `o` and `O` keep the
+indent of the line you were on.
+
 **Language servers (LSP)** — errors are underlined with a squiggle and `[e`
 `]e` walk them; `gd` goes to the definition, Ctrl+Space completes. It is
 **use-it-if-you-have-it**: with no language server installed, nothing happens

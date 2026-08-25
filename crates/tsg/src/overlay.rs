@@ -442,6 +442,8 @@ pub enum PickKind {
     Path,
     /// 補完の候補。選んだら打ちかけの語と入れ替える。
     Completion,
+    /// 串刺し検索の結果（`パス:行:本文`）。選んだらその行を開く。
+    Grep,
 }
 
 impl Picker {

@@ -489,9 +489,31 @@ fn diff_span(before: &str, after: &str) -> Option<Splice> {
     })
 }
 
+/// タブ幅。**8 桁で数える**（端末の既定と同じ）。
+///
+/// 設定で変えられるようにはしていない。ここで変えると、同じファイルが
+/// 端末に出したときと違う位置に見える。
+const TAB: usize = 8;
+
 fn cells_of(s: &str, amb: AmbiguousWidth) -> Vec<Cell> {
     let mut out: Vec<Cell> = Vec::new();
     for c in s.chars() {
+        // タブは**字として持つ**。落とすと、開いて保存しただけで
+        // 他人のファイルの字下げが全部消える（実際にそうなっていた）。
+        // 幅は次のタブ位置まで。端末が動かすのと同じ数え方。
+        if c == '\t' {
+            let w = TAB - (out.len() % TAB);
+            out.push(Cell {
+                text: "\t".to_string(),
+                width: w as u8,
+                attrs: tsg_term::Attrs::default(),
+                link: 0,
+            });
+            for _ in 1..w {
+                out.push(Cell::spacer(tsg_term::Attrs::default()));
+            }
+            continue;
+        }
         let w = char_width(c, amb);
         if w == 0 {
             // 結合文字は直前へ足す。単独で置くと列がずれる（グリッドと同じ規則）。
@@ -879,5 +901,21 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "hello\nworld\n");
         assert!(!b.dirty, "保存後も dirty のまま");
         let _ = std::fs::remove_file(&p);
+    }
+}
+
+#[cfg(test)]
+mod tab_probe {
+    use super::*;
+
+    /// **開いて保存しただけで中身が変わらない。**
+    ///
+    /// タブで字下げしたファイルは世の中にいくらでもある。読み込みで
+    /// 落とすと、`:w` した瞬間に他人のファイルの字下げを全部消す。
+    #[test]
+    fn a_tab_indented_file_survives_a_round_trip() {
+        let src = "fn main() {\n\tlet a = 1;\n\t\tlet b = 2;\n}\n";
+        let f = FileBuffer::from_text(src, AmbiguousWidth::Narrow);
+        assert_eq!(f.text(), src, "開いただけで中身が変わっている");
     }
 }
