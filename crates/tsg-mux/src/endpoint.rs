@@ -99,8 +99,9 @@ mod imp {
     use super::{Endpoint, slug};
     use anyhow::{Context, Result, bail};
     use interprocess::local_socket::prelude::*;
-    use interprocess::local_socket::{FilesystemUdSocket, Listener, ListenerOptions, Name, Stream};
-    use interprocess::os::unix::local_socket::ListenerOptionsExt as _;
+    use interprocess::local_socket::{Listener, ListenerOptions, Name, Stream};
+    // 名前の型は OS 側にある（`local_socket` の直下には無い）。
+    use interprocess::os::unix::local_socket::{FilesystemUdSocket, ListenerOptionsExt as _};
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
     use std::path::PathBuf;
 
