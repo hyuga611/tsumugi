@@ -931,6 +931,7 @@ impl App {
                         self.session.active = fallback;
                     }
                     self.sync_layout();
+                    self.sync_previews();
                     self.notice_agent_changes();
                 }
                 ServerMsg::Snapshot { pane, lines, .. } => {
@@ -1057,39 +1058,9 @@ impl App {
             // `ServerMsg::Resized` が届くので、合わせるのはそのとき。
             self.send_msg(&ClientMsg::Resize { pane, cols, rows });
         }
-        self.refit_previews();
+        self.sync_previews();
     }
 
-    /// 幅が変わったプレビューを組み直す。折り返しが窓に合わなくなるため。
-    fn refit_previews(&mut self) {
-        let stale: Vec<u32> = self
-            .session
-            .panes
-            .iter()
-            .filter(|(_, v)| {
-                v.preview
-                    .as_ref()
-                    .is_some_and(|p| p.state.grid.cols != v.text_rect().w.max(20))
-            })
-            .map(|(id, _)| *id)
-            .collect();
-        for id in stale {
-            let Some(view) = self.session.panes.get_mut(&id) else {
-                continue;
-            };
-            let Some(text) = view.file.as_ref().map(tsg_modal::FileBuffer::text) else {
-                view.preview = None;
-                continue;
-            };
-            let width = view.text_rect().w.max(20);
-            let rendered = tsg_modal::markdown::render(&text, width);
-            let rows = rendered.lines().count().max(1);
-            let mut term = tsg_term::Terminal::new(width, rows, tsg_term::ambiguous());
-            term.state.grid.set_max_scrollback(rows + 8);
-            term.feed(rendered.as_bytes());
-            view.preview = Some(term);
-        }
-    }
 
     // ---- マウス -----------------------------------------------------------
     //
@@ -1221,35 +1192,61 @@ impl App {
     /// コピー・Ctrl＋クリックは、ふつうのペインとまったく同じ経路に乗る。
     fn toggle_preview(&mut self) {
         let pane = self.session.active;
-        let Some(view) = self.session.panes.get_mut(&pane) else {
-            return;
-        };
-        if view.preview.take().is_some() {
-            view.top = 0;
-            self.status_msg = t!("素のまま表示に戻しました", "back to the raw text").into();
-            return;
-        }
-        let Some(file) = view.file.as_ref() else {
+        if !self.session.panes.get(&pane).is_some_and(PaneView::editing) {
             self.status_msg = t!(
                 "ファイルを開いてから使ってください（Space e）",
                 "open a file first (Space e)"
             )
             .into();
             return;
-        };
-        let width = view.text_rect().w.max(20);
-        let rendered = tsg_modal::markdown::render(&file.text(), width);
-        let rows = rendered.lines().count().max(1);
-        let mut term = tsg_term::Terminal::new(width, rows, tsg_term::ambiguous());
-        term.state.grid.set_max_scrollback(rows + 8);
-        term.feed(rendered.as_bytes());
-        view.preview = Some(term);
-        view.top = 0;
-        self.engine.set_cursor(Pos::default(), &{
-            let v = self.session.panes.get(&pane).expect("いま触ったペイン");
-            v.buffer()
+        }
+        // **決めるのはサーバ**。開き直したときに素のテキストへ戻ると、
+        // 読んでいた場所も見え方も失う。開いているファイルと同じ扱いにする。
+        self.send_msg(&ClientMsg::SetPreview {
+            pane: Some(pane),
+            on: None,
         });
-        self.status_msg = t!("読む形にしました（もう一度で戻る）", "rendered (press again to go back)").into();
+    }
+
+    /// サーバが言う「読む形かどうか」に写しを合わせる。
+    ///
+    /// 組み立てはここ 1 か所。幅が変わったときの組み直しも同じ道を通る。
+    fn sync_previews(&mut self) {
+        let want: Vec<(u32, bool)> = self
+            .session
+            .info
+            .as_ref()
+            .map(|i| i.panes.iter().map(|p| (p.id, p.preview)).collect())
+            .unwrap_or_default();
+        for (id, on) in want {
+            let Some(view) = self.session.panes.get_mut(&id) else {
+                continue;
+            };
+            if !on {
+                if view.preview.take().is_some() {
+                    view.top = 0;
+                }
+                continue;
+            }
+            let width = view.text_rect().w.max(20);
+            let fresh = view
+                .preview
+                .as_ref()
+                .is_some_and(|p| p.state.grid.cols == width);
+            if fresh {
+                continue;
+            }
+            let Some(text) = view.file.as_ref().map(tsg_modal::FileBuffer::text) else {
+                continue;
+            };
+            let rendered = tsg_modal::markdown::render(&text, width);
+            let rows = rendered.lines().count().max(1);
+            let mut term = tsg_term::Terminal::new(width, rows, tsg_term::ambiguous());
+            term.state.grid.set_max_scrollback(rows + 8);
+            term.feed(rendered.as_bytes());
+            view.preview = Some(term);
+            view.top = 0;
+        }
     }
 
     /// このペインに出てきたファイルパスを集めて一覧にする。
@@ -4123,6 +4120,8 @@ fn main() -> Result<()> {
         cli::Mode::InstallShellIntegration(name) => {
             return install_shell_integration(name.as_deref());
         }
+        cli::Mode::Open { path, render } => return rpc::open(&cli.session, path, *render),
+        cli::Mode::Render => return rpc::render(&cli.session, cli.pane),
         cli::Mode::Agents => return rpc::agents(&cli.session),
         cli::Mode::AgentState(state) => {
             return rpc::set_agent_state(&cli.session, state, cli.pane);

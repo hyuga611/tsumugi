@@ -36,7 +36,11 @@ pub fn session_dir() -> PathBuf {
 }
 
 fn file_of(name: &str) -> PathBuf {
-    session_dir().join(format!("{}.session", slug(name)))
+    file_in(&session_dir(), name)
+}
+
+fn file_in(dir: &std::path::Path, name: &str) -> PathBuf {
+    dir.join(format!("{}.session", slug(name)))
 }
 
 /// 置き場所を作り、他のユーザから閉じる。
@@ -52,13 +56,7 @@ fn ensure_dir(dir: &std::path::Path) -> std::io::Result<()> {
 
 /// このセッションが生きていることを書き残す。
 pub fn register(name: &str) {
-    let path = file_of(name);
-    if let Some(dir) = path.parent()
-        && ensure_dir(dir).is_err()
-    {
-        return;
-    }
-    let _ = std::fs::write(path, name);
+    register_in(&session_dir(), name);
 }
 
 pub fn unregister(name: &str) {
@@ -67,7 +65,22 @@ pub fn unregister(name: &str) {
 
 /// 書き残されている名前（生きているとは限らない）。
 pub fn known() -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(session_dir()) else {
+    known_in(&session_dir())
+}
+
+// 置き場所を引数に取る形も持つ。**テストが本物の置き場所を触らない**ため。
+// 走っている tsumugi が `live()` で控えを掃除するので、共有の置き場所で
+// 試すと、無関係な掃除にテストの控えが巻き込まれて落ちる（実際に落ちた）。
+
+fn register_in(dir: &std::path::Path, name: &str) {
+    if ensure_dir(dir).is_err() {
+        return;
+    }
+    let _ = std::fs::write(file_in(dir, name), name);
+}
+
+fn known_in(dir: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
     let mut out: Vec<String> = entries
@@ -105,25 +118,48 @@ pub fn live() -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// テスト専用の置き場所。**本物を触らない。**
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tsumugi-sessions-test-{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = ensure_dir(&dir);
+        dir
+    }
+
     #[test]
     fn the_real_name_survives_the_round_trip() {
         // ファイル名に使えない字が入っていても、一覧には元の名前が出る。
+        let dir = scratch("roundtrip");
         let name = "作業:1/2";
-        register(name);
-        assert!(known().contains(&name.to_string()), "潰した名前しか残っていない");
-        unregister(name);
-        assert!(!known().contains(&name.to_string()));
+        register_in(&dir, name);
+        assert!(
+            known_in(&dir).contains(&name.to_string()),
+            "潰した名前しか残っていない"
+        );
+        let _ = std::fs::remove_file(file_in(&dir, name));
+        assert!(!known_in(&dir).contains(&name.to_string()));
     }
 
     #[test]
     fn names_that_squash_to_the_same_thing_do_not_collide() {
         // どちらも `a_b` に潰れる
-        register("a:b");
-        register("a/b");
-        let list = known();
-        assert!(list.contains(&"a:b".to_string()));
-        assert!(list.contains(&"a/b".to_string()));
-        unregister("a:b");
-        unregister("a/b");
+        let dir = scratch("collide");
+        register_in(&dir, "a:b");
+        register_in(&dir, "a/b");
+        let list = known_in(&dir);
+        assert!(list.contains(&"a:b".to_string()), "{list:?}");
+        assert!(list.contains(&"a/b".to_string()), "{list:?}");
+    }
+
+    /// 控えの中身はそのまま一覧に出て、選ぶとサーバが起きる。
+    /// **人が書き換えられる場所なので、変なものは受け取らない。**
+    #[test]
+    fn a_tampered_entry_is_not_listed() {
+        let dir = scratch("tampered");
+        let _ = std::fs::write(dir.join("a.session"), "");
+        let _ = std::fs::write(dir.join("b.session"), "x".repeat(200));
+        let _ = std::fs::write(dir.join("c.session"), "こわれ\u{1b}[2J");
+        let _ = std::fs::write(dir.join("d.session"), "ちゃんとした名前");
+        assert_eq!(known_in(&dir), vec!["ちゃんとした名前".to_string()]);
     }
 }

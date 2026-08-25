@@ -405,6 +405,40 @@ pub fn open_tab_here(session: &str, cwd: Option<String>, command: Option<Vec<Str
     true
 }
 
+/// 走っている窓でファイルを開く。`render` を付けると読む形で。
+///
+/// **端末から `tsg --open README.md` と打てる**ことに意味がある。
+/// エディタを別に開かずに、いま見ている窓の中で読める。
+pub fn open(session: &str, path: &str, render: bool) -> Result<()> {
+    let full = std::fs::canonicalize(path)
+        .unwrap_or_else(|_| std::path::PathBuf::from(path))
+        .display()
+        .to_string();
+    // Windows の `\?\` 前置は、そのまま渡すと相手側で扱いに困る。
+    let full = full.strip_prefix(r"\\?\").unwrap_or(&full).to_string();
+    let (mut client, info) = attach(session)?;
+    let pane = active_pane(&info);
+    client.send(&ClientMsg::OpenFile { pane, path: full })?;
+    if render {
+        client.send(&ClientMsg::SetPreview {
+            pane: Some(pane),
+            on: Some(true),
+        })?;
+    }
+    std::thread::sleep(Duration::from_millis(250));
+    let _ = client.send(&ClientMsg::Detach);
+    Ok(())
+}
+
+/// 読む形を切り替える。
+pub fn render(session: &str, pane: Option<u32>) -> Result<()> {
+    let (mut client, _) = attach(session)?;
+    client.send(&ClientMsg::SetPreview { pane, on: None })?;
+    std::thread::sleep(Duration::from_millis(200));
+    let _ = client.send(&ClientMsg::Detach);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

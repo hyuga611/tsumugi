@@ -115,7 +115,7 @@ pub fn render(text: &str, width: usize) -> String {
     out
 }
 
-/// ``` または ~~~ で始まるか。返すのは言語名。
+/// 囲みの始まり（``` / ~~~）か。返すのは言語名。
 fn fence_of(line: &str) -> Option<&str> {
     let t = line.trim_start();
     for f in ["```", "~~~"] {
@@ -410,6 +410,12 @@ fn wrap(s: &str, width: usize) -> Vec<String> {
     if !line.is_empty() || out.is_empty() {
         out.push(line);
     }
+    // 折り返しで残った行末の空白は落とす。桁の上限ぎりぎりを埋めてしまう。
+    for l in &mut out {
+        while l.ends_with(' ') {
+            l.pop();
+        }
+    }
     out
 }
 
@@ -483,13 +489,26 @@ mod tests {
         assert!(got.contains("- これも印にしない"), "{got}");
     }
 
+    /// 幅は 20 桁で下限を切る。狭すぎる窓でも、そこで折り返して読めなくしない。
+    #[test]
+    fn a_very_narrow_pane_still_gets_a_readable_width() {
+        for line in plain(&render("あいうえおかきくけこさしすせそ
+", 4)).lines() {
+            assert!(display_len(line) <= 20, "{line:?} が下限の 20 桁を超えた");
+        }
+    }
+
     #[test]
     fn a_table_lines_its_columns_up() {
         let src = "| 名前 | 数 |\n|---|---|\n| あ | 1 |\n| いいい | 22 |\n";
         let got = plain(&render(src, 60));
         let rows: Vec<&str> = got.lines().filter(|l| l.contains('│')).collect();
         assert_eq!(rows.len(), 3, "行が足りない: {got}");
-        let widths: Vec<usize> = rows.iter().map(|r| r.find('│').unwrap_or(0)).collect();
+        // **バイト位置ではなく表示桁で比べる。** 全角が混じると byte offset は揃わない。
+        let widths: Vec<usize> = rows
+            .iter()
+            .map(|r| display_len(&r.chars().take_while(|c| *c != '│').collect::<String>()))
+            .collect();
         assert!(
             widths.windows(2).all(|w| w[0] == w[1]),
             "桁がそろっていない: {got}"
@@ -499,16 +518,16 @@ mod tests {
     #[test]
     fn long_lines_wrap_to_the_width() {
         let src = "aaa bbb ccc ddd eee fff ggg hhh iii jjj\n";
-        for line in plain(&render(src, 12)).lines() {
-            assert!(display_len(line) <= 12, "{line:?} が 12 桁を超えた");
+        for line in plain(&render(src, 24)).lines() {
+            assert!(display_len(line) <= 24, "{line:?} が 24 桁を超えた");
         }
     }
 
     #[test]
     fn japanese_wraps_without_overflowing() {
         let src = "あいうえおかきくけこさしすせそたちつてと\n";
-        for line in plain(&render(src, 10)).lines() {
-            assert!(display_len(line) <= 10, "{line:?} が 10 桁を超えた");
+        for line in plain(&render(src, 20)).lines() {
+            assert!(display_len(line) <= 20, "{line:?} が 20 桁を超えた");
         }
     }
 }

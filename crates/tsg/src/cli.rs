@@ -31,6 +31,10 @@ pub enum Mode {
     ShellIntegration(Option<String>),
     /// シェル統合を置いて rc に 1 行足す
     InstallShellIntegration(Option<String>),
+    /// 走っているセッションでファイルを開く
+    Open { path: String, render: bool },
+    /// 読む形を切り替える
+    Render,
     /// エージェントが自分の状態を名乗る（hooks から呼ばれる）
     AgentState(String),
     /// どのペインのエージェントがどうなっているか
@@ -264,6 +268,17 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Cli {
                 cli.pane = next_value(&args, &mut i).and_then(|v| v.parse().ok());
             }
             "--new-window" | "-n" => cli.new_window = true,
+            "--open" | "-o" => {
+                let path = next_value(&args, &mut i).unwrap_or_default();
+                cli.mode = Mode::Open {
+                    path,
+                    render: false,
+                };
+            }
+            "--render" => match &mut cli.mode {
+                Mode::Open { render, .. } => *render = true,
+                _ => cli.mode = Mode::Render,
+            },
             "--agents" => cli.mode = Mode::Agents,
             "--agent-state" => {
                 let v = next_value(&args, &mut i).unwrap_or_default();

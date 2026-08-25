@@ -66,6 +66,9 @@ struct Pane {
     /// エージェントが名乗った状態。**サーバが持つ**ので、窓を閉じても
     /// 開き直せば「どれが返事待ちか」が残っている。
     agent: Option<AgentState>,
+    /// Markdown を読む形で見せているか。表示の状態だが、**開き直しても
+    /// 戻らない**ようにサーバが預かる（開いているファイルと同じ扱い）。
+    preview: bool,
 }
 
 /// サーバが預かるファイル。
@@ -130,6 +133,7 @@ impl State {
                     rows: p.rows,
                     alive: p.alive,
                     agent: p.agent,
+                    preview: p.preview,
                 })
                 .collect(),
         }
@@ -220,6 +224,7 @@ impl State {
                 alive: true,
                 file: None,
                 agent: None,
+                preview: false,
             },
         );
         Ok(id)
@@ -386,6 +391,18 @@ impl State {
                     p.agent = Some(state);
                     let info = self.info();
                     self.broadcast(&ServerMsg::Layout(info));
+                }
+            }
+
+            ClientMsg::SetPreview { pane, on } => {
+                let target = pane.or_else(|| self.active_pane());
+                if let Some(p) = target.and_then(|id| self.panes.get_mut(&id)) {
+                    let next = on.unwrap_or(!p.preview);
+                    if p.preview != next {
+                        p.preview = next;
+                        let info = self.info();
+                        self.broadcast(&ServerMsg::Layout(info));
+                    }
                 }
             }
 
@@ -592,6 +609,7 @@ impl State {
             ClientMsg::CloseFile { pane } => {
                 if let Some(p) = self.panes.get_mut(&pane) {
                     p.file = None;
+                    p.preview = false;
                 }
                 self.broadcast(&ServerMsg::FileClosed { pane });
             }

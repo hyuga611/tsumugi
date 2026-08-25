@@ -289,6 +289,12 @@ pub struct PaneInfo {
     /// シェル統合（OSC 133）から分かる範囲だけをクライアント側で補う。
     #[serde(default)]
     pub agent: Option<AgentState>,
+    /// Markdown を読む形で見せているか。
+    ///
+    /// **サーバが持つ。** 窓を閉じて開き直したときに素のテキストへ戻ると、
+    /// 読んでいた場所も見え方も失う。開いていたファイルと同じ扱いにする。
+    #[serde(default)]
+    pub preview: bool,
 }
 
 /// エージェントが何をしているか。`tsg --agent-state` と hooks から入る。
@@ -385,6 +391,13 @@ pub enum ClientMsg {
         #[serde(default)]
         pane: Option<u32>,
         state: AgentState,
+    },
+    /// 読む形の切り替え。`on` を書かなければ反転。
+    SetPreview {
+        #[serde(default)]
+        pane: Option<u32>,
+        #[serde(default)]
+        on: Option<bool>,
     },
     /// キー入力。`data` は base64。
     Input {
