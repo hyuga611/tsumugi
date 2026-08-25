@@ -12,6 +12,7 @@ rust-version = "1.90"
 [workspace.dependencies]
 tsg-pty = { path = "crates/tsg-pty" }
 tsg-term = { path = "crates/tsg-term" }
+tsg-lsp = { path = "crates/tsg-lsp" }
 
 anyhow = "1"
 thiserror = "2"

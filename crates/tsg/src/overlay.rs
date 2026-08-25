@@ -440,6 +440,8 @@ pub enum PickKind {
     Session,
     /// ファイルパス。選んだらそのペインで開く。
     Path,
+    /// 補完の候補。選んだら打ちかけの語と入れ替える。
+    Completion,
 }
 
 impl Picker {

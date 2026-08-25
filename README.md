@@ -95,6 +95,12 @@ layout and each pane's directory come back on the next launch** (the screen
 contents are never written to disk). For an agent, the resume line is placed
 at the prompt — pressing it is your call.
 
+**Language servers (LSP)** — errors are underlined with a squiggle and `[e`
+`]e` walk them; `gd` goes to the definition, Ctrl+Space completes. It is
+**use-it-if-you-have-it**: with no language server installed, nothing happens
+(you just get no diagnostics). Defaults cover rust-analyzer, gopls, pyright,
+typescript-language-server and clangd; add more under `[lsp.<ext>]`.
+
 **Remote** — list a host under `[domains]` and open it with `tsg -d <name>`
 (it also shows up in `Space S`). **Losing the link doesn't lose the session**:
 the far side keeps running and reattaching brings the screen back. tsumugi has

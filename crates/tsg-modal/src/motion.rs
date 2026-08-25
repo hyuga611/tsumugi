@@ -479,15 +479,32 @@ pub fn matches_in(buf: &dyn Buffer, line: usize, search: &Search) -> Vec<(usize,
 }
 
 /// モーションを `count` 回適用した行き先。
-pub fn apply(
-    motion: Motion,
-    from: Pos,
-    count: usize,
-    buf: &dyn Buffer,
-    view: View,
-    last_find: Option<(char, bool, bool)>,
-    search: Option<&Search>,
-) -> Pos {
+/// モーションが要る周りの事情。
+///
+/// **引数で持ち回さない。** 増えるたびに呼ぶ側を全部書き換えることになる
+/// （実際に 8 個目で行き詰まった）。
+#[derive(Clone, Copy, Default)]
+pub struct Ctx<'a> {
+    /// 画面の見え方（`H` `M` `L` とページ送りに要る）。
+    pub view: View,
+    /// 直前の `f` / `t`（`;` `,` が繰り返す）。
+    pub last_find: Option<(char, bool, bool)>,
+    /// 探しているもの（`n` `N`）。
+    pub search: Option<&'a Search>,
+    /// 言語サーバが言ってきた誤りの行（`[e` `]e`）。
+    ///
+    /// **端末には無い**（あちらは OSC 133 の失敗したコマンドが誤り）ので、
+    /// ファイルを開いているときだけ入る。
+    pub error_lines: &'a [usize],
+}
+
+pub fn apply(motion: Motion, from: Pos, count: usize, buf: &dyn Buffer, ctx: &Ctx<'_>) -> Pos {
+    let Ctx {
+        view,
+        last_find,
+        search,
+        error_lines,
+    } = *ctx;
     let count = count.max(1);
     let last_line = buf.line_count().saturating_sub(1);
     let half = (view.height / 2).max(1);
@@ -495,12 +512,22 @@ pub fn apply(
 
     // プロンプト行の並び。`[[` `]]` `[e` `]e` はここだけを見る。
     let prompts = |errors_only: bool| -> Vec<usize> {
-        buf.marks()
+        let from_marks: Vec<usize> = buf
+            .marks()
             .blocks()
             .into_iter()
             .filter(|b| !errors_only || b.is_error())
             .map(|b| b.prompt_line)
-            .collect()
+            .collect();
+        // 印が無いのは、ファイルを開いているとき。**そこでの「誤り」は
+        // 言語サーバが言ってきたもの。** 同じキーで同じことをする。
+        if errors_only && from_marks.is_empty() {
+            let mut lines = error_lines.to_vec();
+            lines.sort_unstable();
+            lines.dedup();
+            return lines;
+        }
+        from_marks
     };
 
     // 発話の頭。行頭（空白は飛ばす）が印で始まる行。
@@ -768,9 +795,10 @@ mod tests {
             from,
             count,
             &buf,
-            View { top: 0, height: 10 },
-            None,
-            None,
+            &Ctx {
+                view: View { top: 0, height: 10 },
+                ..Ctx::default()
+            },
         )
     }
 
@@ -939,7 +967,17 @@ mod tests {
         let buf = TermBuffer::new(&t.state.grid, &t.state.marks);
         let view = View { top: 2, height: 4 };
         assert_eq!(
-            apply(Motion::ScreenTop, Pos::new(0, 0), 1, &buf, view, None, None).line,
+            apply(
+                Motion::ScreenTop,
+                Pos::new(0, 0),
+                1,
+                &buf,
+                &Ctx {
+                    view,
+                    ..Ctx::default()
+                }
+            )
+            .line,
             2
         );
         assert_eq!(
@@ -948,9 +986,10 @@ mod tests {
                 Pos::new(0, 0),
                 1,
                 &buf,
-                view,
-                None,
-                None
+                &Ctx {
+                    view,
+                    ..Ctx::default()
+                },
             )
             .line,
             5
@@ -965,5 +1004,42 @@ mod tests {
         assert_eq!(Motion::LineEnd.kind(), MotionKind::Inclusive);
         assert_eq!(Motion::Down.kind(), MotionKind::Linewise);
         assert_eq!(Motion::DocEnd.kind(), MotionKind::Linewise);
+    }
+}
+
+#[cfg(test)]
+mod error_lines {
+    use super::*;
+    use tsg_buffer::FileBuffer;
+    use tsg_term::AmbiguousWidth;
+
+    /// ファイルには OSC 133 の印が無い。**そこでの「次の誤り」は
+    /// 言語サーバが言ってきた行。** 同じキーで同じことをする。
+    #[test]
+    fn on_a_file_the_error_motion_follows_the_language_server() {
+        let buf = FileBuffer::from_text("a\nb\nc\nd\ne\n", AmbiguousWidth::Narrow);
+        let ctx = Ctx {
+            error_lines: &[3, 1],
+            ..Ctx::default()
+        };
+        // 並んでいなくても順に飛ぶ
+        let at = apply(Motion::NextError, Pos::new(0, 0), 1, &buf, &ctx);
+        assert_eq!(at.line, 1);
+        let at = apply(Motion::NextError, at, 1, &buf, &ctx);
+        assert_eq!(at.line, 3);
+        // 一番下からは動かない（端で止まる）
+        let at = apply(Motion::NextError, at, 1, &buf, &ctx);
+        assert_eq!(at.line, 3);
+
+        let at = apply(Motion::PrevError, Pos::new(4, 0), 1, &buf, &ctx);
+        assert_eq!(at.line, 3);
+    }
+
+    /// 誤りが無ければ動かない。**当てずっぽうで飛ばない。**
+    #[test]
+    fn with_no_errors_nothing_moves() {
+        let buf = FileBuffer::from_text("a\nb\nc\n", AmbiguousWidth::Narrow);
+        let at = apply(Motion::NextError, Pos::new(0, 0), 1, &buf, &Ctx::default());
+        assert_eq!(at.line, 0);
     }
 }

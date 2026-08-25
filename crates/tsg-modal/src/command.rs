@@ -159,6 +159,10 @@ pub enum MuxRequest {
     Broadcast,
     /// いまの場所の `git diff` を色付きで開く（`Space g`）。
     GitDiff,
+    /// 定義へ移動（`gd`）。言語サーバに聞く。
+    Definition,
+    /// 補完（入力モードで Ctrl+Space）。
+    Complete,
     /// 差分のかたまりを 1 つ採用する / 取り消す（`Space G` / `Space R`）。
     ///
     /// **見て終わりの差分は、結局もう一度どこかで同じ判断をすることになる。**
@@ -497,6 +501,22 @@ pub const REGISTRY: &[CommandSpec] = &[
         title_en: "Open the current diff, coloured (git diff)",
         keys: &["Space g"],
         mouse: MousePath::Menu("ファイル"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "lsp.definition",
+        title: "定義へ移動（gd）",
+        title_en: "Go to definition (gd)",
+        keys: &["gd"],
+        mouse: MousePath::Menu("編集"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "lsp.complete",
+        title: "補完（Ctrl＋Space）",
+        title_en: "Complete (Ctrl+Space)",
+        keys: &["ctrl+space"],
+        mouse: MousePath::Menu("編集"),
         in_palette: true,
     },
     CommandSpec {

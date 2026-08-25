@@ -61,6 +61,11 @@ pub struct Config {
     /// **鍵も設定も `ssh` に任せる。** こちらで持つと、`~/.ssh/config` に
     /// 書いてあることを二重に書かせることになる。
     pub domains: Vec<Domain>,
+    /// 言語サーバの起こし方。拡張子 -> 起こし方。
+    ///
+    /// **既定は消さず、上に重ねる。** 書かなかった拡張子は今までどおり
+    /// （`tsg_lsp::servers` の表）。
+    pub lsp: std::collections::BTreeMap<String, tsg_lsp::servers::Spec>,
     /// 差し替えたキー。**既定は消さず、上に重ねる**（`keymap.rs`）。
     pub keys: tsg_modal::Keymap,
 }
@@ -81,6 +86,7 @@ impl Default for Config {
             guides: true,
             line_numbers: true,
             domains: Vec::new(),
+            lsp: std::collections::BTreeMap::new(),
             keys: tsg_modal::Keymap::default(),
         }
     }
@@ -113,6 +119,9 @@ struct File {
     /// 遠隔の繋ぎ先。`[domains.<名前>]` の形で書く。
     #[serde(default)]
     domains: std::collections::BTreeMap<String, DomainFile>,
+    /// 言語サーバ。`[lsp.<拡張子>]` の形で書く。
+    #[serde(default)]
+    lsp: std::collections::BTreeMap<String, LspFile>,
     #[serde(default)]
     scrollback: Scrollback,
     #[serde(default)]
@@ -147,6 +156,19 @@ struct ThemeFile {
     /// 綴りを間違えたときに「書いたのに効かない」で終わらせない。
     #[serde(default)]
     colors: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct LspFile {
+    /// 起こすプログラム。
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    /// LSP に名乗る言語名。書かなければ拡張子をそのまま。
+    language: Option<String>,
+    /// 根の目印。書かなければファイルの在るところが根。
+    #[serde(default)]
+    roots: Vec<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -271,6 +293,18 @@ pub fn template() -> String {
 [scrollback]
 # さかのぼって読める行数。
 # lines = {sb}
+
+[lsp]
+# 言語サーバ。**入っていれば使う**という表で、入れさせるためのものでは
+# ありません。既定は rust-analyzer / gopls / pyright / typescript-language-server
+# / clangd で、入っていなければ何も起きません（診断が出ないだけ）。
+# 誤りは波線で出て、[e ]e で飛べます。gd で定義へ、Ctrl＋Space で補完。
+#
+# [lsp.rs]
+# command  = "rust-analyzer"
+# args     = []
+# language = "rust"           # LSP に名乗る言語名
+# roots    = ["Cargo.toml"]   # これが在るところを根と見なす
 
 [domains]
 # 遠隔のセッション。`tsg -d <名前>` で開きます（Space S の一覧にも出ます）。
@@ -478,6 +512,22 @@ impl Config {
             lang: f.ui.lang.as_deref().and_then(Lang::parse).unwrap_or(d.lang),
             guides: f.ui.guides.unwrap_or(d.guides),
             line_numbers: f.ui.line_numbers.unwrap_or(d.line_numbers),
+            lsp: f
+                .lsp
+                .iter()
+                .filter(|(_, v)| !v.command.trim().is_empty())
+                .map(|(ext, v)| {
+                    (
+                        ext.to_ascii_lowercase(),
+                        tsg_lsp::servers::Spec {
+                            language: v.language.clone().unwrap_or_else(|| ext.clone()),
+                            program: v.command.clone(),
+                            args: v.args.clone(),
+                            roots: v.roots.clone(),
+                        },
+                    )
+                })
+                .collect(),
             domains: f
                 .domains
                 .iter()

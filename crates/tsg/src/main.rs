@@ -147,6 +147,10 @@ struct App {
     diff_cwd: Option<String>,
     /// 取り消し待ちのかたまり。**2 回押させる**ための控え。
     pending_revert: Option<String>,
+    /// いま出している補完の候補。
+    completions: Vec<tsg_lsp::Completion>,
+    /// 開いたら飛ぶ行き先（定義が別のファイルにあったとき）。
+    pending_jump: Option<(String, usize, usize)>,
     /// 次に届く差分で、最初のかたまりへカーソルを置く。
     ///
     /// **開いた瞬間に採否できる場所に居てほしい。** 1 行目はファイルの
@@ -214,9 +218,24 @@ impl App {
             domain: cli.domain.clone(),
             diff_cwd: None,
             pending_revert: None,
+            completions: Vec::new(),
+            pending_jump: None,
             want_first_hunk: false,
             command: cli.command.clone(),
         }
+    }
+
+    /// `[e` `]e` が見る行を、いまのペインの診断に合わせる。
+    ///
+    /// **ペインを切り替えたら指す先も変わる。** 前のペインの誤りへ
+    /// 飛ぶのは、頼んだことと違う。
+    fn sync_error_lines(&mut self) {
+        self.engine.error_lines = self
+            .session
+            .panes
+            .get(&self.session.active)
+            .map(|v| v.diagnostics.iter().map(|d| d.line).collect())
+            .unwrap_or_default();
     }
 
     /// いま繋いでいる遠隔の設定。
@@ -466,6 +485,14 @@ impl App {
             }
             MuxRequest::GitDiff => {
                 self.show_git_diff();
+                None
+            }
+            MuxRequest::Definition => {
+                self.go_to_definition();
+                None
+            }
+            MuxRequest::Complete => {
+                self.ask_completion();
                 None
             }
             MuxRequest::ApplyHunk { stage } => {
@@ -1196,6 +1223,18 @@ impl App {
                                 format!("reloaded {title} (changed outside)")
                             );
                         }
+                        None if self.pending_jump.is_some() => {
+                            // 定義を追って開いた。**開いた先の行へ飛ぶ。**
+                            let (want, line, col) = self.pending_jump.take().unwrap_or_default();
+                            let arrived = path.as_deref() == Some(want.as_str());
+                            let at = if arrived {
+                                Pos::new(line, col)
+                            } else {
+                                Pos::default()
+                            };
+                            self.engine.set_cursor(tsg_buffer::clamp(&buf, at), &buf);
+                            self.session.active = pane;
+                        }
                         None => {
                             // 差分なら最初のかたまりへ。1 行目は見出しで、
                             // そこでは採否のキーが効かない。
@@ -1306,6 +1345,30 @@ impl App {
                         format!("ペイン {pane} のシェルが終了しました"),
                         format!("the shell in pane {pane} exited")
                     );
+                }
+                ServerMsg::Diagnostics { pane, items } => {
+                    if let Some(v) = self.session.panes.get_mut(&pane) {
+                        // **総取り替え。** 直った誤りが残らない。
+                        v.diagnostics = items;
+                    }
+                    self.sync_error_lines();
+                    got = true;
+                }
+                ServerMsg::Jump {
+                    pane,
+                    path,
+                    line,
+                    col,
+                } => {
+                    self.session.active = pane;
+                    self.jump_to(&path, line, col);
+                    got = true;
+                }
+                ServerMsg::Completions { pane, items } => {
+                    if pane == self.session.active {
+                        self.show_completions(items);
+                        got = true;
+                    }
                 }
                 ServerMsg::Pong => {}
                 ServerMsg::Error { message } => self.status_msg = message,
@@ -1887,6 +1950,128 @@ impl App {
         }
     }
 
+    /// 定義の行き先へ。**別のファイルなら開く。**
+    fn jump_to(&mut self, path: &str, line: usize, col: usize) {
+        let here = self
+            .active_view()
+            .and_then(|v| v.file.as_ref())
+            .and_then(|f| f.path.clone());
+        // **字面で比べない。** 言語サーバはドライブ名を小文字で返してくる
+        // ことがあり、そのまま比べると同じファイルを開き直してしまう。
+        let same = here
+            .as_deref()
+            .is_some_and(|h| same_file(&h.display().to_string(), path));
+        if !same {
+            // 開くのは非同期。**開いたら飛ぶ**ように、行き先を控えておく。
+            self.pending_jump = Some((path.to_string(), line, col));
+            self.open_file(path);
+            return;
+        }
+        let Some(view) = self.session.panes.get(&self.session.active) else {
+            return;
+        };
+        let buf = view.buffer();
+        self.engine
+            .set_cursor(tsg_buffer::clamp(&buf, Pos::new(line, col)), &buf);
+        self.status_msg.clear();
+    }
+
+    /// 補完の一覧を出す。**空なら何も出さない**（打つたびに投げるので、
+    /// 出ないたびに知らせが出ると読めなくなる）。
+    fn show_completions(&mut self, items: Vec<tsg_lsp::Completion>) {
+        if items.is_empty() {
+            return;
+        }
+        let labels: Vec<String> = items
+            .iter()
+            .map(|c| match &c.detail {
+                Some(d) => format!("{}  {d}", c.label),
+                None => c.label.clone(),
+            })
+            .collect();
+        self.completions = items;
+        self.picker.show(
+            t!("補完（Enter で入れる）", "Completions (Enter to insert)"),
+            labels,
+            overlay::PickKind::Completion,
+        );
+    }
+
+    /// 選ばれた候補を入れる。
+    ///
+    /// **打ちかけの語を置き換える。** 「push」まで打って `push_str` を
+    /// 選んだとき、そのまま入れると `pushpush_str` になる。
+    fn insert_completion(&mut self, at: usize) {
+        let Some(item) = self.completions.get(at).cloned() else {
+            return;
+        };
+        let pane = self.session.active;
+        let cursor = self.engine.cursor();
+        let Some(file) = self
+            .session
+            .panes
+            .get_mut(&pane)
+            .and_then(|v| v.file.as_mut())
+        else {
+            return;
+        };
+        let text = file.line(cursor.line);
+        // 打ちかけの語の頭を探す。語を作る字（英数字と `_`）だけ遡る。
+        let upto: String = text.chars().take(cursor.col).collect();
+        let start = upto
+            .char_indices()
+            .rev()
+            .take_while(|(_, c)| c.is_alphanumeric() || *c == '_')
+            .last()
+            .map_or(cursor.col, |(i, _)| upto[..i].chars().count());
+
+        file.begin_group(cursor);
+        let range = Range::new(
+            Pos::new(cursor.line, start),
+            Pos::new(cursor.line, cursor.col),
+            RangeKind::Char,
+        );
+        file.replace(&range, &item.insert);
+        let end = Pos::new(cursor.line, start + item.insert.chars().count());
+        self.push_file();
+        let Some(view) = self.session.panes.get(&pane) else {
+            return;
+        };
+        let buf = view.buffer();
+        self.engine.set_cursor(tsg_buffer::clamp(&buf, end), &buf);
+    }
+
+    /// いまの位置の定義へ。
+    fn go_to_definition(&mut self) {
+        if !self.active_view().is_some_and(PaneView::editing) {
+            self.status_msg = t!(
+                "定義へ飛べるのはファイルを開いているときだけです",
+                "go-to-definition works on an open file only"
+            )
+            .into();
+            return;
+        }
+        let at = self.engine.cursor();
+        self.send_msg(&ClientMsg::Definition {
+            pane: self.session.active,
+            line: at.line,
+            col: at.col,
+        });
+    }
+
+    /// いまの位置で補完を頼む。
+    fn ask_completion(&mut self) {
+        if !self.active_view().is_some_and(PaneView::editing) {
+            return;
+        }
+        let at = self.engine.cursor();
+        self.send_msg(&ClientMsg::Complete {
+            pane: self.session.active,
+            line: at.line,
+            col: at.col,
+        });
+    }
+
     /// タブに名前を付ける（空で外す）。
     fn rename_tab(&mut self, name: &str) {
         let Some(tab) = self.session.info.as_ref().map(|i| i.active_tab) else {
@@ -2025,10 +2210,14 @@ impl App {
             overlay::Action::Run(id) => self.invoke(id, event_loop),
             overlay::Action::Pick(name) => {
                 let kind = self.picker.kind;
+                // 補完は「何番目か」で引く。**見出しは字を足してある**
+                // ので、名前から引き直すと当たらない。
+                let at = self.picker.selected;
                 self.picker.hide();
                 match kind {
                     overlay::PickKind::Session => self.switch_session(&name),
                     overlay::PickKind::Path => self.open_file(&name),
+                    overlay::PickKind::Completion => self.insert_completion(at),
                 }
             }
             overlay::Action::Close => {
@@ -2868,6 +3057,13 @@ impl App {
             return;
         }
 
+        // `[e` `]e` が見る行を、いまのペインに合わせる。**打つ直前に
+        // 揃える**ので、ペインを切り替える道が何本あっても取りこぼさない。
+        //
+        // 端末では失敗したコマンドへ、ファイルでは言語サーバの誤りへ。
+        // **同じキーで同じこと**をするので、覚え直すことは何も無い。
+        self.sync_error_lines();
+
         let was_insert = self.engine.mode() == Mode::Insert;
         let outcome = {
             let Some(view) = self.session.panes.get(&self.session.active) else {
@@ -3625,6 +3821,41 @@ impl App {
                     // **見せる側と当てる側で同じ関数を通す**（`line_at`）。
                     let row_line: Vec<usize> = (0..rect.h).map(|r| view.line_at(r)).collect();
                     let at = |r: usize| row_line.get(r).copied().unwrap_or(top + r);
+
+                    // 言語サーバが言ってきた誤り。**波線で下に引く。**
+                    // 字の色は変えない（構文強調と喧嘩して、どちらも
+                    // 読めなくなる）。
+                    for d in &view.diagnostics {
+                        let Some(r) = view.row_of(d.line, rect.h) else {
+                            continue;
+                        };
+                        let color = match d.severity {
+                            tsg_lsp::Severity::Error => th.gut_err,
+                            tsg_lsp::Severity::Warning => th.gut_run,
+                            _ => th.dim,
+                        };
+                        // 端の桁。**同じ行の中だけ**引く（次の行へ跨がない）。
+                        //
+                        // 画面より右から始まる誤りは引かない。`clamp` は
+                        // 下限が上限を超えると落ちるので、ここで切る。
+                        let from = d.col;
+                        if from >= rect.w {
+                            continue;
+                        }
+                        let to = if d.end_line == d.line {
+                            d.end_col.clamp(from + 1, rect.w)
+                        } else {
+                            rect.w
+                        };
+                        draw_underline(
+                            renderer,
+                            (rect.x + from) as f32,
+                            (rect.y + r) as f32,
+                            (to - from) as f32,
+                            Underline::Curly,
+                            color,
+                        );
+                    }
 
                     // 行番号。**ファイルを開いているときだけ。** 端末の行は
                     // コマンドの出力が積み上がったもので、番号を振っても
@@ -4836,6 +5067,15 @@ fn hunk_at(diff: &str, line: usize) -> Option<String> {
     Some(out)
 }
 
+/// 同じファイルを指しているか。区切りとドライブ名の大小を吸収する。
+fn same_file(a: &str, b: &str) -> bool {
+    let norm = |s: &str| {
+        let s = s.replace('\\', "/");
+        if cfg!(windows) { s.to_lowercase() } else { s }
+    };
+    norm(a) == norm(b)
+}
+
 /// `/古い/新しい/フラグ` を割る。`\/` は区切りではなく `/` の字。
 ///
 /// **区切りを含む文字列を置けないと使えない。** パスを置き換えるのは
@@ -5900,7 +6140,12 @@ fn main() -> Result<()> {
             println!("tsumugi (tsg) {}", cli::VERSION);
             return Ok(());
         }
-        cli::Mode::Server => return tsg_mux::server::run_with(&cli.session, cli.restore),
+        cli::Mode::Server => {
+            // 言語サーバの起こし方は設定に書いてある。**読むのはサーバ側**
+            // （ファイルを持っているのがそこなので、診断もそこで受ける）。
+            let (cfg, _) = Config::load();
+            return tsg_mux::server::run_with(&cli.session, cli.restore, cfg.lsp);
+        }
         cli::Mode::Send(text) => return rpc::send(&cli.session, text),
         cli::Mode::Tap => return rpc::tap(&cli.session),
         cli::Mode::List => return rpc::list(),

@@ -5,6 +5,7 @@
 
 pub mod client;
 pub mod endpoint;
+pub mod lsp;
 pub mod protocol;
 pub mod restore;
 pub mod server;
@@ -18,4 +19,4 @@ pub use protocol::{
     ClientMsg, Dir, Edit, Layout, PROTOCOL_VERSION, PaneInfo, ServerMsg, SessionInfo, TabInfo,
     decode_bytes, encode_bytes,
 };
-pub use server::{ServerHandle, run, spawn};
+pub use server::{ServerHandle, run_with, spawn};

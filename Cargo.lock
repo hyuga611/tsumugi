@@ -2256,6 +2256,7 @@ dependencies = [
  "serde_json",
  "toml",
  "tsg-buffer",
+ "tsg-lsp",
  "tsg-modal",
  "tsg-mux",
  "tsg-pty",
@@ -2270,6 +2271,15 @@ name = "tsg-buffer"
 version = "0.0.0"
 dependencies = [
  "tsg-term",
+]
+
+[[package]]
+name = "tsg-lsp"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2291,6 +2301,7 @@ dependencies = [
  "libc",
  "serde",
  "serde_json",
+ "tsg-lsp",
  "tsg-pty",
  "tsg-term",
  "widestring",

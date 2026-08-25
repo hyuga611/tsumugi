@@ -11,7 +11,7 @@
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -469,6 +469,22 @@ pub enum ClientMsg {
         tab: u32,
         name: String,
     },
+    /// 定義へ移動（`gd`）。答えは `ServerMsg::Jump`。
+    ///
+    /// **答えが来ないことがある。** 言語サーバが入っていない・まだ
+    /// 読み込み中・その位置に定義が無い。どれも普通に起きるので、
+    /// 待たせない（来たら動く）。
+    Definition {
+        pane: u32,
+        line: usize,
+        col: usize,
+    },
+    /// 補完（入力モードで Ctrl+Space）。答えは `ServerMsg::Completions`。
+    Complete {
+        pane: u32,
+        line: usize,
+        col: usize,
+    },
     /// 境界のドラッグ。`pane` の取り分を隣から `delta` だけ奪う。
     ResizeSplit {
         pane: u32,
@@ -629,6 +645,23 @@ pub enum ServerMsg {
         pane: u32,
     },
     Pong,
+    /// 開いているファイルの診断。**ファイルごとに総取り替え。**
+    Diagnostics {
+        pane: u32,
+        items: Vec<tsg_lsp::Diagnostic>,
+    },
+    /// 定義の行き先。
+    Jump {
+        pane: u32,
+        path: String,
+        line: usize,
+        col: usize,
+    },
+    /// 補完の候補。
+    Completions {
+        pane: u32,
+        items: Vec<tsg_lsp::Completion>,
+    },
     Error {
         message: String,
     },

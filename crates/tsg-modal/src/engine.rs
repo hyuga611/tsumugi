@@ -290,6 +290,11 @@ pub struct Engine {
     /// **エンジンが持つ。** 画面の側に置くと、ペインを切り替えた瞬間に
     /// `n` が何を指すのか分からなくなる。
     pub search: Option<Search>,
+    /// 言語サーバが言ってきた誤りの行。`[e` `]e` が見る。
+    ///
+    /// **エンジンが持つ。** ペインを切り替えても `]e` が何を指すのかを
+    /// 見失わないため（探している文字列と同じ扱い）。
+    pub error_lines: Vec<usize>,
     /// 次に開く探し窓を正規表現として読むか（`g/`）。
     ///
     /// **既定は素の文字列。** 端末で探すのはパスやエラー文で、`.` も `(` も
@@ -320,6 +325,7 @@ impl Engine {
             pending: Pending::default(),
             last_find: None,
             search: None,
+            error_lines: Vec::new(),
             search_regex: false,
             view: View::default(),
             help_visible: false,
@@ -478,6 +484,11 @@ impl Engine {
                             self.pending.clear();
                             self.search_regex = true;
                             Some(Command::OpenSearch { back: false })
+                        }
+                        // `gd` は定義へ。**vim と同じ字**にしておく。
+                        'd' => {
+                            self.pending.clear();
+                            Some(Command::Mux(MuxRequest::Definition))
                         }
                         'g' => {
                             let n = self.pending.count.take();
@@ -718,6 +729,16 @@ impl Engine {
         }
     }
 
+    /// モーションへ渡す周りの事情。
+    fn motion_ctx(&self) -> motion::Ctx<'_> {
+        motion::Ctx {
+            view: self.view,
+            last_find: self.last_find,
+            search: self.search.as_ref(),
+            error_lines: &self.error_lines,
+        }
+    }
+
     fn resolve_layout(&mut self, c: char) -> Option<Command> {
         let req = match c {
             's' => MuxRequest::Split(SplitDir::Vertical),
@@ -812,6 +833,8 @@ impl Engine {
                 self.search_regex = false;
                 Command::OpenSearch { back: false }
             }
+            "lsp.definition" => Command::Mux(MuxRequest::Definition),
+            "lsp.complete" => Command::Mux(MuxRequest::Complete),
             "search.regex" => {
                 self.search_regex = true;
                 Command::OpenSearch { back: false }
@@ -1088,15 +1111,7 @@ impl Engine {
     /// モーションを `Command` にする。operator-pending なら範囲へ畳む。
     fn motion_command(&mut self, m: Motion, buf: &dyn Buffer) -> Option<Command> {
         let count = self.take_count();
-        let target = motion::apply(
-            m,
-            self.cursor,
-            count,
-            buf,
-            self.view,
-            self.last_find,
-            self.search.as_ref(),
-        );
+        let target = motion::apply(m, self.cursor, count, buf, &self.motion_ctx());
 
         if let Some(op) = self.pending.operator.take() {
             let range = range_for(self.cursor, target, m.kind(), buf);
@@ -1146,15 +1161,7 @@ impl Engine {
                 vec![Effect::ModeChanged(self.mode)]
             }
             Command::Move { motion, count } => {
-                let target = motion::apply(
-                    motion,
-                    self.cursor,
-                    count,
-                    buf,
-                    self.view,
-                    self.last_find,
-                    self.search.as_ref(),
-                );
+                let target = motion::apply(motion, self.cursor, count, buf, &self.motion_ctx());
                 self.cursor = target;
                 if self.mode == Mode::OperatorPending {
                     self.mode = Mode::Normal;

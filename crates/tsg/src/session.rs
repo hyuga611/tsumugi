@@ -97,6 +97,9 @@ pub struct PaneView {
     /// すぎないので、端末に食わせればセルになり、描画・選択・コピー・
     /// Ctrl＋クリックがそのまま効く。専用の描画経路を増やさない。
     pub preview: Option<Terminal>,
+    /// 言語サーバが言ってきた誤り。**行番号で持つ**（ファイルの行なので
+    /// スクロールバックのように動かない）。
+    pub diagnostics: Vec<tsg_lsp::Diagnostic>,
     /// 畳んである出力の範囲（開始行, 終了行）。両端を含む。
     ///
     /// **行番号で持つ。** スクロールバックは末尾に足されるだけで、
@@ -191,6 +194,7 @@ impl PaneView {
             follow_tail: true,
             alive: true,
             preview: None,
+            diagnostics: Vec::new(),
             folds: Vec::new(),
         }
     }

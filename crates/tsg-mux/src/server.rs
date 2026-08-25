@@ -117,6 +117,9 @@ struct State {
     session: String,
     /// 前回の形から組み直すか。`--no-restore` で切る。
     restore: bool,
+    /// 言語サーバの世話。**開いているファイルと同じところに置く**
+    /// ので、窓を閉じて開き直しても診断が消えない。
+    lsp: crate::lsp::Lsp,
     panes: BTreeMap<u32, Pane>,
     tabs: Vec<TabInfo>,
     active_tab: u32,
@@ -147,6 +150,7 @@ impl State {
             spawn_cwd: None,
             spawn_command: None,
             restore: true,
+            lsp: crate::lsp::Lsp::default(),
         }
     }
 
@@ -298,6 +302,43 @@ impl State {
         };
         let _ = p.writer.write_all(line.as_bytes());
         let _ = p.writer.flush();
+    }
+
+    /// 言語サーバから届いたものを配る。
+    ///
+    /// **待たない。** 溜まっているぶんだけ拾って、無ければ何もしない。
+    fn poll_lsp(&mut self) {
+        for (pane, msg, what) in self.lsp.poll() {
+            let Some(pane) = pane else {
+                continue; // どのペインのものか分からないものは捨てる
+            };
+            match msg {
+                tsg_lsp::Incoming::Diagnostics { items, .. } => {
+                    self.broadcast(&ServerMsg::Diagnostics { pane, items });
+                }
+                tsg_lsp::Incoming::Answer { result, .. } => match what {
+                    Some(crate::lsp::Pending::Definition { .. }) => {
+                        match tsg_lsp::parse_definition(&result) {
+                            Some(at) => self.broadcast(&ServerMsg::Jump {
+                                pane,
+                                path: at.path,
+                                line: at.line,
+                                col: at.col,
+                            }),
+                            None => self.broadcast(&ServerMsg::Error {
+                                message: "定義が見つかりません".into(),
+                            }),
+                        }
+                    }
+                    Some(crate::lsp::Pending::Completion { .. }) => {
+                        // **数は絞る。** 何百も返ってくることがある。
+                        let items = tsg_lsp::parse_completions(&result, 50);
+                        self.broadcast(&ServerMsg::Completions { pane, items });
+                    }
+                    None => {}
+                },
+            }
+        }
     }
 
     /// 外で書き換えられたファイルを読み直す。
@@ -722,6 +763,23 @@ impl State {
                 self.shape_changed();
             }
 
+            ClientMsg::Definition { pane, line, col } => {
+                if !self.lsp.definition(pane, line, col) {
+                    self.send_to(
+                        id,
+                        &ServerMsg::Error {
+                            message: "定義を引ける言語サーバがありません".into(),
+                        },
+                    );
+                }
+            }
+
+            ClientMsg::Complete { pane, line, col } => {
+                // 補完は**空振りしても黙っている**。打つたびに投げるので、
+                // 出ないたびに知らせが出ると読めなくなる。
+                let _ = self.lsp.complete(pane, line, col);
+            }
+
             ClientMsg::RenameTab { tab, name } => {
                 // 長すぎる名前はタブの並びを潰す。切り詰めて受ける
                 // （断るより、入るところまで入れたほうが使える）。
@@ -789,6 +847,7 @@ impl State {
                         stamp: disk_stamp(std::path::Path::new(&path)),
                     });
                 }
+                self.lsp.opened(pane, &path, &text);
                 self.broadcast(&ServerMsg::FileState {
                     pane,
                     path: Some(path),
@@ -818,6 +877,8 @@ impl State {
                 }
                 if ok {
                     f.dirty = true;
+                    let text = f.text.clone();
+                    self.lsp.changed(pane, &text);
                 } else {
                     self.send_to(id, &ServerMsg::NeedFullFile { pane });
                 }
@@ -826,8 +887,9 @@ impl State {
             ClientMsg::SetFile { pane, text } => {
                 if let Some(f) = self.panes.get_mut(&pane).and_then(|p| p.file.as_mut()) {
                     f.dirty = f.text != text;
-                    f.text = text;
+                    f.text = text.clone();
                 }
+                self.lsp.changed(pane, &text);
             }
 
             ClientMsg::SaveFile { pane, path: given } => {
@@ -862,6 +924,7 @@ impl State {
                         f.dirty = false;
                         // 自分で書いたぶんを「外で変わった」と誤らない。
                         f.stamp = disk_stamp(&path);
+                        self.lsp.saved(pane);
                         let path = path.display().to_string();
                         self.broadcast(&ServerMsg::FileSaved { pane, path });
                     }
@@ -913,6 +976,7 @@ impl State {
                     p.file = None;
                     p.preview = false;
                 }
+                self.lsp.closed(pane);
                 self.broadcast(&ServerMsg::FileClosed { pane });
             }
 
@@ -1043,7 +1107,10 @@ impl State {
                 // 次の起動で開き直さない。**
                 self.shape_changed();
             }
-            Event::Tick => self.reload_changed_files(),
+            Event::Tick => {
+                self.reload_changed_files();
+                self.poll_lsp();
+            }
             Event::Stop => return false,
         }
         true
@@ -1218,19 +1285,18 @@ pub fn spawn(session: &str) -> Result<ServerHandle> {
     })
 }
 
-/// サーバをこのプロセスの本体として回す（`tsg --server` 用）。
-/// state ループが終わるまで返らない。
-pub fn run(session: &str) -> Result<()> {
-    run_with(session, true)
-}
-
 /// `restore` を切ると、前回の形から組み直さずに素の 1 ペインで開く。
-pub fn run_with(session: &str, restore: bool) -> Result<()> {
+pub fn run_with(
+    session: &str,
+    restore: bool,
+    lsp: std::collections::BTreeMap<String, tsg_lsp::servers::Spec>,
+) -> Result<()> {
     let (tx, rx, endpoint, _stop) = setup(session)?;
     // 一覧に出せるよう、生きている間だけ控えを置く（`sessions` の説明を参照）
     crate::sessions::register(session);
     let mut state = State::new(session.to_string(), tx);
     state.restore = restore;
+    state.lsp.set_overrides(lsp);
     state_loop(&mut state, rx);
     crate::sessions::unregister(session);
     endpoint.cleanup();
