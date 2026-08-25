@@ -181,11 +181,27 @@ mod imp {
         if e.path.exists() && Stream::connect(name(e)?).is_err() {
             let _ = std::fs::remove_file(&e.path);
         }
-        ListenerOptions::new()
+        // 作るときに権限まで指定できれば、開いた瞬間から閉じている。
+        // **できない OS がある**（macOS は `unsupported` を返す）ので、
+        // その場合は開いてから締める。
+        //
+        // どちらにせよ**本当の錠は親ディレクトリ**（0700・所有者確認済み）で、
+        // ここはもう一枚の板でしかない（`SECURITY.md`）。
+        match ListenerOptions::new()
             .name(name(e)?)
             .mode(0o600)
             .create_sync()
-            .with_context(|| format!("ソケットを開けません: {}", e.display))
+        {
+            Ok(l) => Ok(l),
+            Err(_) => {
+                let l = ListenerOptions::new()
+                    .name(name(e)?)
+                    .create_sync()
+                    .with_context(|| format!("ソケットを開けません: {}", e.display))?;
+                let _ = std::fs::set_permissions(&e.path, std::fs::Permissions::from_mode(0o600));
+                Ok(l)
+            }
+        }
     }
 
     pub fn connect(e: &Endpoint) -> Result<Stream> {
