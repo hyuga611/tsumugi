@@ -153,6 +153,16 @@ pub enum MuxRequest {
     Shutdown,
     /// Markdown を読む形にする / 素に戻す（`Space m`）。
     TogglePreview,
+    /// 画面のパス・URL にラベルを振って、1〜2 キーで開く（`Space l`）。
+    Hints,
+    /// 見えているペイン全部へ同じ文を投げる（`Space b`）。
+    Broadcast,
+    /// いまの場所の `git diff` を色付きで開く（`Space g`）。
+    GitDiff,
+    /// いまのコマンドの出力を畳む / 開く（`Space o`）。
+    ToggleFold,
+    /// 画面の出力を全部畳む / 全部開く（`Space O`）。
+    FoldAll(bool),
     /// この画面に出てきたファイルの一覧（`Space f`）。
     ///
     /// エージェントは触ったファイルを字で言う。**その字はもう画面に在る**ので、
@@ -220,6 +230,10 @@ pub enum Command {
 
     /// コマンドパレットを開く。`prefix` を入れた状態から始める。
     Palette(&'static str),
+    /// 検索の入力を開く。`back` なら後ろ向き（`?`）。
+    OpenSearch { back: bool },
+    /// 探す文字列を決める。空なら消す。
+    SetSearch(String),
 
     /// ファイルバッファへの操作。
     File(FileAction),
@@ -454,6 +468,62 @@ pub const REGISTRY: &[CommandSpec] = &[
         title_en: "Previous / next failed command",
         keys: &["[e", "]e"],
         mouse: MousePath::Direct("左ガターの赤マーカーをクリック"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "git.diff",
+        title: "いまの場所の変更を色付きで開く（git diff）",
+        title_en: "Open the current diff, coloured (git diff)",
+        keys: &["Space g"],
+        mouse: MousePath::Menu("ファイル"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "agent.broadcast",
+        title: "見えているペイン全部へ同じ指示を投げる",
+        title_en: "Send one prompt to every visible pane",
+        keys: &["Space b"],
+        mouse: MousePath::Menu("セッション"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "fold.toggle",
+        title: "この出力を畳む / 開く",
+        title_en: "Fold or unfold this output",
+        keys: &["Space o"],
+        mouse: MousePath::Direct("畳んだ行をクリック"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "fold.all",
+        title: "出力を全部畳む（Space U で全部開く）",
+        title_en: "Fold every output (Space U opens them all)",
+        keys: &["Space O", "Space U"],
+        mouse: MousePath::Menu("編集"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "hints",
+        title: "画面のパス・URL にラベルを振って開く",
+        title_en: "Label the paths and URLs on screen, then jump",
+        keys: &["Space l"],
+        mouse: MousePath::Menu("ファイル"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "search.open",
+        title: "探す（/ で開いて、打つたびに飛ぶ）",
+        title_en: "Search (type and it jumps as you go)",
+        keys: &["/", "?"],
+        mouse: MousePath::Menu("編集"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "search.next",
+        title: "次 / 前の一致へ",
+        title_en: "Next / previous match",
+        keys: &["n", "N"],
+        mouse: MousePath::Palette,
         in_palette: true,
     },
     CommandSpec {

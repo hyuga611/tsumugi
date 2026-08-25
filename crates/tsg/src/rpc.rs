@@ -284,7 +284,12 @@ pub fn escape_bytes(bytes: &[u8]) -> String {
 ///
 /// **失敗しても 0 で返す。** これはエージェントのフックの中で走るので、
 /// tsumugi が居ないところで動かしたときに相手のセッションを壊してはいけない。
-pub fn set_agent_state(session: &str, state: &str, pane: Option<u32>) -> Result<()> {
+pub fn set_agent_state(
+    session: &str,
+    state: &str,
+    pane: Option<u32>,
+    cost: Option<String>,
+) -> Result<()> {
     let Some(state) = AgentState::parse(state) else {
         bail!("状態 '{state}' を知りません（working / blocked / done / failed / idle）");
     };
@@ -292,7 +297,7 @@ pub fn set_agent_state(session: &str, state: &str, pane: Option<u32>) -> Result<
         // 走っていないセッションへの報告は、黙って捨てる。
         return Ok(());
     };
-    client.send(&ClientMsg::SetAgentState { pane, state })?;
+    client.send(&ClientMsg::SetAgentState { pane, state, cost })?;
     std::thread::sleep(Duration::from_millis(120));
     let _ = client.send(&ClientMsg::Detach);
     Ok(())
@@ -357,6 +362,7 @@ pub fn prompt(session: &str, text: &str, pane: Option<u32>, and_wait: bool) -> R
     client.send(&ClientMsg::SetAgentState {
         pane: Some(target),
         state: AgentState::Working,
+        cost: None,
     })?;
     client.send(&ClientMsg::Input {
         pane: target,
@@ -403,6 +409,107 @@ pub fn open_tab_here(session: &str, cwd: Option<String>, command: Option<Vec<Str
     std::thread::sleep(Duration::from_millis(200));
     let _ = client.send(&ClientMsg::Detach);
     true
+}
+
+/// 見えているペイン全部へ同じ文を投げる。
+///
+/// **同じ問いを別のエージェントへ同時に投げる**ための口。返事の速さも
+/// 中身も違うので、揃うのを待ってから見比べる（`--wait` ＋ `--compare`）。
+pub fn broadcast(session: &str, text: &str, and_wait: bool) -> Result<bool> {
+    let (mut client, info) = attach(session)?;
+    let targets: Vec<u32> = visible_panes(&info);
+    if targets.is_empty() {
+        bail!("送り先のペインがありません");
+    }
+    let bytes = format!("{}\r", text.replace(r"\n", "\r").replace(r"\e", "\x1b"));
+    // 投げた先は全部「動いている」にしておく。**投げる前から
+    // blocked だったペインを見て「もう返ってきた」と誤らないため。**
+    for id in &targets {
+        client.send(&ClientMsg::SetAgentState {
+            pane: Some(*id),
+            state: AgentState::Working,
+            cost: None,
+        })?;
+    }
+    client.send(&ClientMsg::Broadcast {
+        panes: targets.clone(),
+        data: tsg_mux::encode_bytes(bytes.as_bytes()),
+    })?;
+    if !and_wait {
+        std::thread::sleep(Duration::from_millis(300));
+        let _ = client.send(&ClientMsg::Detach);
+        eprintln!("{} 個のペインへ投げました", targets.len());
+        return Ok(true);
+    }
+    eprintln!("{} 個のペインへ投げました。返事を待っています…", targets.len());
+    loop {
+        if let Some(ServerMsg::Layout(i)) = client.recv_timeout(Duration::from_millis(500)) {
+            let done = targets.iter().all(|id| {
+                i.panes
+                    .iter()
+                    .find(|p| p.id == *id)
+                    .and_then(|p| p.agent)
+                    .is_some_and(AgentState::wants_you)
+            });
+            if done {
+                eprintln!("全部そろいました");
+                return Ok(true);
+            }
+        }
+    }
+}
+
+/// 各ペインに見えているものを 1 枚に並べる。
+///
+/// **同じ問いを投げたあと、返事を見比べるためのもの。** ペインを行き来して
+/// 目で突き合わせる代わりに、1 本のテキストにして端から読む。
+/// 出す先は標準出力なので、`tsg --compare > out.md` でも `| less` でも通る。
+pub fn compare(session: &str) -> Result<()> {
+    let (client, info) = attach(session)?;
+    let targets = visible_panes(&info);
+    if targets.is_empty() {
+        bail!("見比べるペインがありません");
+    }
+    let mut out = std::io::stdout().lock();
+    for id in targets {
+        let title = info
+            .panes
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.title.clone())
+            .unwrap_or_default();
+        let state = info
+            .panes
+            .iter()
+            .find(|p| p.id == id)
+            .and_then(|p| p.agent)
+            .map_or("-".to_string(), |a| a.name().to_string());
+        writeln!(out, "## ペイン {id}  {title}  [{state}]")?;
+        writeln!(out)?;
+        let found = client.wait_for(
+            TIMEOUT,
+            |m| matches!(m, ServerMsg::Snapshot { pane, .. } if *pane == id),
+        );
+        match found {
+            Some(ServerMsg::Snapshot { lines, .. }) => {
+                for line in lines {
+                    writeln!(out, "{}", strip_ansi(&line))?;
+                }
+            }
+            _ => writeln!(out, "（中身が返りません）")?,
+        }
+        writeln!(out)?;
+    }
+    Ok(())
+}
+
+/// いまのタブで見えているペイン。
+fn visible_panes(info: &SessionInfo) -> Vec<u32> {
+    info.tabs
+        .iter()
+        .find(|t| t.id == info.active_tab)
+        .map(|t| t.layout.panes())
+        .unwrap_or_default()
 }
 
 /// 走っている窓でファイルを開く。`render` を付けると読む形で。

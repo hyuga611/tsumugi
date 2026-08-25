@@ -72,6 +72,24 @@ pub struct Theme {
     pub agent_done: Rgba,
     pub agent_failed: Rgba,
 
+    /// 検索の一致。**選択とは別の色**にする。同じだと、選んだのか
+    /// 見つかったのかが区別できない。
+    pub search_hit: Rgba,
+
+    /// ラベル（`Space l`）。**中身の上に重ねる**ので、地の色と混ざらない
+    /// 強い色にする。
+    pub hint_bg: Rgba,
+    pub hint_next: Rgba,
+
+    /// 畳んだ出力の要約行。**地よりわずかに浮かせる**だけにする。
+    /// 強く塗ると、畳んだ行のほうが本文より目立ってしまう。
+    pub fold_bg: Rgba,
+
+    /// diff。**足した / 消した / 見出し**の 3 色。
+    pub diff_add: Rgba,
+    pub diff_del: Rgba,
+    pub diff_head: Rgba,
+
     pub help_bg: Rgba,
     pub help_title: Rgba,
     pub help_body: Rgba,
@@ -190,6 +208,17 @@ impl Seed {
             agent_blocked: s.ansi[11],
             agent_done: calm(s.ansi[10], 0.10),
             agent_failed: s.ansi[9],
+
+            search_hit: mix(s.bg, s.ansi[11], if s.dark { 0.32 } else { 0.45 }),
+
+            hint_bg: s.ansi[5],
+            hint_next: s.ansi[11],
+
+            fold_bg: mix(s.bg, if s.dark { WHITE } else { BLACK }, 0.07),
+
+            diff_add: calm(s.ansi[10], 0.10),
+            diff_del: calm(s.ansi[9], 0.10),
+            diff_head: mix(s.ansi[13], s.fg, 0.30),
 
             // 使い方の面は**沈める**。明るいテーマで白へ寄せると、既に白い背景と
             // 見分けが付かず、面として立たない。どちらの明暗でも暗い側へ動かす。
@@ -410,6 +439,13 @@ pub fn set_named(t: &mut Theme, key: &str, c: Rgba) -> bool {
         "agent_blocked" => &mut t.agent_blocked,
         "agent_done" => &mut t.agent_done,
         "agent_failed" => &mut t.agent_failed,
+        "search_hit" => &mut t.search_hit,
+        "hint_bg" => &mut t.hint_bg,
+        "hint_next" => &mut t.hint_next,
+        "fold_bg" => &mut t.fold_bg,
+        "diff_add" => &mut t.diff_add,
+        "diff_del" => &mut t.diff_del,
+        "diff_head" => &mut t.diff_head,
         "mode_insert" => &mut t.mode_insert,
         "mode_normal" => &mut t.mode_normal,
         "mode_visual" => &mut t.mode_visual,

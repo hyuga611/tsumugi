@@ -23,6 +23,12 @@ pub enum Token {
     Str,
     Number,
     Keyword,
+    /// diff の足した行。
+    Added,
+    /// diff の消した行。
+    Removed,
+    /// diff の見出し（`diff --git` `@@` `+++` `---`）。
+    DiffHead,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +44,8 @@ pub enum Lang {
     Yaml,
     Markdown,
     Shell,
+    /// `git diff` の出力。行の頭 1 文字で決まる。
+    Diff,
 }
 
 impl Lang {
@@ -58,6 +66,7 @@ impl Lang {
             "toml" | "ini" | "cfg" => Lang::Toml,
             "yaml" | "yml" => Lang::Yaml,
             "md" | "markdown" => Lang::Markdown,
+            "diff" | "patch" => Lang::Diff,
             "sh" | "bash" | "zsh" | "ps1" => Lang::Shell,
             _ => match path.file_name().and_then(|n| n.to_str()) {
                 Some("Makefile" | "Dockerfile" | ".gitignore") => Lang::Shell,
@@ -73,10 +82,13 @@ impl Lang {
     pub fn sniff(first_line: &str) -> Self {
         let t = first_line.trim_start();
         if t.starts_with('{') || t.starts_with('[') {
-            Lang::Json
-        } else {
-            Lang::None
+            return Lang::Json;
         }
+        // diff は形がはっきりしている。**当てにいくのはここまで。**
+        if t.starts_with("diff --git") || t.starts_with("--- ") || t.starts_with("@@ ") {
+            return Lang::Diff;
+        }
+        Lang::None
     }
 
     fn line_comment(self) -> &'static [&'static str] {
@@ -165,6 +177,29 @@ pub fn highlight(lang: Lang, cells: &[Cell]) -> Vec<Token> {
         text.push(c);
     }
     let chars: Vec<char> = text.chars().collect();
+
+    // diff は**行の頭 1 文字で決まる**。1 行の中を細かく見る意味がない。
+    if lang == Lang::Diff {
+        let head = chars.first().copied().unwrap_or(' ');
+        let is_head = ["+++", "---", "@@", "diff ", "index "]
+            .iter()
+            .any(|p| text.starts_with(p));
+        let tok = if is_head {
+            Token::DiffHead
+        } else {
+            match head {
+                '+' => Token::Added,
+                '-' => Token::Removed,
+                _ => Token::Text,
+            }
+        };
+        if tok != Token::Text {
+            for t in out.iter_mut() {
+                *t = tok;
+            }
+        }
+        return out;
+    }
 
     let paint = |out: &mut Vec<Token>, from: usize, to: usize, tok: Token| {
         let upto = to.min(at.len());

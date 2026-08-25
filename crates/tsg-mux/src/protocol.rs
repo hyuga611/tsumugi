@@ -295,6 +295,12 @@ pub struct PaneInfo {
     /// 読んでいた場所も見え方も失う。開いていたファイルと同じ扱いにする。
     #[serde(default)]
     pub preview: bool,
+    /// エージェントが名乗った「いくら使ったか」。表示だけに使う。
+    ///
+    /// **こちらでは数えない。** トークンの数え方はモデルごとに違い、
+    /// 当てにいくと必ずずれる。相手が言った数字をそのまま出す。
+    #[serde(default)]
+    pub cost: Option<String>,
 }
 
 /// エージェントが何をしているか。`tsg --agent-state` と hooks から入る。
@@ -391,6 +397,17 @@ pub enum ClientMsg {
         #[serde(default)]
         pane: Option<u32>,
         state: AgentState,
+        /// 「$0.42」「12.3k tok」のような、そのまま出す文字列。
+        #[serde(default)]
+        cost: Option<String>,
+    },
+    /// 同じ入力を複数のペインへ。**エージェントを並べて同じ問いを投げる**ための口。
+    Broadcast {
+        /// 送り先。空なら、いまのタブで見えているペイン全部。
+        #[serde(default)]
+        panes: Vec<u32>,
+        /// base64。
+        data: String,
     },
     /// 読む形の切り替え。`on` を書かなければ反転。
     SetPreview {

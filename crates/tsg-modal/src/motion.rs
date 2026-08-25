@@ -65,6 +65,12 @@ pub enum Motion {
     PrevAgentBlock,
     /// `]a` 次の発話へ
     NextAgentBlock,
+
+    // ---- 検索 ----
+    /// `n` 次の一致へ
+    SearchNext,
+    /// `N` 前の一致へ
+    SearchPrev,
 }
 
 /// エージェントが自分の発話の頭に置く印。
@@ -94,6 +100,7 @@ impl Motion {
             Up | Down | DocStart | DocEnd | ToLine(_) | ScreenTop | ScreenMiddle | ScreenBottom
             | HalfPageDown | HalfPageUp | PageDown | PageUp | PrevPrompt | NextPrompt
             | PrevError | NextError | PrevAgentBlock | NextAgentBlock => MotionKind::Linewise,
+            SearchNext | SearchPrev => MotionKind::Exclusive,
             _ => MotionKind::Exclusive,
         }
     }
@@ -343,6 +350,113 @@ fn para_back(buf: &dyn Buffer, pos: Pos) -> Pos {
 
 // ---- 適用 -----------------------------------------------------------------
 
+/// 1 行を「小文字にした文字列」と「i 文字目がどの桁か」の対にする。
+///
+/// **文字数と桁数は同じではない。** 全角は 1 文字で 2 桁を占め、
+/// 格子の上では次の 1 桁が詰め物になる。ここを混ぜると、検索で
+/// 見つけた場所へ飛んだときにカーソルが 1 桁ずれる。
+fn line_and_cols(buf: &dyn Buffer, line: usize) -> (String, Vec<usize>) {
+    let mut text = String::new();
+    let mut cols = Vec::new();
+    let Some(cells) = buf.cells(line) else {
+        return (text, cols);
+    };
+    for (col, cell) in cells.iter().enumerate() {
+        if cell.width == 0 {
+            continue;
+        }
+        for c in cell.text.chars() {
+            for lc in c.to_lowercase() {
+                text.push(lc);
+                cols.push(col);
+            }
+        }
+    }
+    (text, cols)
+}
+
+/// 文書の中の一致を 1 つ進める / 戻る。**端まで行ったら反対の端へ回る。**
+///
+/// 端で止まると「無い」のか「そこまで」なのかが区別できない。回るほうが、
+/// 打ち間違えたときにすぐ分かる。大小は区別しない（打つ側の負担を減らす）。
+pub fn find_match(buf: &dyn Buffer, from: Pos, query: &str, back: bool) -> Option<Pos> {
+    let n = buf.line_count();
+    if n == 0 || query.is_empty() {
+        return None;
+    }
+    let q = query.to_lowercase();
+
+    let hit = |line: usize, before: Option<usize>, after: Option<usize>| -> Option<Pos> {
+        let (text, cols) = line_and_cols(buf, line);
+        let mut found: Option<usize> = None;
+        let mut at = 0usize;
+        while let Some(i) = text[at..].find(&q) {
+            let byte = at + i;
+            let idx = text[..byte].chars().count();
+            let col = *cols.get(idx)?;
+            let ok = match (before, after) {
+                (Some(b), _) => col < b,
+                (_, Some(a)) => col > a,
+                _ => true,
+            };
+            if ok {
+                found = Some(col);
+                if after.is_some() {
+                    break; // 前から見て最初の 1 つ
+                }
+            }
+            at = byte + q.len().max(1);
+        }
+        found.map(|col| Pos::new(line, col))
+    };
+
+    // まず同じ行の残り / 手前。次の行から順に回る。
+    if back {
+        if let Some(p) = hit(from.line, Some(from.col), None) {
+            return Some(p);
+        }
+        for step in 1..=n {
+            let l = (from.line + n - step) % n;
+            if let Some(p) = hit(l, None, None) {
+                return Some(p);
+            }
+        }
+    } else {
+        if let Some(p) = hit(from.line, None, Some(from.col)) {
+            return Some(p);
+        }
+        for step in 1..=n {
+            let l = (from.line + step) % n;
+            if let Some(p) = hit(l, None, None) {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+/// その行の一致（開始桁, 桁数）。強調に使う。
+pub fn matches_in(buf: &dyn Buffer, line: usize, query: &str) -> Vec<(usize, usize)> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let (text, cols) = line_and_cols(buf, line);
+    let q = query.to_lowercase();
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while let Some(i) = text[at..].find(&q) {
+        let byte = at + i;
+        let idx = text[..byte].chars().count();
+        let end_idx = idx + q.chars().count();
+        if let Some(start) = cols.get(idx).copied() {
+            let end = cols.get(end_idx).copied().unwrap_or(cols.last().copied().unwrap_or(start) + 1);
+            out.push((start, end.saturating_sub(start).max(1)));
+        }
+        at = byte + q.len().max(1);
+    }
+    out
+}
+
 /// モーションを `count` 回適用した行き先。
 pub fn apply(
     motion: Motion,
@@ -351,6 +465,7 @@ pub fn apply(
     buf: &dyn Buffer,
     view: View,
     last_find: Option<(char, bool, bool)>,
+    search: Option<&str>,
 ) -> Pos {
     let count = count.max(1);
     let last_line = buf.line_count().saturating_sub(1);
@@ -447,6 +562,21 @@ pub fn apply(
                 }
             }
             Pos::new(p, 0)
+        }
+
+        Motion::SearchNext | Motion::SearchPrev => {
+            let Some(q) = search.filter(|q| !q.is_empty()) else {
+                return from;
+            };
+            let back = motion == Motion::SearchPrev;
+            let mut p = from;
+            for _ in 0..count {
+                match find_match(buf, p, q, back) {
+                    Some(next) => p = next,
+                    None => break,
+                }
+            }
+            p
         }
 
         Motion::Up => Pos::new(from.line.saturating_sub(count), from.col),
@@ -551,6 +681,45 @@ pub fn apply(
 
 #[cfg(test)]
 mod tests {
+    /// 検索は**桁**で答える。全角が混じると文字数と桁数はずれる。
+    #[test]
+    fn a_match_is_reported_in_columns_not_characters() {
+        let buf = crate::FileBuffer::from_text("あいうzzz", tsg_term::AmbiguousWidth::Wide);
+        // 「あいう」で 6 桁ぶん進んだところに z がある
+        assert_eq!(matches_in(&buf, 0, "zzz"), vec![(6, 3)]);
+        let p = find_match(&buf, Pos::new(0, 0), "zzz", false).expect("見つからない");
+        assert_eq!(p, Pos::new(0, 6));
+    }
+
+    #[test]
+    fn searching_wraps_around_the_document() {
+        let buf = crate::FileBuffer::from_text("aaa\nbbb\nccc", tsg_term::AmbiguousWidth::Narrow);
+        // 末尾から前へ探すと先頭へ回る
+        let p = find_match(&buf, Pos::new(2, 0), "aaa", false).expect("回らなかった");
+        assert_eq!(p.line, 0);
+        // 先頭から後ろ向きに探すと末尾へ回る
+        let p = find_match(&buf, Pos::new(0, 0), "ccc", true).expect("回らなかった");
+        assert_eq!(p.line, 2);
+    }
+
+    #[test]
+    fn searching_ignores_case() {
+        let buf = crate::FileBuffer::from_text("Hello World", tsg_term::AmbiguousWidth::Narrow);
+        assert_eq!(
+            find_match(&buf, Pos::new(0, 0), "world", false),
+            Some(Pos::new(0, 6))
+        );
+    }
+
+    #[test]
+    fn stepping_forward_then_back_returns_to_the_same_place() {
+        let buf = crate::FileBuffer::from_text("x a x a x", tsg_term::AmbiguousWidth::Narrow);
+        let first = find_match(&buf, Pos::new(0, 0), "a", false).expect("1 つ目");
+        let second = find_match(&buf, first, "a", false).expect("2 つ目");
+        assert_ne!(first, second);
+        assert_eq!(find_match(&buf, second, "a", true), Some(first));
+    }
+
     use super::*;
     use tsg_buffer::TermBuffer;
     use tsg_term::{AmbiguousWidth, Terminal};
@@ -572,6 +741,7 @@ mod tests {
                 top: 0,
                 height: 10,
             },
+            None,
             None,
         )
     }
@@ -741,11 +911,11 @@ mod tests {
         let buf = TermBuffer::new(&t.state.grid, &t.state.marks);
         let view = View { top: 2, height: 4 };
         assert_eq!(
-            apply(Motion::ScreenTop, Pos::new(0, 0), 1, &buf, view, None).line,
+            apply(Motion::ScreenTop, Pos::new(0, 0), 1, &buf, view, None, None).line,
             2
         );
         assert_eq!(
-            apply(Motion::ScreenBottom, Pos::new(0, 0), 1, &buf, view, None).line,
+            apply(Motion::ScreenBottom, Pos::new(0, 0), 1, &buf, view, None, None).line,
             5
         );
     }

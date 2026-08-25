@@ -71,6 +71,16 @@ struct App {
     session_name: String,
     /// 使い方の画面をどこまで送ったか。低いウィンドウでも最後まで読める。
     help_scroll: usize,
+    /// 検索を始めた場所。Esc で戻すために持つ。
+    search_from: Option<Pos>,
+    /// まだ割っていない数（`--layout agents`）。
+    pending_splits: usize,
+    /// 端末に出た絵を、どこに載せたか。`(ペイン, 絵の id) -> 面の場所`。
+    /// **載せ直さない**ための控え。
+    image_slots: BTreeMap<(u32, u64), tsg_render::ImageSlot>,
+    /// 画面に出ているものへのラベル。空でなければラベル待ち。
+    hints: Vec<Hint>,
+    hint_typed: String,
     /// 前に見たエージェントの状態。**変わった瞬間**にだけ知らせるために持つ。
     /// 状態そのものはサーバが持っているので、ここは通知のための控え。
     agent_seen: BTreeMap<u32, AgentState>,
@@ -129,6 +139,14 @@ impl App {
             client: None,
             session_name: cli.session.clone(),
             help_scroll: 0,
+            search_from: None,
+            pending_splits: match cli.layout.as_deref() {
+                Some("agents") => 2,
+                _ => 0,
+            },
+            image_slots: BTreeMap::new(),
+            hints: Vec::new(),
+            hint_typed: String::new(),
             agent_seen: BTreeMap::new(),
             focused: true,
             session: Session::default(),
@@ -252,6 +270,12 @@ impl App {
                 Effect::MarkSet { .. } | Effect::MacroRecording(_) => {}
                 Effect::MacroReplay(keys) => self.replay_macro(&keys, event_loop),
                 Effect::Palette(prefix) => self.palette_with(&prefix),
+                Effect::OpenSearch { back } => {
+                    // 打つたびに飛べるよう、出発点を覚えておく。
+                    // Esc で戻せないと、探し始める前の場所を失う。
+                    self.search_from = Some(self.engine.cursor());
+                    self.palette.show_search(back);
+                }
                 Effect::History(action) => self.run_history(action),
                 Effect::Pipe { input } => {
                     // 範囲は決まった。あとは何に通すかを訊く。
@@ -385,6 +409,32 @@ impl App {
             }
             MuxRequest::TogglePreview => {
                 self.toggle_preview();
+                None
+            }
+            MuxRequest::Hints => {
+                self.show_hints();
+                None
+            }
+            MuxRequest::GitDiff => {
+                self.show_git_diff();
+                None
+            }
+            MuxRequest::Broadcast => {
+                // パレットの入力欄を借りる。**入力の窓を 2 種類作らない。**
+                self.palette_with("b ");
+                self.status_msg = t!(
+                    "全部のペインへ投げる文を打って Enter",
+                    "type one prompt for every pane, then Enter"
+                )
+                .into();
+                None
+            }
+            MuxRequest::ToggleFold => {
+                self.toggle_fold_here();
+                None
+            }
+            MuxRequest::FoldAll(on) => {
+                self.fold_all(on);
                 None
             }
             MuxRequest::Detach => {
@@ -847,7 +897,9 @@ impl App {
         let height = view.rect.h.max(1);
         if line < view.top {
             view.top = line;
-        } else if line >= view.top + height {
+        } else if view.row_of(line, height).is_none() {
+            // 畳んだ分を数に入れて下端を決める。**畳んでいるのに
+            // 畳む前の行数でずらすと、行き先を通り越す。**
             view.top = line + 1 - height;
         }
         view.follow_tail = view.top + height >= view.doc_len();
@@ -904,6 +956,15 @@ impl App {
                     self.session.info = Some(session);
                     self.session.active = active;
                     self.sync_layout();
+                    // 起動時の配置は**繋がってから**組む。ペインが 1 枚
+                    // 在るところから始めないと、割る相手が決まらない。
+                    if self.pending_splits > 0 {
+                        self.pending_splits -= 1;
+                        self.send_msg(&ClientMsg::Split {
+                            pane: active,
+                            dir: Dir::Horizontal,
+                        });
+                    }
                 }
                 ServerMsg::Layout(info) => {
                     let fallback = info
@@ -933,6 +994,22 @@ impl App {
                     self.sync_layout();
                     self.sync_previews();
                     self.notice_agent_changes();
+                    // 残りの分割。1 枚ずつ増やす（返事を待ってから次を頼む）。
+                    if self.pending_splits > 0 {
+                        self.pending_splits -= 1;
+                        let pane = self.session.active;
+                        self.send_msg(&ClientMsg::Split {
+                            pane,
+                            dir: Dir::Horizontal,
+                        });
+                        if self.pending_splits == 0 {
+                            self.status_msg = t!(
+                                "3 分割で開きました。Space b で全部へ同じ指示を投げられます",
+                                "opened three panes; Space b sends one prompt to all of them"
+                            )
+                            .into();
+                        }
+                    }
                 }
                 ServerMsg::Snapshot { pane, lines, .. } => {
                     let area = self.area();
@@ -1086,7 +1163,7 @@ impl App {
         let v = self.session.panes.get(&id)?;
         let text = v.text_rect();
         Some(Pos::new(
-            v.top + row.saturating_sub(text.y),
+            v.line_at(row.saturating_sub(text.y)),
             col.saturating_sub(text.x),
         ))
     }
@@ -1519,6 +1596,13 @@ impl App {
             self.open_file(path);
             return true;
         }
+        if let Some(text) = q.strip_prefix("b ").map(str::trim)
+            && !text.is_empty()
+        {
+            self.palette.hide();
+            self.broadcast(text);
+            return true;
+        }
         if let Some(cmd) = q.strip_prefix('>').map(str::trim)
             && self.pending_pipe.is_some()
         {
@@ -1673,6 +1757,26 @@ impl App {
         if id != self.session.active {
             self.session.active = id;
             self.snap_to_live_tail();
+        }
+
+        // 畳んだ行を押したら開く。**要約に「クリックで開く」と書いてある**ので、
+        // 押して何も起きないのは約束を破ることになる。
+        if button == MouseButton::Left
+            && let Some(pos) = self.doc_pos(id, col, row)
+            && self
+                .session
+                .panes
+                .get(&id)
+                .is_some_and(|v| v.fold_at(pos.line).is_some())
+        {
+            if let Some(view) = self.session.panes.get_mut(&id) {
+                view.folds.retain(|(s, _)| *s != pos.line);
+            }
+            self.status_msg = t!("開きました", "opened").into();
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
         }
 
         // alt screen かつ子がマウスを要求しているなら、そのまま渡す（§5）
@@ -2182,6 +2286,28 @@ impl App {
     fn on_key(&mut self, event_loop: &ActiveEventLoop, key: Key, text: Option<String>) {
         self.update_view();
 
+        // ラベル待ちのあいだは、そのキーはラベルの一部。
+        if !self.hints.is_empty() {
+            match &key {
+                Key::Named(NamedKey::Escape) => {
+                    self.hints.clear();
+                    self.hint_typed.clear();
+                    self.status_msg.clear();
+                }
+                _ => {
+                    if let Some(c) = text.as_deref().and_then(|t| t.chars().next())
+                        && c.is_ascii_alphabetic()
+                    {
+                        self.hint_key(c);
+                    }
+                }
+            }
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
+
         // 使い方を読んでいる最中の上下だけは、閉じずに送る。
         // それ以外のキーは今までどおり閉じる（engine が決めている）。
         if self.engine.help_visible() {
@@ -2321,6 +2447,49 @@ impl App {
 
     /// 一覧が開いている間のキー。
     fn overlay_key(&mut self, key: &Key, text: Option<&str>, event_loop: &ActiveEventLoop) {
+        // 検索は打つたびに飛ぶ。**探す前に一覧を眺める手間を入れない。**
+        if self.palette.searching() {
+            match key {
+                Key::Named(NamedKey::Escape) => {
+                    // 探し始める前の場所へ戻す。見つからないまま迷子にしない。
+                    if let Some(p) = self.search_from.take()
+                        && let Some(view) = self.session.panes.get(&self.session.active)
+                    {
+                        let buf = view.buffer();
+                        self.engine.set_cursor(p, &buf);
+                    }
+                    self.palette.hide();
+                    self.engine.search = None;
+                    self.status_msg.clear();
+                }
+                Key::Named(NamedKey::Enter) => {
+                    self.search_from = None;
+                    self.palette.hide();
+                    let n = self.search_hits();
+                    self.status_msg = t!(
+                        format!("{} 件（n で次、N で前）", n),
+                        format!("{n} matches (n / N to step)")
+                    );
+                }
+                Key::Named(NamedKey::Backspace) => {
+                    self.palette.query.pop();
+                    self.run_search();
+                }
+                _ => {
+                    if let Some(c) = text.and_then(|t| t.chars().next())
+                        && !c.is_control()
+                    {
+                        self.palette.query.push(c);
+                        self.run_search();
+                    }
+                }
+            }
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
+
         let action = match key {
             Key::Named(NamedKey::Escape) => overlay::Action::Close,
             Key::Named(NamedKey::Enter) => {
@@ -2378,6 +2547,369 @@ impl App {
         }
     }
 
+    /// いまの場所の `git diff` を、色を付けて新しいペインに開く。
+    ///
+    /// **エージェントが何を変えたかを読むための道具。** 端末にそのまま
+    /// 流すと流れて消えるが、ペインに開けば `n` で探せて `Space o` で
+    /// ファイル単位に畳める。色は `--color=never` にして自前で付ける
+    /// （相手の色コードを解釈し直すより、行の頭 1 文字を見るほうが確か）。
+    fn show_git_diff(&mut self) {
+        let cwd = self
+            .active_view()
+            .and_then(|v| v.term.state.cwd.clone())
+            .and_then(|u| file_url_to_path(&u))
+            .or_else(|| self.cwd.clone());
+        let mut cmd = std::process::Command::new("git");
+        cmd.args(["diff", "--color=never", "--no-ext-diff"]);
+        if let Some(dir) = cwd.as_deref() {
+            cmd.current_dir(dir);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt as _;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let out = match cmd.output() {
+            Ok(o) => o,
+            Err(e) => {
+                self.status_msg = t!(
+                    format!("git を実行できません: {e}"),
+                    format!("cannot run git: {e}")
+                );
+                return;
+            }
+        };
+        let text = String::from_utf8_lossy(&out.stdout).to_string();
+        if text.trim().is_empty() {
+            self.status_msg = t!("変更はありません", "no changes").into();
+            return;
+        }
+        let pane = self.session.active;
+        self.send_msg(&ClientMsg::PipeResult {
+            pane,
+            dir: Dir::Horizontal,
+            title: "diff".to_string(),
+            text,
+        });
+    }
+
+    /// 見えているペイン全部へ同じ文を投げる。
+    ///
+    /// **同じ問いを別のエージェントへ同時に。** 返事の速さも中身も違うので、
+    /// 揃ったところで見比べる（`tsg --compare`）。投げた先は「動いている」に
+    /// しておく — 投げる前から返事待ちだったペインを見て「もう返ってきた」と
+    /// 誤らないため。
+    fn broadcast(&mut self, text: &str) {
+        let panes = self.session.visible_panes();
+        if panes.is_empty() {
+            return;
+        }
+        for id in &panes {
+            self.send_msg(&ClientMsg::SetAgentState {
+                pane: Some(*id),
+                state: AgentState::Working,
+                cost: None,
+            });
+        }
+        let mut bytes = text.as_bytes().to_vec();
+        bytes.push(b'\r');
+        self.send_msg(&ClientMsg::Broadcast {
+            panes: panes.clone(),
+            data: tsg_mux::encode_bytes(&bytes),
+        });
+        self.status_msg = t!(
+            format!("{} 個のペインへ投げました", panes.len()),
+            format!("sent to {} panes", panes.len())
+        );
+    }
+
+    /// カーソルの居るコマンドの出力を畳む / 開く。
+    ///
+    /// **境目はシェル統合（OSC 133）が教える。** 空行で当てにいくと、
+    /// 出力の途中の空行で切れる。
+    fn toggle_fold_here(&mut self) {
+        let pane = self.session.active;
+        let here = self.engine.cursor().line;
+        let Some(view) = self.session.panes.get(&pane) else {
+            return;
+        };
+        // 畳んである中に居るなら開く。
+        if let Some((start, _)) = view.fold_covering(here) {
+            let Some(view) = self.session.panes.get_mut(&pane) else {
+                return;
+            };
+            view.folds.retain(|(s, _)| *s != start);
+            self.status_msg = t!("開きました", "opened").into();
+            return;
+        }
+        let Some((start, end)) = self.output_span(pane, here) else {
+            self.status_msg = t!(
+                "ここには畳める出力がありません（シェル統合が要ります）",
+                "no output to fold here (needs shell integration)"
+            )
+            .into();
+            return;
+        };
+        if let Some(view) = self.session.panes.get_mut(&pane) {
+            view.toggle_fold(start, end);
+        }
+        self.status_msg = t!(
+            format!("{} 行を畳みました", end + 1 - start),
+            format!("folded {} lines", end + 1 - start)
+        );
+    }
+
+    /// その行を含む「畳める範囲」。
+    ///
+    /// 端末はコマンドの出力（OSC 133）、diff はファイル 1 つぶん。
+    /// **境目を当てにいかない**のが要点で、どちらも印がはっきりしている。
+    fn output_span(&self, pane: u32, line: usize) -> Option<(usize, usize)> {
+        let view = self.session.panes.get(&pane)?;
+        if view.lang() == tsg_modal::SyntaxLang::Diff {
+            return self.diff_span(pane, line);
+        }
+        let buf = view.buffer();
+        let blocks = buf.marks().blocks();
+        let last = buf.line_count().saturating_sub(1);
+        blocks.iter().find_map(|b| {
+            let start = b.output_start?;
+            let end = b.output_end.unwrap_or(last);
+            // 出力が 1 行しかないなら畳む意味がない。
+            (end > start && (start..=end).contains(&line) || b.command_line == Some(line))
+                .then_some((start, end))
+        })
+    }
+
+    /// diff の「ファイル 1 つぶん」。`diff --git` から次の `diff --git` の手前まで。
+    fn diff_span(&self, pane: u32, line: usize) -> Option<(usize, usize)> {
+        let view = self.session.panes.get(&pane)?;
+        let buf = view.buffer();
+        let last = buf.line_count().saturating_sub(1);
+        let heads: Vec<usize> = (0..=last)
+            .filter(|l| tsg_modal::line_text(&buf, *l).starts_with("diff --git"))
+            .collect();
+        let i = heads.iter().rposition(|h| *h <= line)?;
+        let start = heads[i];
+        let end = heads.get(i + 1).map_or(last, |h| h - 1);
+        (end > start).then_some((start, end))
+    }
+
+    /// 画面の出力を全部畳む / 全部開く。
+    fn fold_all(&mut self, on: bool) {
+        let pane = self.session.active;
+        if !on {
+            if let Some(view) = self.session.panes.get_mut(&pane) {
+                view.folds.clear();
+            }
+            self.status_msg = t!("全部開きました", "opened everything").into();
+            return;
+        }
+        let Some(view) = self.session.panes.get(&pane) else {
+            return;
+        };
+        let buf = view.buffer();
+        let last = buf.line_count().saturating_sub(1);
+        let spans: Vec<(usize, usize)> = if view.lang() == tsg_modal::SyntaxLang::Diff {
+            // diff はファイルごと。**1 行目は開いたままにする**ので、
+            // 何のファイルかは畳んだままでも分かる。
+            let heads: Vec<usize> = (0..=last)
+                .filter(|l| tsg_modal::line_text(&buf, *l).starts_with("diff --git"))
+                .collect();
+            heads
+                .iter()
+                .enumerate()
+                .filter_map(|(i, h)| {
+                    let end = heads.get(i + 1).map_or(last, |n| n - 1);
+                    (end > *h).then_some((*h, end))
+                })
+                .collect()
+        } else {
+            buf.marks()
+                .blocks()
+                .iter()
+                .filter_map(|b| {
+                    let start = b.output_start?;
+                    let end = b.output_end.unwrap_or(last);
+                    (end > start).then_some((start, end))
+                })
+                .collect()
+        };
+        let n = spans.len();
+        if let Some(view) = self.session.panes.get_mut(&pane) {
+            view.folds = spans;
+        }
+        self.status_msg = if n == 0 {
+            t!(
+                "畳める出力がありません（シェル統合が要ります）",
+                "nothing to fold (needs shell integration)"
+            )
+            .into()
+        } else {
+            t!(
+                format!("{n} 個の出力を畳みました（Space U で開く）"),
+                format!("folded {n} outputs (Space U to open)")
+            )
+        };
+    }
+
+    /// 画面に出ているパス・URL・ハッシュにラベルを振る。
+    ///
+    /// **目で見つけたものへ、手を動かさずに届く。** マウスへ持ち替えるほど
+    /// でもなく、かといって座標を打つわけにもいかない距離が毎回ある。
+    /// ラベルはホームポジションから順に配る。
+    fn show_hints(&mut self) {
+        const LABELS: &[u8] = b"asdfghjklqwertyuiopzxcvbnm";
+        let mut hints: Vec<Hint> = Vec::new();
+        let visible = self.session.visible_panes();
+        for id in visible {
+            let Some(view) = self.session.panes.get(&id) else {
+                continue;
+            };
+            let rect = view.text_rect();
+            let buf = view.buffer();
+            let top = view.top;
+            for r in 0..rect.h {
+                let line = top + r;
+                let Some(cells) = buf.cells(line) else {
+                    continue;
+                };
+                // 桁を数えながら語に切る。**空白で切るだけ**にして、
+                // 何を拾うかの判断は `open_kind` 1 か所に任せる。
+                let mut col = 0usize;
+                let mut start = 0usize;
+                let mut word = String::new();
+                let flush = |word: &mut String, start: usize, hints: &mut Vec<Hint>| {
+                    let trimmed = word.trim_matches(|c: char| "\"'`（）()[]{}<>、。,;:!?".contains(c));
+                    if !trimmed.is_empty() && open_kind(trimmed).is_some() {
+                        hints.push(Hint {
+                            pane: id,
+                            line,
+                            col: start,
+                            text: trimmed.to_string(),
+                            label: String::new(),
+                        });
+                    }
+                    word.clear();
+                };
+                for cell in cells.iter().take(rect.w) {
+                    let ch = cell.text.chars().next().unwrap_or(' ');
+                    if cell.width == 0 {
+                        col += 1;
+                        continue;
+                    }
+                    if ch.is_whitespace() {
+                        flush(&mut word, start, &mut hints);
+                    } else {
+                        if word.is_empty() {
+                            start = col;
+                        }
+                        word.push_str(&cell.text);
+                    }
+                    col += 1;
+                }
+                flush(&mut word, start, &mut hints);
+            }
+        }
+        if hints.is_empty() {
+            self.status_msg = t!(
+                "画面に開けるものがありません",
+                "nothing on screen to jump to"
+            )
+            .into();
+            return;
+        }
+        // ラベルを配る。数が多ければ 2 文字にする。
+        let two = hints.len() > LABELS.len();
+        for (i, h) in hints.iter_mut().enumerate() {
+            h.label = if two {
+                let a = LABELS[i / LABELS.len() % LABELS.len()] as char;
+                let b = LABELS[i % LABELS.len()] as char;
+                format!("{a}{b}")
+            } else {
+                (LABELS[i] as char).to_string()
+            };
+        }
+        self.hints = hints;
+        self.hint_typed.clear();
+        self.status_msg = t!(
+            "ラベルの字を押すと開きます（Esc でやめる）",
+            "press a label to open it (Esc to cancel)"
+        )
+        .into();
+    }
+
+    /// ラベルが押された。決まれば開く。
+    fn hint_key(&mut self, c: char) {
+        self.hint_typed.push(c.to_ascii_lowercase());
+        let typed = self.hint_typed.clone();
+        if let Some(h) = self.hints.iter().find(|h| h.label == typed).cloned() {
+            self.hints.clear();
+            self.hint_typed.clear();
+            self.session.active = h.pane;
+            self.status_msg = t!(format!("{} を開きます", h.text), format!("opening {}", h.text));
+            self.open_at(h.pane, Pos::new(h.line, h.col));
+            return;
+        }
+        if !self.hints.iter().any(|h| h.label.starts_with(&typed)) {
+            self.hints.clear();
+            self.hint_typed.clear();
+            self.status_msg = t!("そのラベルはありません", "no such label").into();
+        }
+    }
+
+    /// 打った文字で探し直して、最初の一致へ飛ぶ。
+    ///
+    /// **出発点から探す。** 前の一致から探すと、1 文字消したときに
+    /// 後ろへ後ろへ流れていって戻れなくなる。
+    fn run_search(&mut self) {
+        let q = self.palette.query.clone();
+        self.engine.search = (!q.is_empty()).then(|| q.clone());
+        let Some(from) = self.search_from else {
+            return;
+        };
+        let Some(view) = self.session.panes.get(&self.session.active) else {
+            return;
+        };
+        let buf = view.buffer();
+        if q.is_empty() {
+            self.engine.set_cursor(from, &buf);
+            self.status_msg.clear();
+            return;
+        }
+        let back = matches!(self.palette.kind, overlay::PaletteKind::Search { back: true });
+        // 出発点そのものも一致し得るので、1 つ手前から探し始める。
+        let seed = if back {
+            Pos::new(from.line, from.col + 1)
+        } else {
+            Pos::new(from.line, from.col.saturating_sub(1))
+        };
+        match tsg_modal::find_match(&buf, seed, &q, back) {
+            Some(p) => {
+                self.engine.set_cursor(p, &buf);
+                self.status_msg.clear();
+            }
+            None => {
+                self.engine.set_cursor(from, &buf);
+                self.status_msg = t!("見つかりません", "no match").into();
+            }
+        }
+        self.follow_cursor();
+    }
+
+    /// いま探しているものが文書に何件あるか。
+    fn search_hits(&self) -> usize {
+        let Some(q) = self.engine.search.as_deref() else {
+            return 0;
+        };
+        let Some(view) = self.session.panes.get(&self.session.active) else {
+            return 0;
+        };
+        let buf = view.buffer();
+        (0..buf.line_count())
+            .map(|l| tsg_modal::matches_in(&buf, l, q).len())
+            .sum()
+    }
+
     /// 使い方の画面を送る。行数は組み立ててから数えるので、必ず最後まで行ける。
     fn scroll_help(&mut self, delta: isize) {
         let avail = self.rows.saturating_sub(3);
@@ -2418,6 +2950,7 @@ impl App {
         let active = self.session.active;
         let mode = self.engine.mode();
         let selection = self.engine.selection();
+        let search = self.engine.search.clone();
         let visible = self.session.visible_panes();
         let help = self.engine.help_visible();
         let help_scroll = self.help_scroll;
@@ -2464,6 +2997,10 @@ impl App {
                     let doc = view.buffer();
                     let top = view.top.min(doc.line_count().saturating_sub(1));
                     let rect = view.text_rect();
+                    // 画面の r 行目に出す文書行。畳んだ分は飛ぶ。
+                    // **見せる側と当てる側で同じ関数を通す**（`line_at`）。
+                    let row_line: Vec<usize> = (0..rect.h).map(|r| view.line_at(r)).collect();
+                    let at = |r: usize| row_line.get(r).copied().unwrap_or(top + r);
 
                     // 左ガター。OSC 133 のブロックをそのまま印にする。
                     // 出力を正規表現で当てにいかないので、嘘の印が出ない。
@@ -2516,7 +3053,7 @@ impl App {
 
                     // 置いた印。ガターの右半分に出す。クリックで飛べる。
                     for r in 0..rect.h {
-                        let Some(name) = self.engine.marks.at_line(top + r) else {
+                        let Some(name) = self.engine.marks.at_line(at(r)) else {
                             continue;
                         };
                         renderer.text(
@@ -2535,7 +3072,10 @@ impl App {
                     // 背景。同色の連なりを 1 枚の矩形にまとめる。
                     // セルごとに出すと 80x24 で 2000 枚近くになり、色の無い画面でも払う。
                     for r in 0..rect.h {
-                        let Some(cells) = doc.cells(top + r) else {
+                        if view.fold_at(at(r)).is_some() {
+                            continue; // 畳んだ行は要約だけ出す
+                        }
+                        let Some(cells) = doc.cells(at(r)) else {
                             break;
                         };
                         let mut start = 0usize;
@@ -2562,11 +3102,31 @@ impl App {
                         }
                     }
 
+                    // 探しているものを光らせる。**選択より先に塗る**ので、
+                    // 選んだところは選択の色が勝つ。
+                    if let Some(q) = search.as_deref() {
+                        for r in 0..rect.h {
+                            for (from, w) in tsg_modal::matches_in(&doc, at(r), q) {
+                                if from >= rect.w {
+                                    continue;
+                                }
+                                let w = w.min(rect.w - from) as f32;
+                                renderer.rect(
+                                    (rect.x + from) as f32,
+                                    (rect.y + r) as f32,
+                                    w,
+                                    1.0,
+                                    th.search_hit,
+                                );
+                            }
+                        }
+                    }
+
                     if is_active
                         && let Some(range) = selection
                     {
                         for r in 0..rect.h {
-                            if let Some((from, to)) = selection_span(&range, top + r, rect.w) {
+                            if let Some((from, to)) = selection_span(&range, at(r), rect.w) {
                                 let w = (to + 1).saturating_sub(from) as f32;
                                 renderer.rect(
                                     (rect.x + from) as f32,
@@ -2596,14 +3156,39 @@ impl App {
                     let lang = view.lang();
 
                     for r in 0..rect.h {
-                        let Some(cells) = doc.cells(top + r) else {
+                        if let Some((start, end)) = view.fold_at(at(r)) {
+                            // 畳んだ出力は 1 行の要約に置き換える。
+                            // **何行隠したかを必ず出す。** 数が分からないと、
+                            // 畳んだことに気づかないまま読み飛ばす。
+                            let n = end + 1 - start;
+                            let label = t!(
+                                format!("▸ 出力 {n} 行（クリックで開く）"),
+                                format!("▸ {n} lines of output (click to open)")
+                            );
+                            renderer.rect(
+                                rect.x as f32,
+                                (rect.y + r) as f32,
+                                rect.w as f32,
+                                1.0,
+                                th.fold_bg,
+                            );
+                            renderer.text(
+                                rect.x as f32,
+                                (rect.y + r) as f32,
+                                &truncate_width(&label, rect.w),
+                                th.dim,
+                                true,
+                            );
+                            continue;
+                        }
+                        let Some(cells) = doc.cells(at(r)) else {
                             break;
                         };
                         let syn = tsg_modal::highlight(lang, cells);
                         // 合字は**1 つの字形**なので、色が変わるところとカーソルの
                         // 居るところで run を切る。切らないと、途中で色を変えられず、
                         // カーソルの下の字が何だったか分からなくなる。
-                        let caret = (is_active && cursor.line == top + r).then_some(cursor.col);
+                        let caret = (is_active && cursor.line == at(r)).then_some(cursor.col);
                         let mut run = String::new();
                         let mut run_at = 0usize;
                         let mut run_fg = [0.0f32; 4];
@@ -2617,6 +3202,9 @@ impl App {
                                 Some(tsg_modal::Token::Str) => th.syn_str,
                                 Some(tsg_modal::Token::Number) => th.syn_num,
                                 Some(tsg_modal::Token::Keyword) => th.syn_key,
+                                Some(tsg_modal::Token::Added) => th.diff_add,
+                                Some(tsg_modal::Token::Removed) => th.diff_del,
+                                Some(tsg_modal::Token::DiffHead) => th.diff_head,
                                 _ => cell_colors(&th, &cell.attrs).0,
                             };
                             if !is_active {
@@ -2693,6 +3281,8 @@ impl App {
             self.draw_tabs();
             self.draw_status(mode, &visible);
         }
+        self.draw_images();
+        self.draw_hints();
         self.draw_menu();
         self.draw_palette();
         self.draw_picker();
@@ -2759,6 +3349,108 @@ impl App {
             AgentState::Done => th.agent_done,
             AgentState::Failed => th.agent_failed,
             AgentState::Idle => th.dim,
+        }
+    }
+
+    /// 端末に出た絵。**セルの上に重ねる**ので、文字と同じ格子に乗る。
+    ///
+    /// 置き場所はドキュメント絶対行なので、スクロールしても紙に貼った
+    /// ように一緒に動く（`concept.md` の中心命題のまま）。
+    fn draw_images(&mut self) {
+        // どのペインの、どの絵を、どこへ出すか。借りを切ってから描く。
+        struct Put {
+            pane: u32,
+            id: u64,
+            col: f32,
+            row: f32,
+            w: f32,
+            h: f32,
+        }
+        let mut puts: Vec<Put> = Vec::new();
+        let mut uploads: Vec<(u32, u64, Vec<u8>, u32, u32)> = Vec::new();
+        for id in self.session.visible_panes() {
+            let Some(view) = self.session.panes.get(&id) else {
+                continue;
+            };
+            if view.previewing() || view.editing() {
+                continue; // ファイルを開いている間は端末の絵を出さない
+            }
+            let rect = view.text_rect();
+            for img in &view.term.state.images {
+                let Some(row) = img.line.checked_sub(view.top) else {
+                    continue;
+                };
+                if row >= rect.h || img.col >= rect.w {
+                    continue;
+                }
+                if !self.image_slots.contains_key(&(id, img.id)) {
+                    uploads.push((id, img.id, img.rgba.clone(), img.width, img.height));
+                }
+                puts.push(Put {
+                    pane: id,
+                    id: img.id,
+                    col: (rect.x + img.col) as f32,
+                    row: (rect.y + row) as f32,
+                    w: img.cols.min(rect.w - img.col) as f32,
+                    h: img.rows.min(rect.h - row) as f32,
+                });
+            }
+        }
+        if puts.is_empty() {
+            return;
+        }
+        let Some(r) = self.renderer.as_mut() else {
+            return;
+        };
+        for (pane, img_id, rgba, w, h) in uploads {
+            if let Some(slot) = r.upload_image(&rgba, w, h) {
+                self.image_slots.insert((pane, img_id), slot);
+            }
+        }
+        let Some(r) = self.renderer.as_mut() else {
+            return;
+        };
+        for p in puts {
+            if let Some(slot) = self.image_slots.get(&(p.pane, p.id)) {
+                r.image(p.col, p.row, p.w, p.h, *slot);
+            }
+        }
+    }
+
+    /// ラベル。**中身の上に重ねる。** 隣に出すと桁がずれて、
+    /// どれに付いたラベルなのか分からなくなる。
+    fn draw_hints(&mut self) {
+        if self.hints.is_empty() {
+            return;
+        }
+        let th = self.theme;
+        let typed = self.hint_typed.clone();
+        let spots: Vec<(usize, usize, String, bool)> = self
+            .hints
+            .iter()
+            .filter(|h| h.label.starts_with(&typed))
+            .filter_map(|h| {
+                let view = self.session.panes.get(&h.pane)?;
+                let rect = view.text_rect();
+                let row = h.line.checked_sub(view.top)?;
+                (row < rect.h && h.col < rect.w).then(|| {
+                    (
+                        rect.x + h.col,
+                        rect.y + row,
+                        h.label.clone(),
+                        !typed.is_empty(),
+                    )
+                })
+            })
+            .collect();
+        let Some(r) = self.renderer.as_mut() else {
+            return;
+        };
+        for (x, y, label, partial) in spots {
+            let w = display_width(&label) as f32;
+            r.rect(x as f32, y as f32, w, 1.0, th.hint_bg);
+            let fg = if partial { th.hint_next } else { th.mode_fg };
+            r.text(x as f32, y as f32, &label, fg, true);
         }
     }
 
@@ -2832,6 +3524,30 @@ impl App {
         }
         let (x, y) = self.palette_origin();
         let w = self.palette_width();
+        // 検索は入力欄 1 行だけ。一覧を出すと、探している画面が隠れる。
+        if self.palette.searching() {
+            let back = matches!(self.palette.kind, overlay::PaletteKind::Search { back: true });
+            let head = if back { "?" } else { "/" };
+            let line = format!("{head} {}", self.palette.query);
+            let hits = self.search_hits();
+            let note = if self.palette.query.is_empty() {
+                t!("探す文字を打ってください", "type what to look for").to_string()
+            } else {
+                t!(format!("{hits} 件"), format!("{hits} matches"))
+            };
+            let w = self.palette_width();
+            let Some(r) = self.renderer.as_mut() else {
+                return;
+            };
+            panel(r, &th, x, y, w, 2);
+            r.rect(x as f32, y as f32, w as f32, 1.0, th.tab_active);
+            r.text((x + 1) as f32, y as f32, &line, th.fg, true);
+            let qw = display_width(&line);
+            r.rect((x + 1 + qw) as f32, y as f32, 0.15, 1.0, th.cursor);
+            r.text((x + 2) as f32, (y + 1) as f32, &note, th.dim, true);
+            return;
+        }
+
         let max_rows = self.rows.saturating_sub(y + 3).min(16);
         let total = self.palette.items().len();
         let shown = total.min(max_rows);
@@ -2992,6 +3708,17 @@ impl App {
             .and_then(PaneView::label)
             .unwrap_or_else(|| self.session_name.clone());
         let mut right = String::new();
+        // エージェントが名乗った「いくら使ったか」。名乗らなければ出さない。
+        if let Some(cost) = self
+            .session
+            .info
+            .as_ref()
+            .and_then(|i| i.panes.iter().find(|p| p.id == self.session.active))
+            .and_then(|p| p.cost.clone())
+        {
+            right.push_str(&cost);
+            right.push_str("  ");
+        }
         if owned_by_child {
             right.push_str(t!("🖱 アプリ側  ", "🖱 app  "));
         }
@@ -3263,6 +3990,16 @@ fn display_width(s: &str) -> usize {
 ///
 /// 単語粒度が `textobj::at_pointer` を通るので、
 /// 「`src/main.rs:42` の上でドラッグするとパス全体から始まる」が自然に出る。
+/// 画面上の「開けるもの」1 つ。
+#[derive(Clone, Debug)]
+struct Hint {
+    pane: u32,
+    line: usize,
+    col: usize,
+    text: String,
+    label: String,
+}
+
 /// 「開く」対象の種別。ホバーの下線と Ctrl＋クリックで同じ判定を使う。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OpenKind {
@@ -4120,11 +4857,16 @@ fn main() -> Result<()> {
         cli::Mode::InstallShellIntegration(name) => {
             return install_shell_integration(name.as_deref());
         }
+        cli::Mode::Broadcast { text, wait } => {
+            let ok = rpc::broadcast(&cli.session, text, *wait)?;
+            std::process::exit(i32::from(!ok) * 2);
+        }
+        cli::Mode::Compare => return rpc::compare(&cli.session),
         cli::Mode::Open { path, render } => return rpc::open(&cli.session, path, *render),
         cli::Mode::Render => return rpc::render(&cli.session, cli.pane),
         cli::Mode::Agents => return rpc::agents(&cli.session),
         cli::Mode::AgentState(state) => {
-            return rpc::set_agent_state(&cli.session, state, cli.pane);
+            return rpc::set_agent_state(&cli.session, state, cli.pane, cli.cost.clone());
         }
         cli::Mode::Wait { until, timeout } => {
             // 終了コードで答える。台本が `if tsg --wait --until blocked` と書ける。

@@ -97,6 +97,11 @@ pub struct PaneView {
     /// すぎないので、端末に食わせればセルになり、描画・選択・コピー・
     /// Ctrl＋クリックがそのまま効く。専用の描画経路を増やさない。
     pub preview: Option<Terminal>,
+    /// 畳んである出力の範囲（開始行, 終了行）。両端を含む。
+    ///
+    /// **行番号で持つ。** スクロールバックは末尾に足されるだけで、
+    /// 既にある行の番号は動かない（`concept.md` の中心命題）。
+    pub folds: Vec<(usize, usize)>,
 }
 
 /// スクロールバックの上限。**プロセス全体で 1 つ**の設定なので、
@@ -142,7 +147,67 @@ impl PaneView {
             follow_tail: true,
             alive: true,
             preview: None,
+            folds: Vec::new(),
         }
+    }
+
+    /// 画面の `r` 行目に出す文書行。畳んだ範囲は飛ばす。
+    ///
+    /// **見せる側と当てる側で同じ関数を通す。** 別々に数えると、
+    /// クリックした行と実際に触る行が畳んだ分だけずれる。
+    pub fn line_at(&self, r: usize) -> usize {
+        let mut line = self.top;
+        for _ in 0..r {
+            line = match self.fold_at(line) {
+                Some((_, end)) => end + 1,
+                None => line + 1,
+            };
+        }
+        line
+    }
+
+    /// その文書行が画面の何行目か。畳まれている中なら、畳みの行。
+    pub fn row_of(&self, line: usize, height: usize) -> Option<usize> {
+        let mut at = self.top;
+        for r in 0..height {
+            if at == line {
+                return Some(r);
+            }
+            match self.fold_at(at) {
+                Some((start, end)) => {
+                    if (start..=end).contains(&line) {
+                        return Some(r);
+                    }
+                    at = end + 1;
+                }
+                None => at += 1,
+            }
+        }
+        None
+    }
+
+    /// その行から始まる畳み。
+    pub fn fold_at(&self, line: usize) -> Option<(usize, usize)> {
+        self.folds.iter().copied().find(|(s, _)| *s == line)
+    }
+
+    /// その行を含む畳み。
+    pub fn fold_covering(&self, line: usize) -> Option<(usize, usize)> {
+        self.folds
+            .iter()
+            .copied()
+            .find(|(s, e)| (*s..=*e).contains(&line))
+    }
+
+    /// 畳む / 開く。既にあれば外す。
+    pub fn toggle_fold(&mut self, start: usize, end: usize) -> bool {
+        if let Some(i) = self.folds.iter().position(|(s, _)| *s == start) {
+            self.folds.remove(i);
+            return false;
+        }
+        self.folds.push((start, end));
+        self.folds.sort_unstable();
+        true
     }
 
     /// プレビュー中か。**中身は読むだけ**で、打鍵はファイルへ行かない。

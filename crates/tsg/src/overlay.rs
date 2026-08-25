@@ -90,6 +90,8 @@ fn scroll_into_view(offset: &mut usize, selected: usize, height: usize) {
 pub struct Palette {
     pub open: bool,
     pub query: String,
+    /// 何を打っているか。検索のときは一覧を出さず、打つたびに飛ぶ。
+    pub kind: PaletteKind,
     pub selected: usize,
     /// 見せ始めの位置。`view()` が選択に合わせて寄せる。
     offset: usize,
@@ -99,10 +101,25 @@ pub struct Palette {
 impl Palette {
     pub fn show(&mut self) {
         self.open = true;
+        self.kind = PaletteKind::Command;
         self.query.clear();
         self.selected = 0;
         self.offset = 0;
         self.refresh();
+    }
+
+    /// 検索として開く。一覧は出さない。
+    pub fn show_search(&mut self, back: bool) {
+        self.open = true;
+        self.kind = PaletteKind::Search { back };
+        self.query.clear();
+        self.selected = 0;
+        self.offset = 0;
+        self.items.clear();
+    }
+
+    pub fn searching(&self) -> bool {
+        matches!(self.kind, PaletteKind::Search { .. })
     }
 
     /// 高さ `height` の窓に収まる範囲。選んでいる項目は必ずこの中に入る。
@@ -125,6 +142,10 @@ impl Palette {
     /// あいまい検索にしないのは、打った文字と出てくる項目の関係が
     /// 見て分かることを優先しているため。
     fn refresh(&mut self) {
+        if self.searching() {
+            self.items.clear();
+            return;
+        }
         let q = self.query.to_lowercase();
         self.items = REGISTRY
             .iter()
@@ -401,6 +422,17 @@ pub struct Picker {
     /// 呼び出し側が「いまはセッションの一覧のはず」と覚えておかなくていい。
     pub kind: PickKind,
     offset: usize,
+}
+
+/// パレットの入力欄が何を受け取っているか。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PaletteKind {
+    #[default]
+    Command,
+    /// 検索。`back` なら後ろ向き。
+    Search {
+        back: bool,
+    },
 }
 
 /// 選んだものの扱い。

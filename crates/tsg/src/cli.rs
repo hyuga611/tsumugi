@@ -31,6 +31,10 @@ pub enum Mode {
     ShellIntegration(Option<String>),
     /// シェル統合を置いて rc に 1 行足す
     InstallShellIntegration(Option<String>),
+    /// 同じ文を、見えているペイン全部へ投げる
+    Broadcast { text: String, wait: bool },
+    /// 各ペインの返事を 1 つのペインに並べて見せる
+    Compare,
     /// 走っているセッションでファイルを開く
     Open { path: String, render: bool },
     /// 読む形を切り替える
@@ -75,6 +79,10 @@ pub struct Cli {
     pub new_window: bool,
     /// 相手のペイン。書かなければ「いま選ばれているペイン」。
     pub pane: Option<u32>,
+    /// 起動と同時に組む配置。いまは `agents` だけ。
+    pub layout: Option<String>,
+    /// `--agent-state` と一緒に名乗る「いくら使ったか」。そのまま出す。
+    pub cost: Option<String>,
 }
 
 impl Default for Cli {
@@ -92,6 +100,8 @@ impl Default for Cli {
             session_given: false,
             new_window: false,
             pane: None,
+            layout: None,
+            cost: None,
         }
     }
 }
@@ -111,6 +121,7 @@ tsumugi (tsg) — ターミナルの画面を vim で編集できるドキュメ
       --no-blur            背景のぼかしを切る
       --font-size <px>     文字の大きさ
       --lang <ja|en>       表示の言語（既定: OS に合わせる）
+      --layout agents          3 分割で開く（AI エージェントを並べる用）
   -n, --new-window         tsumugi の中から起動したときも新しい窓を開く
                            （既定は、いまの窓にタブが増えて切り替わる）
       --theme <名前>       配色（夜霧 / 墨 / 白磁。英名 yogiri / sumi / hakuji でも可）
@@ -264,10 +275,17 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Cli {
             "--tap" => cli.mode = Mode::Tap,
             "--list" => cli.mode = Mode::List,
             "--rpc" => cli.mode = Mode::Rpc,
+            "--layout" => cli.layout = next_value(&args, &mut i),
+            "--cost" => cli.cost = next_value(&args, &mut i),
             "--pane" => {
                 cli.pane = next_value(&args, &mut i).and_then(|v| v.parse().ok());
             }
             "--new-window" | "-n" => cli.new_window = true,
+            "--broadcast" | "-b" => {
+                let text = next_value(&args, &mut i).unwrap_or_default();
+                cli.mode = Mode::Broadcast { text, wait: false };
+            }
+            "--compare" => cli.mode = Mode::Compare,
             "--open" | "-o" => {
                 let path = next_value(&args, &mut i).unwrap_or_default();
                 cli.mode = Mode::Open {
@@ -306,6 +324,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Cli {
             }
             "--wait" => match &mut cli.mode {
                 Mode::Prompt { wait, .. } => *wait = true,
+                Mode::Broadcast { wait, .. } => *wait = true,
                 Mode::Wait { .. } => {}
                 _ => {
                     cli.mode = Mode::Wait {

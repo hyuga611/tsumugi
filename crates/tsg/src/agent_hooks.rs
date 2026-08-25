@@ -97,6 +97,14 @@ fn command_for(state: &str) -> String {
     format!("tsg --agent-state {state}")
 }
 
+/// 「いくら使ったか」も名乗らせたいときの形。人が設定に書き足す用の見本。
+///
+/// **こちらでは数えない。** 数え方はモデルごとに違い、当てにいくと必ずずれる。
+/// 相手が言った数字をそのまま出す。
+pub fn cost_example() -> &'static str {
+    "tsg --agent-state done --cost \"$0.42\""
+}
+
 /// 足す。
 pub fn install(name: Option<&str>) -> Result<Report> {
     let mut report = Report::default();
@@ -133,6 +141,10 @@ pub fn install(name: Option<&str>) -> Result<Report> {
         report
             .notes
             .push("外すときは `tsg --uninstall-agent-hooks`".into());
+        report.notes.push(format!(
+            "「いくら使ったか」も出したいときは、設定に {} のような行を足す",
+            cost_example()
+        ));
     }
     Ok(report)
 }

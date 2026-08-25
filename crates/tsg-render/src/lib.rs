@@ -92,7 +92,7 @@ struct Instance {
     uv0: [f32; 2],
     uv1: [f32; 2],
     color: [f32; 4],
-    /// 0 = アトラスのグリフ、1 = 単色矩形
+    /// 0 = アトラスのグリフ、1 = 単色矩形、2 = 画像
     mode: u32,
     _pad: [u32; 3],
 }
@@ -210,6 +210,121 @@ impl Atlas {
     }
 }
 
+/// 画像の置き場所。**グリフとは別の面**に持つ。
+///
+/// グリフのアトラスは 1 チャンネル（濃さだけ）で、色は頂点から渡している。
+/// 画像は色そのものを持つので同じ面には載らない。棚に横へ並べ、
+/// 入らなくなったら**古いものから捨てる**（端末に出た絵は流れて消えるもの）。
+struct ImageStore {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    x: u32,
+    y: u32,
+    row_h: u32,
+    /// 積んだ順。溢れたら先頭から無効になる。
+    generation: u32,
+}
+
+/// 置いた画像の場所（アトラス上の uv と、元の大きさ）。
+#[derive(Clone, Copy, Debug)]
+pub struct ImageSlot {
+    uv0: [f32; 2],
+    uv1: [f32; 2],
+    pub width: u32,
+    pub height: u32,
+    generation: u32,
+}
+
+const IMAGE_ATLAS: u32 = 2048;
+
+impl ImageStore {
+    fn new(device: &wgpu::Device) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("tsg images"),
+            size: wgpu::Extent3d {
+                width: IMAGE_ATLAS,
+                height: IMAGE_ATLAS,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Self {
+            texture,
+            view,
+            x: 0,
+            y: 0,
+            row_h: 0,
+            generation: 0,
+        }
+    }
+
+    fn alloc(&mut self, queue: &wgpu::Queue, rgba: &[u8], w: u32, h: u32) -> Option<ImageSlot> {
+        if w == 0 || h == 0 || w > IMAGE_ATLAS || h > IMAGE_ATLAS {
+            return None;
+        }
+        if rgba.len() < (w as usize) * (h as usize) * 4 {
+            return None;
+        }
+        if self.x + w > IMAGE_ATLAS {
+            self.x = 0;
+            self.y += self.row_h + 1;
+            self.row_h = 0;
+        }
+        if self.y + h > IMAGE_ATLAS {
+            // 一周した。**古いものは無効になる**（世代で見分ける）。
+            self.x = 0;
+            self.y = 0;
+            self.row_h = 0;
+            self.generation += 1;
+        }
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d {
+                    x: self.x,
+                    y: self.y,
+                    z: 0,
+                },
+                aspect: wgpu::TextureAspect::All,
+            },
+            rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(w * 4),
+                rows_per_image: Some(h),
+            },
+            wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+        );
+        let slot = ImageSlot {
+            uv0: [
+                self.x as f32 / IMAGE_ATLAS as f32,
+                self.y as f32 / IMAGE_ATLAS as f32,
+            ],
+            uv1: [
+                (self.x + w) as f32 / IMAGE_ATLAS as f32,
+                (self.y + h) as f32 / IMAGE_ATLAS as f32,
+            ],
+            width: w,
+            height: h,
+            generation: self.generation,
+        };
+        self.x += w + 1;
+        self.row_h = self.row_h.max(h);
+        Some(slot)
+    }
+}
+
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
@@ -223,6 +338,7 @@ pub struct Renderer {
     instance_cap: usize,
 
     atlas: Atlas,
+    images: ImageStore,
     cache: HashMap<(usize, u16), Option<AtlasEntry>>,
     /// 合字を組むか。切ると `glyph_run` は 1 セル 1 文字で積む。
     ligatures: bool,
@@ -295,6 +411,7 @@ impl Renderer {
         surface.configure(&device, &config);
 
         let atlas = Atlas::new(&device);
+        let images = ImageStore::new(&device);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("tsg cell shader"),
@@ -344,6 +461,16 @@ impl Renderer {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
             ],
         });
 
@@ -362,6 +489,10 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&images.view),
                 },
             ],
         });
@@ -428,6 +559,7 @@ impl Renderer {
             instance_buf,
             instance_cap,
             atlas,
+            images,
             cache: HashMap::new(),
             ligatures: true,
             shaped: HashMap::new(),
@@ -494,6 +626,29 @@ impl Renderer {
             uv1: [0.0, 0.0],
             color,
             mode: 1,
+            _pad: [0; 3],
+        });
+    }
+
+    /// 画像を載せる。**入らなくなったら古いものから捨てる。**
+    /// 端末に出た絵は流れて消えるものなので、無理に全部を抱えない。
+    pub fn upload_image(&mut self, rgba: &[u8], w: u32, h: u32) -> Option<ImageSlot> {
+        self.images.alloc(&self.queue, rgba, w, h)
+    }
+
+    /// 載せた画像をセル座標に積む。**流れて無効になったものは黙って出さない。**
+    pub fn image(&mut self, col: f32, row: f32, w_cells: f32, h_cells: f32, slot: ImageSlot) {
+        if slot.generation != self.images.generation {
+            return;
+        }
+        let (cw, ch) = (self.fonts.cell_w, self.fonts.cell_h);
+        self.instances.push(Instance {
+            pos: [col * cw, row * ch],
+            size: [w_cells * cw, h_cells * ch],
+            uv0: slot.uv0,
+            uv1: slot.uv1,
+            color: [1.0, 1.0, 1.0, 1.0],
+            mode: 2,
             _pad: [0; 3],
         });
     }
@@ -748,6 +903,7 @@ struct Uniforms { screen: vec2<f32>, pad: vec2<f32> };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var atlas_tex: texture_2d<f32>;
 @group(0) @binding(2) var atlas_smp: sampler;
+@group(0) @binding(3) var img_tex: texture_2d<f32>;
 
 struct InstanceIn {
   @location(0) pos:   vec2<f32>,
@@ -796,6 +952,11 @@ fn vs(@builtin(vertex_index) vi: u32, inst: InstanceIn) -> VsOut {
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
   if (in.mode == 1u) {
     return in.color;
+  }
+  if (in.mode == 2u) {
+    // 画像。色は面が持っているので、頂点の色は透過だけに使う。
+    let px = textureSample(img_tex, atlas_smp, in.uv);
+    return vec4<f32>(px.rgb, px.a * in.color.a);
   }
   let a = textureSample(atlas_tex, atlas_smp, in.uv).r;
   return vec4<f32>(in.color.rgb, in.color.a * a);

@@ -63,6 +63,8 @@ pub enum Effect {
     SetTheme(String),
     /// 設定ファイルを開く。場所を知っているのはホストだけ。
     OpenConfig,
+    /// 検索の入力を開く。窓の作りはホストが持つ。
+    OpenSearch { back: bool },
     /// mux（別プロセス）への要求。ホストが `tsg-mux` のメッセージへ翻訳する。
     Mux(MuxRequest),
     /// コマンドパレットを開く（`prefix` を入れた状態で）。
@@ -266,6 +268,11 @@ pub struct Engine {
     anchor: Option<Pos>,
     pending: Pending,
     last_find: Option<(char, bool, bool)>,
+    /// いま探している文字列。`n` `N` と強調が見る。
+    ///
+    /// **エンジンが持つ。** 画面の側に置くと、ペインを切り替えた瞬間に
+    /// `n` が何を指すのか分からなくなる。
+    pub search: Option<String>,
     view: View,
     help_visible: bool,
     pub registers: Registers,
@@ -290,6 +297,7 @@ impl Engine {
             anchor: None,
             pending: Pending::default(),
             last_find: None,
+            search: None,
             view: View::default(),
             help_visible: false,
             registers: Registers::default(),
@@ -617,6 +625,10 @@ impl Engine {
             '{' => self.motion_command(Motion::ParaBack, buf),
             '}' => self.motion_command(Motion::ParaFwd, buf),
             '%' => self.motion_command(Motion::MatchPair, buf),
+            '/' => Some(Command::OpenSearch { back: false }),
+            '?' => Some(Command::OpenSearch { back: true }),
+            'n' => self.motion_command(Motion::SearchNext, buf),
+            'N' => self.motion_command(Motion::SearchPrev, buf),
             'H' => self.motion_command(Motion::ScreenTop, buf),
             'M' => self.motion_command(Motion::ScreenMiddle, buf),
             'L' => self.motion_command(Motion::ScreenBottom, buf),
@@ -739,6 +751,16 @@ impl Engine {
             "layout.equalize" => Command::Mux(MuxRequest::Equalize),
             "layout.sessions" => Command::Mux(MuxRequest::Sessions),
             "agent.next" => Command::Mux(MuxRequest::NextAgent),
+            "search.open" => Command::OpenSearch { back: false },
+            "hints" => Command::Mux(MuxRequest::Hints),
+            "fold.toggle" => Command::Mux(MuxRequest::ToggleFold),
+            "agent.broadcast" => Command::Mux(MuxRequest::Broadcast),
+            "git.diff" => Command::Mux(MuxRequest::GitDiff),
+            "fold.all" => Command::Mux(MuxRequest::FoldAll(true)),
+            "search.next" => Command::Move {
+                motion: Motion::SearchNext,
+                count: 1,
+            },
             "agent.files" => Command::Mux(MuxRequest::PaneFiles),
             "file.preview" => Command::Mux(MuxRequest::TogglePreview),
             "motion.agent" => Command::Move {
@@ -949,7 +971,7 @@ impl Engine {
     /// モーションを `Command` にする。operator-pending なら範囲へ畳む。
     fn motion_command(&mut self, m: Motion, buf: &dyn Buffer) -> Option<Command> {
         let count = self.take_count();
-        let target = motion::apply(m, self.cursor, count, buf, self.view, self.last_find);
+        let target = motion::apply(m, self.cursor, count, buf, self.view, self.last_find, self.search.as_deref());
 
         if let Some(op) = self.pending.operator.take() {
             let range = range_for(self.cursor, target, m.kind(), buf);
@@ -995,7 +1017,7 @@ impl Engine {
                 vec![Effect::ModeChanged(self.mode)]
             }
             Command::Move { motion, count } => {
-                let target = motion::apply(motion, self.cursor, count, buf, self.view, self.last_find);
+                let target = motion::apply(motion, self.cursor, count, buf, self.view, self.last_find, self.search.as_deref());
                 self.cursor = target;
                 if self.mode == Mode::OperatorPending {
                     self.mode = Mode::Normal;
@@ -1019,6 +1041,15 @@ impl Engine {
                 vec![Effect::ModeChanged(self.mode), Effect::CursorMoved(self.cursor)]
             }
             Command::Scroll(delta) => vec![Effect::Scrolled(delta)],
+            Command::OpenSearch { back } => {
+                self.mode = Mode::Normal;
+                self.pending.clear();
+                vec![Effect::OpenSearch { back }]
+            }
+            Command::SetSearch(q) => {
+                self.search = (!q.is_empty()).then_some(q);
+                Vec::new()
+            }
             Command::Palette(prefix) => {
                 self.mode = Mode::Normal;
                 self.pending.clear();

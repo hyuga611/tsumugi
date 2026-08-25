@@ -20,7 +20,7 @@ pub use command::{
     VisualKind,
 };
 pub use engine::{Effect, Engine, KeyInput, KeyOutcome, Macros, Marks, RegisterValue, Registers};
-pub use motion::{Motion, MotionKind, View};
+pub use motion::{Motion, MotionKind, View, find_match, matches_in};
 pub use text::{Lang, lang, set_lang};
 pub use textobj::TextObject;
 

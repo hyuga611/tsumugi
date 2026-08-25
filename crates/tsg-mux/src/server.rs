@@ -69,6 +69,7 @@ struct Pane {
     /// Markdown を読む形で見せているか。表示の状態だが、**開き直しても
     /// 戻らない**ようにサーバが預かる（開いているファイルと同じ扱い）。
     preview: bool,
+    cost: Option<String>,
 }
 
 /// サーバが預かるファイル。
@@ -134,6 +135,7 @@ impl State {
                     alive: p.alive,
                     agent: p.agent,
                     preview: p.preview,
+                    cost: p.cost.clone(),
                 })
                 .collect(),
         }
@@ -225,6 +227,7 @@ impl State {
                 file: None,
                 agent: None,
                 preview: false,
+                cost: None,
             },
         );
         Ok(id)
@@ -381,16 +384,42 @@ impl State {
                 }
             }
 
-            ClientMsg::SetAgentState { pane, state } => {
+            ClientMsg::SetAgentState { pane, state, cost } => {
                 // ペインの指定が無ければ、いま選ばれているところ。
                 // hooks は自分がどのペインに居るか知らないので、これが既定。
                 let target = pane.or_else(|| self.active_pane());
-                if let Some(p) = target.and_then(|id| self.panes.get_mut(&id))
-                    && p.agent != Some(state)
-                {
+                if let Some(p) = target.and_then(|id| self.panes.get_mut(&id)) {
+                    let changed = p.agent != Some(state) || (cost.is_some() && p.cost != cost);
                     p.agent = Some(state);
-                    let info = self.info();
-                    self.broadcast(&ServerMsg::Layout(info));
+                    if cost.is_some() {
+                        p.cost = cost;
+                    }
+                    if changed {
+                        let info = self.info();
+                        self.broadcast(&ServerMsg::Layout(info));
+                    }
+                }
+            }
+
+            ClientMsg::Broadcast { panes, data } => {
+                let Some(bytes) = decode_bytes(&data) else {
+                    return Ok(true);
+                };
+                // 宛先を書かなければ、いまのタブで見えているペイン全部。
+                let targets: Vec<u32> = if panes.is_empty() {
+                    self.tabs
+                        .iter()
+                        .find(|t| t.id == self.active_tab)
+                        .map(|t| t.layout.panes())
+                        .unwrap_or_default()
+                } else {
+                    panes
+                };
+                for id in targets {
+                    if let Some(p) = self.panes.get_mut(&id) {
+                        let _ = p.writer.write_all(&bytes);
+                        let _ = p.writer.flush();
+                    }
                 }
             }
 

@@ -6,6 +6,7 @@
 //! 規定されると設計自由度が消えるため。
 
 pub mod attrs;
+pub mod graphics;
 pub mod grid;
 pub mod semantic;
 
@@ -81,6 +82,13 @@ pub struct TermState {
     /// 受け取った OSC を生のまま記録する（M0 のプローブ用）。
     pub osc_log: Vec<String>,
     pub log_osc: bool,
+
+    /// 端末に出ている絵。**ドキュメント絶対行で置く**ので、
+    /// スクロールバックと一緒に動く（`concept.md` の中心命題のまま）。
+    pub images: Vec<graphics::Image>,
+    /// 組み立て中の絵（分割して届く）。
+    pending_image: Option<graphics::Pending>,
+    next_image: u64,
 }
 
 impl TermState {
@@ -94,7 +102,59 @@ impl TermState {
             cwd: None,
             osc_log: Vec::new(),
             log_osc: false,
+            images: Vec::new(),
+            pending_image: None,
+            next_image: 1,
         }
+    }
+
+    /// APC の中身を 1 つ受け取る。そろったらカーソルの位置に置く。
+    ///
+    /// **絵のぶんだけ行を送る。** 送らないと、次に出る字が絵の上に重なる。
+    /// グリッドは相変わらず文書で、絵はその上に乗るだけ。
+    pub fn take_graphics(&mut self, body: &[u8]) {
+        let Some(rest) = body.strip_prefix(b"G") else {
+            return; // `_G` 以外の APC は知らない
+        };
+        let Some((rgba, w, h, want_cols, want_rows)) =
+            graphics::feed_apc(&mut self.pending_image, rest)
+        else {
+            return;
+        };
+        // 何セルぶんにするか。指定が無ければ、セルの大きさから当てる。
+        // ここでの 1 セルは 8x16 と見なす（実寸はホストが知っているが、
+        // **端末はセル数だけ決めればよい**）。
+        let cols = if want_cols > 0 {
+            want_cols as usize
+        } else {
+            (w as usize).div_ceil(8).max(1)
+        };
+        let rows = if want_rows > 0 {
+            want_rows as usize
+        } else {
+            (h as usize).div_ceil(16).max(1)
+        };
+        let line = self.grid.scrollback_len() + self.grid.cursor.row;
+        let col = self.grid.cursor.col;
+        self.images.push(graphics::Image {
+            id: self.next_image,
+            line,
+            col,
+            cols,
+            rows,
+            width: w,
+            height: h,
+            rgba,
+        });
+        self.next_image += 1;
+        // **持ちすぎない。** 端末に出た絵は流れて消えるもの。
+        if self.images.len() > 32 {
+            self.images.remove(0);
+        }
+        for _ in 0..rows {
+            self.grid.line_feed();
+        }
+        self.grid.carriage_return();
     }
 
     // ---- 所有権の裁定（唯一の場所） --------------------------------------
@@ -493,6 +553,7 @@ fn sanitize_osc_text(raw: &[u8], max_chars: usize) -> String {
 /// パーサと状態を束ねたもの。
 pub struct Terminal {
     parser: vte::Parser,
+    apc: graphics::ApcSplitter,
     pub state: TermState,
 }
 
@@ -500,16 +561,33 @@ impl Terminal {
     pub fn new(cols: usize, rows: usize, amb: AmbiguousWidth) -> Self {
         Self {
             parser: vte::Parser::new(),
+            apc: graphics::ApcSplitter::default(),
             state: TermState::new(cols, rows, amb),
         }
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
-        self.parser.advance(&mut self.state, bytes);
+        // 絵（Kitty graphics）は APC で来る。`vte` は APC を捨てるので、
+        // 解析器へ渡す前に抜き出す。**残りはこれまでどおり**流す。
+        let (rest, apcs) = self.apc.split(bytes);
+        for body in apcs {
+            self.state.take_graphics(&body);
+        }
+        self.parser.advance(&mut self.state, &rest);
         // 上限を超えて履歴の先頭が捨てられたら、印を同じだけ寄せる。
         // ここが**唯一の合わせ場所**。取りこぼすと印が別の行を指す。
         let dropped = self.state.grid.take_dropped();
         self.state.marks.shift_up(dropped);
+        // 絵も同じだけ寄せる。**印と同じ理由**で、忘れると別の行に出る。
+        if dropped > 0 {
+            self.state.images.retain_mut(|img| match img.line.checked_sub(dropped) {
+                Some(l) => {
+                    img.line = l;
+                    true
+                }
+                None => false,
+            });
+        }
     }
 }
 
