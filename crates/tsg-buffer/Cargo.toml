@@ -14,4 +14,4 @@ tree-sitter-javascript = "0.25.0"
 tree-sitter-json = "0.24.8"
 tree-sitter-python = "0.25.0"
 tree-sitter-rust = "0.24.2"
-tsg-term = { version = "0.1.1", path = "../tsg-term" }
+tsg-term = { version = "0.2.0", path = "../tsg-term" }
