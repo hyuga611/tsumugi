@@ -21,10 +21,37 @@ use std::collections::{BTreeMap, BTreeSet};
 use tsg_lsp::{Incoming, Server, servers};
 
 /// 待っている問い合わせ。答えが来たときに誰の何だったかを引く。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pending {
     Definition { pane: u32 },
     Completion { pane: u32 },
+    Hover { pane: u32 },
+    References { pane: u32 },
+    /// 名前を変える。**変える前の名前を覚えておく** — 断ったときに
+    /// 「何を変えようとしたのか」を言えないと、押した人が困る。
+    Rename { pane: u32, from: String },
+}
+
+impl Pending {
+    pub fn pane(&self) -> u32 {
+        match self {
+            Pending::Definition { pane }
+            | Pending::Completion { pane }
+            | Pending::Hover { pane }
+            | Pending::References { pane }
+            | Pending::Rename { pane, .. } => *pane,
+        }
+    }
+}
+
+/// 何を訊くか。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ask {
+    Definition,
+    Completion,
+    Hover,
+    References,
+    Rename { to: String },
 }
 
 /// 走っている言語サーバをまとめて持つ。
@@ -122,15 +149,30 @@ impl Lsp {
 
     /// 定義へ。投げるだけ（答えは `poll` で拾う）。
     pub fn definition(&mut self, pane: u32, line: usize, col: usize) -> bool {
-        self.ask(pane, line, col, true)
+        self.ask(pane, line, col, &Ask::Definition)
     }
 
     /// 補完。投げるだけ。
     pub fn complete(&mut self, pane: u32, line: usize, col: usize) -> bool {
-        self.ask(pane, line, col, false)
+        self.ask(pane, line, col, &Ask::Completion)
     }
 
-    fn ask(&mut self, pane: u32, line: usize, col: usize, definition: bool) -> bool {
+    /// その場で意味を訊く。
+    pub fn hover(&mut self, pane: u32, line: usize, col: usize) -> bool {
+        self.ask(pane, line, col, &Ask::Hover)
+    }
+
+    /// 使われている場所。
+    pub fn references(&mut self, pane: u32, line: usize, col: usize) -> bool {
+        self.ask(pane, line, col, &Ask::References)
+    }
+
+    /// 名前を変える。
+    pub fn rename(&mut self, pane: u32, line: usize, col: usize, to: &str) -> bool {
+        self.ask(pane, line, col, &Ask::Rename { to: to.to_string() })
+    }
+
+    fn ask(&mut self, pane: u32, line: usize, col: usize, what: &Ask) -> bool {
         let Some((program, root, path)) = self.by_pane.get(&pane).cloned() else {
             return false;
         };
@@ -138,20 +180,27 @@ impl Lsp {
         let Some(s) = self.running.get_mut(&key) else {
             return false;
         };
-        let id = if definition {
-            s.definition(&path, line, col)
-        } else {
-            s.completion(&path, line, col)
+        let id = match what {
+            Ask::Definition => s.definition(&path, line, col),
+            Ask::Completion => s.completion(&path, line, col),
+            Ask::Hover => s.hover(&path, line, col),
+            Ask::References => s.references(&path, line, col),
+            Ask::Rename { to } => s.rename(&path, line, col, to),
         };
         let Ok(id) = id else {
             return false;
         };
-        let what = if definition {
-            Pending::Definition { pane }
-        } else {
-            Pending::Completion { pane }
+        let waiting = match what {
+            Ask::Definition => Pending::Definition { pane },
+            Ask::Completion => Pending::Completion { pane },
+            Ask::Hover => Pending::Hover { pane },
+            Ask::References => Pending::References { pane },
+            Ask::Rename { .. } => Pending::Rename {
+                pane,
+                from: path.clone(),
+            },
         };
-        self.pending.insert((key.0, key.1, id), what);
+        self.pending.insert((key.0, key.1, id), waiting);
         true
     }
 
@@ -183,9 +232,7 @@ impl Lsp {
                     }
                     Incoming::Answer { id, .. } => {
                         let what = self.pending.remove(&(key.0.clone(), key.1.clone(), *id));
-                        let pane = what.map(|w| match w {
-                            Pending::Definition { pane } | Pending::Completion { pane } => pane,
-                        });
+                        let pane = what.as_ref().map(Pending::pane);
                         out.push((pane, msg, what));
                     }
                 }
@@ -201,7 +248,7 @@ impl Lsp {
 /// ドライブ名を小文字で返してくることがあり（rust-analyzer で実際に
 /// 踏んだ。診断が届いているのに、どのペインのものか分からず捨てていた）、
 /// 区切りも `/` と `\` が混ざる。
-fn same_path(a: &str, b: &str) -> bool {
+pub fn same_path(a: &str, b: &str) -> bool {
     let norm = |s: &str| {
         let s = s.replace('\\', "/");
         if cfg!(windows) { s.to_lowercase() } else { s }

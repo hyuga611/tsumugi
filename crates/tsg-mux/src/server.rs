@@ -12,7 +12,7 @@
 //! 状態の所有者を 1 スレッドに固定するのは、モーダル操作と PTY 追記の競合を
 //! ロックではなく順序で解くため。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::mpsc::{self, Sender};
 use std::thread;
@@ -28,6 +28,71 @@ use crate::protocol::*;
 
 /// 再アタッチ時に送り返す最大行数。
 const SNAPSHOT_MAX_LINES: usize = 5000;
+
+/// 待っている相手が控える字の長さ。**頭から捨てる。**
+///
+/// 出っぱなしのコマンドを待つと、控えが際限なく伸びる。探している字は
+/// たいてい直前に出るので、この長さで足りる。
+const WAIT_TAIL_MAX: usize = 8 * 1024;
+
+/// 生バイトから、人が読む字だけを取り出す。
+///
+/// **飾りを落とす。** `\x1b[32mPASS\x1b[0m` の中の `PASS` を探せないと、
+/// 色を付けて出すテストランナーでは何も当たらない。
+fn plain_text(bytes: &[u8]) -> String {
+    let s = String::from_utf8_lossy(bytes);
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // CSI / OSC などの並び。**終わりの字まで読み飛ばす。**
+            match chars.peek() {
+                Some('[') => {
+                    chars.next();
+                    for c in chars.by_ref() {
+                        if c.is_ascii_alphabetic() || c == '~' {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    // BEL か ST（`ESC \`）まで。
+                    while let Some(c) = chars.next() {
+                        if c == '\u{7}' {
+                            break;
+                        }
+                        if c == '\u{1b}' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    chars.next();
+                }
+            }
+            continue;
+        }
+        if c == '\n' || c == '\t' || !c.is_control() {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// 拡張の記録に残す本数。**輪にして古いものから捨てる。**
+///
+/// 走らせっぱなしのサーバで静かに太らないように上限を持つ。調べたいのは
+/// たいてい「さっき何が起きたか」なので、この長さで足りる。
+const EXT_LOG_MAX: usize = 200;
+
+/// いまの unix 秒。**形にするのは出す側**（サーバは時計を持つだけ）。
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
 
 enum Event {
     ClientConnected {
@@ -113,6 +178,24 @@ struct ServerFile {
     stamp: Option<(std::time::SystemTime, u64)>,
 }
 
+/// 誰が、何を、いつまで待っているか。
+struct Waiting {
+    client: u64,
+    pane: Option<u32>,
+    matcher: Match,
+    /// 待ち始めてから出てきた字（末尾だけ）。
+    ///
+    /// **行番号では追えない。** 端末の「行」は増えるとは限らず、シェルは
+    /// もう在る行の上に書く。ドキュメントの長さを見張ると、画面の中で
+    /// 書き換わっただけの出力を丸ごと取りこぼす（実際に踏んだ）。
+    ///
+    /// **待ち始めた時点より前は入れない。** 前から出ていた字ですぐ当たる
+    /// なら、待った意味が無い。長さは `WAIT_TAIL_MAX` で頭から捨てる
+    /// （出っぱなしのコマンドを待つと際限なく伸びるので）。
+    tail: String,
+    deadline: Option<std::time::Instant>,
+}
+
 struct State {
     session: String,
     /// 前回の形から組み直すか。`--no-restore` で切る。
@@ -124,6 +207,27 @@ struct State {
     tabs: Vec<TabInfo>,
     active_tab: u32,
     clients: BTreeMap<u64, Box<dyn Write + Send>>,
+    /// 接続ごとの購読。**名乗ったものだけ**を配る（`ClientMsg::Subscribe`）。
+    subs: BTreeMap<u64, BTreeSet<String>>,
+    /// 待っている相手。**当たったら 1 通返して外す。**
+    waits: Vec<Waiting>,
+    /// 拡張が名乗った名前。記録を読める形にするためだけに持つ。
+    ext_names: BTreeMap<u64, String>,
+    /// 拡張が何をしたかの記録。**輪にして古いものから捨てる。**
+    ///
+    /// 際限なく溜めると、走らせっぱなしのサーバで静かに太る。
+    ext_log: std::collections::VecDeque<ExtLogEntry>,
+    /// 拡張が開いたペイン。`id` -> (誰のものか, ペイン番号)。
+    ///
+    /// **接続が切れても、ペインは閉じない。** 語彙（`ext`）は「押せるのに
+    /// 何も起きない」が最悪なので消すが、ペインの中身は**読めるもの**で、
+    /// 読んでいる途中に消えるほうが困る。切れたら id だけ手放す。
+    ext_panes: BTreeMap<String, (u64, u32)>,
+    /// 外から足された語彙。値は「誰が登録したか」と中身。
+    ///
+    /// 登録者を覚えるのは、その接続が切れたときに一緒に消すため。
+    /// 押しても何も起きない項目がメニューに残り続けるのが一番悪い。
+    ext: BTreeMap<String, (u64, ExtCommand)>,
     next_pane: u32,
     next_tab: u32,
     tx: Sender<Event>,
@@ -142,6 +246,12 @@ impl State {
             tabs: Vec::new(),
             active_tab: 0,
             clients: BTreeMap::new(),
+            subs: BTreeMap::new(),
+            ext: BTreeMap::new(),
+            waits: Vec::new(),
+            ext_names: BTreeMap::new(),
+            ext_log: std::collections::VecDeque::new(),
+            ext_panes: BTreeMap::new(),
             next_pane: 1,
             next_tab: 1,
             tx,
@@ -252,6 +362,7 @@ impl State {
             let _ = tx.send(Event::PtyExit { pane: id });
         });
 
+        let opened_cwd = spawn_cwd.clone();
         self.panes.insert(
             id,
             Pane {
@@ -273,7 +384,71 @@ impl State {
                 spawn_cwd,
             },
         );
+        self.emit(PluginEvent::PaneOpened {
+            pane: id,
+            cwd: opened_cwd,
+        });
         Ok(id)
+    }
+
+    /// 拡張のペインへ中身を置いて、窓へ配る。
+    ///
+    /// `dirty` は偽。**生成された眺めであって、直しかけの原稿ではない**ので、
+    /// `*` を付けて閉じるときに引き止めるのは違う。
+    fn write_ext_pane(&mut self, pane: u32, title: &str, text: &str) {
+        if let Some(p) = self.panes.get_mut(&pane) {
+            p.file = Some(ServerFile {
+                path: None,
+                title: title.to_string(),
+                text: text.to_string(),
+                dirty: false,
+                stamp: None,
+            });
+        }
+        self.broadcast(&ServerMsg::FileState {
+            pane,
+            path: None,
+            title: title.to_string(),
+            text: text.to_string(),
+            dirty: false,
+        });
+    }
+
+    /// 数えた時点より後に終わったコマンドを、出来事の形にして返す。
+    ///
+    /// 借用を分けるために一度 `Vec` に落としてから配る（`emit` は `&mut self`）。
+    fn finished_since(&self, pane: u32, before: usize) -> Vec<PluginEvent> {
+        let Some(p) = self.panes.get(&pane) else {
+            return Vec::new();
+        };
+        let blocks = p.term.state.marks.blocks();
+        let done: Vec<&tsg_term::CommandBlock> =
+            blocks.iter().filter(|b| b.exit_code.is_some()).collect();
+        if done.len() <= before {
+            return Vec::new();
+        }
+        done[before..]
+            .iter()
+            .map(|b| {
+                let command = b
+                    .command_line
+                    .and_then(|line| p.term.state.grid.document_line(line))
+                    .map(tsg_term::Line::text)
+                    .map(|text| {
+                        // プロンプト記号を落として、打たれた部分だけにする。
+                        let col = b.command_col;
+                        text.chars().skip(col).collect::<String>().trim().to_string()
+                    })
+                    .unwrap_or_default();
+                PluginEvent::CommandEnd {
+                    pane,
+                    exit_code: b.exit_code,
+                    command,
+                    output_start: b.output_start,
+                    output_end: b.output_end,
+                }
+            })
+            .collect()
     }
 
     /// 形が変わった。控えを置き直す。
@@ -334,6 +509,46 @@ impl State {
                         // **数は絞る。** 何百も返ってくることがある。
                         let items = tsg_lsp::parse_completions(&result, 50);
                         self.broadcast(&ServerMsg::Completions { pane, items });
+                    }
+                    Some(crate::lsp::Pending::Hover { .. }) => {
+                        match tsg_lsp::parse_hover(&result) {
+                            Some(text) => self.broadcast(&ServerMsg::Hover { pane, text }),
+                            // 言語サーバは「そこには何も無い」を空で返す。
+                            // 黙って終わると、押した人には壊れたように見える。
+                            None => self.broadcast(&ServerMsg::Error {
+                                message: "ここには説明がありません".into(),
+                            }),
+                        }
+                    }
+                    Some(crate::lsp::Pending::References { .. }) => {
+                        let items = tsg_lsp::parse_locations(&result);
+                        if items.is_empty() {
+                            self.broadcast(&ServerMsg::Error {
+                                message: "使われている場所が見つかりません".into(),
+                            });
+                        } else {
+                            self.broadcast(&ServerMsg::Locations { pane, items });
+                        }
+                    }
+                    Some(crate::lsp::Pending::Rename { from, .. }) => {
+                        let all = tsg_lsp::parse_rename(&result);
+                        let here = all
+                            .iter()
+                            .find(|(path, _)| crate::lsp::same_path(path, &from))
+                            .map(|(_, e)| e.clone())
+                            .unwrap_or_default();
+                        let others = all.len() - usize::from(!here.is_empty());
+                        if here.is_empty() && others == 0 {
+                            self.broadcast(&ServerMsg::Error {
+                                message: "この名前は変えられません".into(),
+                            });
+                        } else {
+                            self.broadcast(&ServerMsg::Edits {
+                                pane,
+                                edits: here,
+                                others,
+                            });
+                        }
                     }
                     None => {}
                 },
@@ -535,6 +750,199 @@ impl State {
         }
     }
 
+    /// 待っている相手に見比べさせる。**当たったら 1 通返して外す。**
+    ///
+    /// `text` はその一回で新しく出た字。`ended` / `agent` はその一回で
+    /// 分かったこと（`protocol::MatchInput`）。
+    fn feed_waits(&mut self, pane: u32, ended: Option<Option<i32>>) {
+        self.feed_waits_with(pane, ended, None, None);
+    }
+
+    fn feed_waits_with(
+        &mut self,
+        pane: u32,
+        ended: Option<Option<i32>>,
+        agent: Option<AgentState>,
+        event: Option<&str>,
+    ) {
+        if self.waits.is_empty() {
+            return;
+        }
+        let mut done: Vec<(u64, u32)> = Vec::new();
+        self.waits.retain(|w| {
+            if w.pane.is_some_and(|p| p != pane) {
+                return true;
+            }
+            let input = MatchInput {
+                text: &w.tail,
+                ended,
+                agent,
+                event,
+            };
+            if w.matcher.hit(&input) {
+                done.push((w.client, pane));
+                return false;
+            }
+            true
+        });
+        for (client, pane) in done {
+            self.send_to(
+                client,
+                &ServerMsg::Waited {
+                    matched: true,
+                    pane: Some(pane),
+                },
+            );
+        }
+    }
+
+    /// 時間切れを片付ける。**黙って待たせ続けない。**
+    fn expire_waits(&mut self) {
+        if self.waits.is_empty() {
+            return;
+        }
+        let now = std::time::Instant::now();
+        let mut over: Vec<u64> = Vec::new();
+        self.waits.retain(|w| match w.deadline {
+            Some(d) if d <= now => {
+                over.push(w.client);
+                false
+            }
+            _ => true,
+        });
+        for client in over {
+            self.send_to(
+                client,
+                &ServerMsg::Waited {
+                    matched: false,
+                    pane: None,
+                },
+            );
+        }
+    }
+
+    /// 出てきたぶんを、待っている相手それぞれの控えへ足す。
+    ///
+    /// 控えを 1 本にまとめないのは、待ち始めた時刻が相手ごとに違うため。
+    fn push_tails(&mut self, pane: u32, chunk: &str) {
+        for w in &mut self.waits {
+            if w.pane.is_some_and(|x| x != pane) {
+                continue;
+            }
+            w.tail.push_str(chunk);
+            // 頭から捨てる。**字の境目で切る**（マルチバイトの途中で
+            // 切ると落ちる）。
+            if w.tail.len() > WAIT_TAIL_MAX {
+                let cut = w.tail.len() - WAIT_TAIL_MAX;
+                let at = (cut..w.tail.len())
+                    .find(|i| w.tail.is_char_boundary(*i))
+                    .unwrap_or(w.tail.len());
+                w.tail.drain(..at);
+            }
+        }
+    }
+
+    /// git に訊く場所。**ペインが居る場所**で訊く（作業ツリーごとに答えが違う）。
+    ///
+    /// ペインの居場所が分からないとき（シェル統合が入っていない＝OSC 7 が
+    /// 来ない、かつ開いた場所も覚えていない）は、打った側が持たせてきた場所へ
+    /// 倒す。**出せないことを事故にしない。**
+    fn git_dir(&self, pane: Option<u32>, fallback: Option<String>) -> Option<String> {
+        pane.or_else(|| self.active_pane())
+            .and_then(|p| self.pane_cwd(p))
+            .or(fallback)
+    }
+
+    /// 実際の木を、番号を落とした形にする。
+    ///
+    /// 葉には**そのペインの場所と起動したもの**を書く。番号を書き出しても、
+    /// 次に当てるときにはもう無い。
+    fn spec_of(&self, layout: &Layout) -> LayoutSpec {
+        match layout {
+            Layout::Leaf { pane } => LayoutSpec::Leaf {
+                cwd: self.pane_cwd(*pane),
+                command: self.panes.get(pane).and_then(|p| p.command.clone()),
+            },
+            Layout::Split {
+                dir,
+                children,
+                weights,
+            } => LayoutSpec::Split {
+                dir: *dir,
+                children: children.iter().map(|c| self.spec_of(c)).collect(),
+                weights: weights_for(children, weights),
+            },
+        }
+    }
+
+    /// 拡張がしたことを 1 行残す。
+    fn note(&mut self, id: u64, what: impl Into<String>, refused: bool) {
+        let who = self
+            .ext_names
+            .get(&id)
+            .cloned()
+            .unwrap_or_else(|| format!("#{id}"));
+        self.ext_log.push_back(ExtLogEntry {
+            at: now_secs(),
+            who,
+            what: what.into(),
+            refused,
+        });
+        while self.ext_log.len() > EXT_LOG_MAX {
+            self.ext_log.pop_front();
+        }
+    }
+
+    /// 断る。**送るのと残すのを 1 か所にする。**
+    ///
+    /// 別々にすると、断り方を増やすたびにどちらかを書き忘れる。書き忘れた
+    /// ぶんは「繋がっているのに何も起きない」として人の前に出る。
+    fn refuse(&mut self, id: u64, message: String) {
+        self.note(id, message.clone(), true);
+        self.send_to(id, &ServerMsg::Error { message });
+    }
+
+    /// 出来事を、それを名乗った接続だけへ配る。
+    ///
+    /// **窓は購読しない。** 窓が要るのは形と生バイトで、意味の粒は
+    /// 外の拡張のためのもの。両方へ配ると、窓の側にも「無視する通知」が増える。
+    fn emit(&mut self, event: PluginEvent) {
+        let name = event.name();
+        // **待ちと購読は同じ出来事を見る。** 片方だけ増える形にしない。
+        if !self.waits.is_empty() {
+            let pane = match &event {
+                PluginEvent::CommandEnd { pane, .. }
+                | PluginEvent::PaneOpened { pane, .. }
+                | PluginEvent::PaneClosed { pane }
+                | PluginEvent::AgentState { pane, .. }
+                | PluginEvent::Cwd { pane, .. } => Some(*pane),
+                PluginEvent::Command { pane, .. } => *pane,
+            };
+            if let Some(pane) = pane {
+                self.feed_waits_with(pane, None, None, Some(name));
+            }
+        }
+        let want: Vec<u64> = self
+            .subs
+            .iter()
+            .filter(|(_, names)| names.iter().any(|n| n == name))
+            .map(|(id, _)| *id)
+            .collect();
+        if want.is_empty() {
+            return;
+        }
+        let msg = ServerMsg::Event { event };
+        for id in want {
+            self.send_to(id, &msg);
+        }
+    }
+
+    /// 外から足された語彙の全体を配り直す。
+    fn broadcast_ext(&mut self) {
+        let commands: Vec<ExtCommand> = self.ext.values().map(|(_, c)| c.clone()).collect();
+        self.broadcast(&ServerMsg::ExtCommands { commands });
+    }
+
     fn broadcast(&mut self, msg: &ServerMsg) {
         let Ok(line) = serde_json::to_string(msg) else {
             return;
@@ -664,6 +1072,13 @@ impl State {
                         self.send_to(id, &msg);
                     }
                 }
+                // 先に繋がっていた拡張の語彙を、いま来た窓へ渡す。
+                // **繋いだ順で語彙が変わってはいけない。**
+                if !self.ext.is_empty() {
+                    let commands: Vec<ExtCommand> =
+                        self.ext.values().map(|(_, c)| c.clone()).collect();
+                    self.send_to(id, &ServerMsg::ExtCommands { commands });
+                }
             }
 
             ClientMsg::SetAgentState {
@@ -696,6 +1111,14 @@ impl State {
                 if named {
                     self.save_for_restore();
                 }
+                if let Some(pane) = target {
+                    self.feed_waits_with(pane, None, Some(state), Some("agent"));
+                    self.emit(PluginEvent::AgentState {
+                        pane,
+                        state,
+                        agent: self.panes.get(&pane).and_then(|p| p.agent_kind.clone()),
+                    });
+                }
             }
 
             ClientMsg::Broadcast { panes, data } => {
@@ -720,9 +1143,426 @@ impl State {
                 }
             }
 
-            ClientMsg::RunCommand { id, arg } => {
+            ClientMsg::RunCommand { id: cmd, arg } => {
+                // 外から足された語彙は、窓ではなく**登録した拡張**へ返す。
+                // 窓へ配っても、窓はその id を知らないので何も起きない。
+                if cmd.starts_with("ext.") {
+                    if !self.ext.contains_key(&cmd) {
+                        self.refuse(id, format!("{cmd} は登録されていません"));
+                        return Ok(true);
+                    }
+                    let pane = self.active_pane();
+                    self.emit(PluginEvent::Command { id: cmd, pane, arg });
+                    return Ok(true);
+                }
                 // サーバは中身を知らない。**そのまま配るだけ。**
-                self.broadcast(&ServerMsg::RunCommand { id, arg });
+                self.broadcast(&ServerMsg::RunCommand { id: cmd, arg });
+            }
+
+            ClientMsg::ExtHello { name } => {
+                let name = name.trim().to_string();
+                if name.is_empty() {
+                    self.refuse(id, "名前が空です".into());
+                    return Ok(true);
+                }
+                self.ext_names.insert(id, name.clone());
+                self.note(id, format!("{name} が繋がりました"), false);
+            }
+
+            ClientMsg::Notify { text, level } => {
+                let text = text.trim().to_string();
+                if text.is_empty() {
+                    self.refuse(id, "知らせが空です".into());
+                    return Ok(true);
+                }
+                self.note(id, format!("知らせ: {text}"), false);
+                self.broadcast(&ServerMsg::Notify { text, level });
+            }
+
+            ClientMsg::WorktreeList { pane, cwd } => {
+                let Some(dir) = self.git_dir(pane, cwd) else {
+                    self.refuse(id, "git の中ではありません".into());
+                    return Ok(true);
+                };
+                match git(&dir, &["worktree", "list", "--porcelain"]) {
+                    Ok(out) => self.send_to(
+                        id,
+                        &ServerMsg::Worktrees {
+                            items: parse_worktrees(&out),
+                        },
+                    ),
+                    Err(e) => self.refuse(id, e),
+                }
+            }
+
+            ClientMsg::WorktreeAdd {
+                pane,
+                cwd,
+                path,
+                branch,
+            } => {
+                let Some(dir) = self.git_dir(pane, cwd) else {
+                    self.refuse(id, "git の中ではありません".into());
+                    return Ok(true);
+                };
+                let mut args: Vec<&str> = vec!["worktree", "add"];
+                if let Some(b) = branch.as_deref() {
+                    args.push("-b");
+                    args.push(b);
+                }
+                args.push(&path);
+                match git(&dir, &args) {
+                    // **作ったら開く。** 作っただけで場所を自分で打ち直すのは、
+                    // 頼んだことの続きが人の仕事に戻っているだけ。
+                    Ok(_) => return self.on_client(id, ClientMsg::WorktreeOpen { path }),
+                    Err(e) => self.refuse(id, e),
+                }
+            }
+
+            ClientMsg::WorktreeRemove {
+                pane,
+                cwd,
+                path,
+                force,
+            } => {
+                let Some(dir) = self.git_dir(pane, cwd) else {
+                    self.refuse(id, "git の中ではありません".into());
+                    return Ok(true);
+                };
+                let mut args: Vec<&str> = vec!["worktree", "remove"];
+                if force {
+                    args.push("--force");
+                }
+                args.push(&path);
+                match git(&dir, &args) {
+                    Ok(_) => self.note(id, format!("{path} を消しました"), false),
+                    // 直しかけが残っていれば git が断る。**押し切らない。**
+                    Err(e) => self.refuse(id, e),
+                }
+            }
+
+            ClientMsg::WorktreeOpen { path } => {
+                let (cols, rows) = (self.cols, self.rows);
+                let saved = self.spawn_cwd.replace(path);
+                let made = self.new_tab(cols, rows);
+                self.spawn_cwd = saved;
+                made?;
+                let info = self.info();
+                self.broadcast(&ServerMsg::Layout(info));
+                self.shape_changed();
+            }
+
+            ClientMsg::LayoutExport { tab } => {
+                let tab = tab.unwrap_or(self.active_tab);
+                let Some(t) = self.tabs.iter().find(|t| t.id == tab) else {
+                    self.refuse(id, format!("タブ {tab} はありません"));
+                    return Ok(true);
+                };
+                let layout = t.layout.clone();
+                let spec = self.spec_of(&layout);
+                self.send_to(id, &ServerMsg::LayoutSpec { spec });
+            }
+
+            ClientMsg::LayoutApply { spec } => {
+                let leaves = spec.leaf_list();
+                if leaves.is_empty() {
+                    self.refuse(id, "葉が 1 つもありません".into());
+                    return Ok(true);
+                }
+                // 当てるときに居た場所を、場所を書いていない葉の既定にする。
+                let here = self.active_pane().and_then(|p| self.pane_cwd(p));
+                let (cols, rows) = (self.cols, self.rows);
+                let mut made: Vec<u32> = Vec::with_capacity(leaves.len());
+                for (cwd, command) in leaves {
+                    match self.spawn_pane_in(cols, rows, cwd.or_else(|| here.clone()), command) {
+                        Ok(p) => made.push(p),
+                        Err(e) => {
+                            // 途中で失敗したら、開いたぶんを片付けてから断る。
+                            // **半分だけ開いた形を残さない。**
+                            for p in made {
+                                if let Some(mut v) = self.panes.remove(&p) {
+                                    let _ = v.pty.kill();
+                                }
+                            }
+                            self.refuse(id, format!("開けませんでした: {e:#}"));
+                            return Ok(true);
+                        }
+                    }
+                }
+                let mut iter = made.iter().copied();
+                let Some(layout) = spec.to_layout(&mut iter) else {
+                    for p in made {
+                        if let Some(mut v) = self.panes.remove(&p) {
+                            let _ = v.pty.kill();
+                        }
+                    }
+                    self.refuse(id, "形を組めません".into());
+                    return Ok(true);
+                };
+                let active_pane = made[0];
+                let tab_id = self.next_tab;
+                self.next_tab += 1;
+                self.tabs.push(TabInfo {
+                    id: tab_id,
+                    layout,
+                    active_pane,
+                    zoom: None,
+                    name: None,
+                });
+                self.active_tab = tab_id;
+                let info = self.info();
+                self.broadcast(&ServerMsg::Layout(info));
+                self.shape_changed();
+            }
+
+            ClientMsg::Wait {
+                pane,
+                matcher,
+                timeout_ms,
+            } => {
+                // **待たせてから「読めませんでした」は最悪。** 先に組んでみる。
+                if let Err(e) = matcher.check() {
+                    self.refuse(id, e);
+                    return Ok(true);
+                }
+                // いま見えているところから先だけを見る。
+                let deadline = timeout_ms
+                    .filter(|ms| *ms > 0)
+                    .map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+                self.waits.push(Waiting {
+                    client: id,
+                    pane,
+                    matcher,
+                    tail: String::new(),
+                    deadline,
+                });
+            }
+
+            ClientMsg::ExtLog { limit } => {
+                let n = limit.unwrap_or(50).min(EXT_LOG_MAX);
+                let entries: Vec<ExtLogEntry> = self
+                    .ext_log
+                    .iter()
+                    .rev()
+                    .take(n)
+                    .rev()
+                    .cloned()
+                    .collect();
+                self.send_to(id, &ServerMsg::ExtLog { entries });
+            }
+
+            ClientMsg::Subscribe { events } => {
+                let unknown: Vec<String> = events
+                    .iter()
+                    .filter(|e| !PluginEvent::NAMES.contains(&e.as_str()))
+                    .cloned()
+                    .collect();
+                if !unknown.is_empty() {
+                    // **黙って無視しない。** 名前を打ち間違えた拡張は、
+                    // 何も届かないまま正しく繋がったつもりで待ち続ける。
+                    self.refuse(
+                        id,
+                        format!(
+                            "知らない出来事です: {}（あるのは {}）",
+                            unknown.join(", "),
+                            PluginEvent::NAMES.join(", ")
+                        ),
+                    );
+                }
+                let mut took: Vec<String> = Vec::new();
+                let set = self.subs.entry(id).or_default();
+                for e in events {
+                    if PluginEvent::NAMES.contains(&e.as_str()) {
+                        set.insert(e.clone());
+                        took.push(e);
+                    }
+                }
+                if !took.is_empty() {
+                    self.note(id, format!("{} を購読", took.join(", ")), false);
+                }
+            }
+
+            ClientMsg::Unsubscribe { events } => {
+                if let Some(set) = self.subs.get_mut(&id) {
+                    for e in &events {
+                        set.remove(e);
+                    }
+                    if set.is_empty() {
+                        self.subs.remove(&id);
+                    }
+                }
+            }
+
+            ClientMsg::RegisterCommand { command } => {
+                if !ExtCommand::id_is_valid(&command.id) {
+                    self.refuse(
+                        id,
+                        format!(
+                            "id は `ext.` で始まる英数字にしてください: {}",
+                            command.id
+                        ),
+                    );
+                    return Ok(true);
+                }
+                if command.title.is_empty() || command.title_en.is_empty() {
+                    self.refuse(id, "title と title_en の両方が要ります".into());
+                    return Ok(true);
+                }
+                // 同じ id を別の接続が持っているなら奪わせない。
+                if let Some((owner, _)) = self.ext.get(&command.id)
+                    && *owner != id
+                {
+                    self.refuse(id, format!("{} は他の拡張が使っています", command.id));
+                    return Ok(true);
+                }
+                self.note(id, format!("{} を足しました", command.id), false);
+                self.ext.insert(command.id.clone(), (id, command));
+                self.broadcast_ext();
+            }
+
+            ClientMsg::UnregisterCommand { id: cmd } => {
+                if self.ext.get(&cmd).is_some_and(|(owner, _)| *owner == id) {
+                    self.ext.remove(&cmd);
+                    self.note(id, format!("{cmd} を外しました"), false);
+                    self.broadcast_ext();
+                }
+            }
+
+            ClientMsg::Hover { pane, line, col } => {
+                self.lsp.hover(pane, line, col);
+            }
+
+            ClientMsg::References { pane, line, col } => {
+                self.lsp.references(pane, line, col);
+            }
+
+            ClientMsg::Rename {
+                pane,
+                line,
+                col,
+                new_name,
+            } => {
+                if new_name.trim().is_empty() {
+                    self.send_to(
+                        id,
+                        &ServerMsg::Error {
+                            message: "新しい名前が空です".into(),
+                        },
+                    );
+                    return Ok(true);
+                }
+                self.lsp.rename(pane, line, col, new_name.trim());
+            }
+
+            ClientMsg::ExtPaneOpen {
+                id: name,
+                near,
+                dir,
+                title,
+                text,
+            } => {
+                if !ExtCommand::id_is_valid(&name) {
+                    self.refuse(
+                        id,
+                        format!("id は `ext.` で始まる英数字にしてください: {name}"),
+                    );
+                    return Ok(true);
+                }
+                // すでに開いているなら、そこへ書く。**増やさない。**
+                if let Some(pane) = live_ext_pane(&self.ext_panes, &self.panes, &name, id) {
+                    self.write_ext_pane(pane, &title, &text);
+                    self.send_to(id, &ServerMsg::ExtPane { id: name, pane });
+                    return Ok(true);
+                }
+                self.ext_panes.remove(&name);
+                let near = near.or_else(|| self.active_pane());
+                let Some(near) = near else {
+                    self.refuse(id, "開く場所がありません（ペインが 1 つもない）".into());
+                    return Ok(true);
+                };
+                let (cols, rows) = (self.cols, self.rows);
+                let here = self.pane_cwd(near);
+                let new_pane = self.spawn_pane_in(cols, rows, here, None)?;
+                self.write_ext_pane(new_pane, &title, &text);
+                if let Some(tab) = self.tab_of(near) {
+                    tab.layout.split(near, new_pane, dir.unwrap_or(Dir::Horizontal));
+                    tab.active_pane = new_pane;
+                }
+                self.note(id, format!("{name} のペインを開きました"), false);
+                self.ext_panes.insert(name.clone(), (id, new_pane));
+                let info = self.info();
+                self.broadcast(&ServerMsg::Layout(info));
+                self.shape_changed();
+                self.send_to(
+                    id,
+                    &ServerMsg::ExtPane {
+                        id: name,
+                        pane: new_pane,
+                    },
+                );
+            }
+
+            ClientMsg::ExtPaneWrite { id: name, text } => {
+                let Some(pane) = live_ext_pane(&self.ext_panes, &self.panes, &name, id) else {
+                    // **黙って捨てない。** 書いたつもりで何も出ない、が一番困る。
+                    self.refuse(id, format!("{name} は開いていません"));
+                    return Ok(true);
+                };
+                let title = self
+                    .panes
+                    .get(&pane)
+                    .and_then(|p| p.file.as_ref())
+                    .map_or_else(String::new, |f| f.title.clone());
+                self.write_ext_pane(pane, &title, &text);
+            }
+
+            ClientMsg::ExtPaneClose { id: name } => {
+                if let Some(pane) = live_ext_pane(&self.ext_panes, &self.panes, &name, id) {
+                    self.ext_panes.remove(&name);
+                    self.note(id, format!("{name} のペインを閉じました"), false);
+                    // 閉じ方は 1 か所しかない。**同じ道を通す** — タブの片付けと
+                    // 割り付けの畳み方をここへ書き写すと、必ず片方だけ直る日が来る。
+                    return self.on_client(id, ClientMsg::ClosePane { pane });
+                }
+            }
+
+            ClientMsg::GetBuffer { pane, start, end } => {
+                let Some(p) = self.panes.get(&pane) else {
+                    self.refuse(id, format!("ペイン {pane} はありません"));
+                    return Ok(true);
+                };
+                // ファイルを開いていればその中身。**画面から読み直さない**
+                // （開いている中身を持っているのはサーバ側だから）。
+                let msg = if let Some(f) = p.file.as_ref() {
+                    let all: Vec<String> = f.text.lines().map(str::to_string).collect();
+                    let (from, to) = clip_range(all.len(), start, end);
+                    ServerMsg::Buffer {
+                        pane,
+                        kind: "file".into(),
+                        start: from,
+                        lines: all[from..to].to_vec(),
+                    }
+                } else {
+                    let total = p.term.state.grid.document_len();
+                    let (from, to) = clip_range(total, start, end);
+                    let lines = (from..to)
+                        .map(|i| {
+                            p.term
+                                .state
+                                .grid
+                                .document_line(i)
+                                .map(tsg_term::Line::text)
+                                .unwrap_or_default()
+                        })
+                        .collect();
+                    ServerMsg::Buffer {
+                        pane,
+                        kind: "term".into(),
+                        start: from,
+                        lines,
+                    }
+                };
+                self.send_to(id, &msg);
             }
 
             ClientMsg::SetPreview { pane, on } => {
@@ -1096,6 +1936,24 @@ impl State {
             Event::ClientGone { id } => {
                 // 接続が切れてもペインは生かす（デタッチと同じ扱い）。
                 self.clients.remove(&id);
+                self.subs.remove(&id);
+                self.waits.retain(|w| w.client != id);
+                // 落ちた拡張の語彙は消す。押しても何も起きない項目が
+                // メニューに残り続けるのが一番悪い。
+                let before = self.ext.len();
+                self.ext.retain(|_, (owner, _)| *owner != id);
+                if self.ext.len() != before {
+                    self.broadcast_ext();
+                }
+                // ペインは閉じない。**読んでいる途中に消えるほうが困る。**
+                // 手放すのは名前だけで、中身はそのまま残る。
+                let had_panes = self.ext_panes.len();
+                self.ext_panes.retain(|_, (owner, _)| *owner != id);
+                let left = had_panes - self.ext_panes.len();
+                if self.ext_names.contains_key(&id) || before != self.ext.len() || left > 0 {
+                    self.note(id, "切れました", false);
+                }
+                self.ext_names.remove(&id);
             }
             Event::ClientMsg { id, msg } => match self.on_client(id, msg) {
                 Ok(true) => {}
@@ -1112,12 +1970,36 @@ impl State {
                 // 前の場所で開き直すのは頼んだことと違う）。**変わった
                 // ときだけ**書く — 出力のたびに書いたら意味が無い。
                 let before = self.panes.get(&pane).and_then(|p| p.term.state.cwd.clone());
+                // 「終わったコマンド」の数を食べる前に数えておく。
+                // **画面から当てない。** 出力の形が変わった日に黙って壊れる。
+                let done_before = self
+                    .panes
+                    .get(&pane)
+                    .map_or(0, |p| finished_blocks(&p.term.state.marks));
                 if let Some(p) = self.panes.get_mut(&pane) {
                     p.term.feed(&data);
                 }
                 let after = self.panes.get(&pane).and_then(|p| p.term.state.cwd.clone());
                 if before != after {
                     self.save_for_restore();
+                    if let Some(cwd) = after.clone() {
+                        self.emit(PluginEvent::Cwd { pane, cwd });
+                    }
+                }
+                let events = self.finished_since(pane, done_before);
+                // 待っている相手へ、その一回で新しく出た字と
+                // 「終わったかどうか」をまとめて渡す。
+                let ended = events.iter().find_map(|e| match e {
+                    PluginEvent::CommandEnd { exit_code, .. } => Some(*exit_code),
+                    _ => None,
+                });
+                if !self.waits.is_empty() {
+                    let chunk = plain_text(&data);
+                    self.push_tails(pane, &chunk);
+                    self.feed_waits(pane, ended);
+                }
+                for event in events {
+                    self.emit(event);
                 }
                 self.type_pending(pane);
                 let msg = ServerMsg::Output {
@@ -1131,6 +2013,7 @@ impl State {
                     p.alive = false;
                 }
                 self.broadcast(&ServerMsg::PaneExited { pane });
+                self.emit(PluginEvent::PaneClosed { pane });
                 // 終わったペインは控えから外す。**自分で `exit` したものを
                 // 次の起動で開き直さない。**
                 self.shape_changed();
@@ -1138,11 +2021,97 @@ impl State {
             Event::Tick => {
                 self.reload_changed_files();
                 self.poll_lsp();
+                self.expire_waits();
             }
             Event::Stop => return false,
         }
         true
     }
+}
+
+/// その `id` で開いてあり、**まだ生きていて**、その接続のものであるペイン。
+///
+/// 人が閉じたペインの番号を握ったままにすると、次に書いたものが
+/// 「もう無いペイン」へ行って黙って消える。引くたびに生死を見る。
+fn live_ext_pane<T>(
+    ext_panes: &BTreeMap<String, (u64, u32)>,
+    panes: &BTreeMap<u32, T>,
+    id: &str,
+    owner: u64,
+) -> Option<u32> {
+    let (who, pane) = ext_panes.get(id)?;
+    (*who == owner && panes.contains_key(pane)).then_some(*pane)
+}
+
+/// git を 1 回起こす。**窓は出さない。**
+///
+/// 断られた理由はそのまま返す。git の言葉のほうが、こちらで言い換えるより
+/// 正確で、検索もできる。
+fn git(dir: &str, args: &[&str]) -> std::result::Result<String, String> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(args).current_dir(dir);
+    cmd.stdin(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let out = cmd
+        .output()
+        .map_err(|e| format!("git を起こせません: {e}"))?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    } else {
+        let msg = String::from_utf8_lossy(&out.stderr);
+        Err(msg.trim().lines().next().unwrap_or("git が断りました").to_string())
+    }
+}
+
+/// `git worktree list --porcelain` を読む。
+///
+/// 1 つの塊が空行で区切られ、`worktree <path>` / `branch refs/heads/<name>` /
+/// `detached` が並ぶ。**枝が無い塊もある**ので、そこで諦めない。
+fn parse_worktrees(out: &str) -> Vec<WorktreeInfo> {
+    let mut items: Vec<WorktreeInfo> = Vec::new();
+    let mut path = String::new();
+    let mut branch = String::new();
+    let flush = |path: &mut String, branch: &mut String, items: &mut Vec<WorktreeInfo>| {
+        if !path.is_empty() {
+            items.push(WorktreeInfo {
+                path: std::mem::take(path),
+                branch: std::mem::take(branch),
+                // 1 つ目が本体。git がその順で出す。
+                main: items.is_empty(),
+            });
+        }
+        branch.clear();
+    };
+    for line in out.lines() {
+        if let Some(p) = line.strip_prefix("worktree ") {
+            flush(&mut path, &mut branch, &mut items);
+            path = p.trim().to_string();
+        } else if let Some(b) = line.strip_prefix("branch ") {
+            branch = b.trim().trim_start_matches("refs/heads/").to_string();
+        }
+    }
+    flush(&mut path, &mut branch, &mut items);
+    items
+}
+
+/// 終わったコマンドの数（終了コードが付いた塊）。
+fn finished_blocks(marks: &tsg_term::SemanticMarks) -> usize {
+    marks
+        .blocks()
+        .iter()
+        .filter(|b| b.exit_code.is_some())
+        .count()
+}
+
+/// `start` / `end` を実際の行数へ収める。**外から来る数を信じない。**
+fn clip_range(total: usize, start: Option<usize>, end: Option<usize>) -> (usize, usize) {
+    let from = start.unwrap_or(0).min(total);
+    let to = end.map_or(total, |e| e.saturating_add(1)).clamp(from, total);
+    (from, to)
 }
 
 // ---------------------------------------------------------------------------
@@ -1540,5 +2509,457 @@ mod tests {
         assert!(tree.split(2, 3, Dir::Vertical), "内側を割れない");
         let out = remap_layout(&tree, &made(&[(1, 10)])).expect("木ごと消えた");
         assert_eq!(out.panes(), vec![10]);
+    }
+
+    // ---- 拡張の口 ---------------------------------------------------------
+
+    /// 繋いだ相手の代わり。書かれたものを溜めるだけ。
+    #[derive(Clone, Default)]
+    struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl Sink {
+        fn msgs(&self) -> Vec<ServerMsg> {
+            let raw = self.0.lock().unwrap().clone();
+            String::from_utf8_lossy(&raw)
+                .lines()
+                .filter_map(|l| serde_json::from_str(l).ok())
+                .collect()
+        }
+    }
+
+    /// 誰も繋がっていない状態から、口だけを試す。
+    fn bare_state() -> (State, Sender<Event>) {
+        let (tx, rx) = mpsc::channel();
+        // 受け側を落とすと `send` が失敗するので、持たせたまま返す。
+        std::mem::forget(rx);
+        (State::new("test".into(), tx.clone()), tx)
+    }
+
+    fn join(state: &mut State, id: u64) -> Sink {
+        let sink = Sink::default();
+        state.clients.insert(id, Box::new(sink.clone()));
+        sink
+    }
+
+    #[test]
+    fn events_only_reach_the_connections_that_asked_for_them() {
+        let (mut st, _tx) = bare_state();
+        let asked = join(&mut st, 1);
+        let quiet = join(&mut st, 2);
+
+        st.on_client(
+            1,
+            ClientMsg::Subscribe {
+                events: vec!["command_end".into()],
+            },
+        )
+        .unwrap();
+        st.emit(PluginEvent::CommandEnd {
+            pane: 1,
+            exit_code: Some(0),
+            command: "ls".into(),
+            output_start: Some(1),
+            output_end: Some(3),
+        });
+
+        assert!(
+            asked.msgs().iter().any(|m| matches!(m, ServerMsg::Event { .. })),
+            "名乗った相手へ届いていない"
+        );
+        assert!(
+            quiet.msgs().is_empty(),
+            "名乗っていない相手にまで配っている"
+        );
+    }
+
+    #[test]
+    fn subscribing_to_a_name_that_does_not_exist_says_so() {
+        let (mut st, _tx) = bare_state();
+        let sink = join(&mut st, 1);
+        st.on_client(
+            1,
+            ClientMsg::Subscribe {
+                events: vec!["comand_end".into()],
+            },
+        )
+        .unwrap();
+        assert!(
+            sink.msgs()
+                .iter()
+                .any(|m| matches!(m, ServerMsg::Error { .. })),
+            "打ち間違えたまま待たせている"
+        );
+    }
+
+    #[test]
+    fn an_extension_command_needs_the_ext_prefix() {
+        let (mut st, _tx) = bare_state();
+        let sink = join(&mut st, 1);
+        st.on_client(
+            1,
+            ClientMsg::RegisterCommand {
+                command: ExtCommand {
+                    id: "blame".into(),
+                    title: "blame".into(),
+                    title_en: "blame".into(),
+                    keys: vec![],
+                    menu: None,
+                },
+            },
+        )
+        .unwrap();
+        assert!(
+            sink.msgs()
+                .iter()
+                .any(|m| matches!(m, ServerMsg::Error { .. })),
+            "名前空間の無い id を受け付けている"
+        );
+        assert!(st.ext.is_empty());
+    }
+
+    #[test]
+    fn a_registered_command_is_handed_back_to_the_extension_that_owns_it() {
+        let (mut st, _tx) = bare_state();
+        let ext = join(&mut st, 1);
+        let window = join(&mut st, 2);
+
+        st.on_client(
+            1,
+            ClientMsg::Subscribe {
+                events: vec!["command".into()],
+            },
+        )
+        .unwrap();
+        st.on_client(
+            1,
+            ClientMsg::RegisterCommand {
+                command: ExtCommand {
+                    id: "ext.blame".into(),
+                    title: "行の来歴".into(),
+                    title_en: "Blame this line".into(),
+                    keys: vec![],
+                    menu: Some("編集".into()),
+                },
+            },
+        )
+        .unwrap();
+        // 窓が押した
+        st.on_client(
+            2,
+            ClientMsg::RunCommand {
+                id: "ext.blame".into(),
+                arg: None,
+            },
+        )
+        .unwrap();
+
+        assert!(
+            ext.msgs().iter().any(|m| matches!(
+                m,
+                ServerMsg::Event {
+                    event: PluginEvent::Command { id, .. }
+                } if id == "ext.blame"
+            )),
+            "登録した拡張へ返っていない"
+        );
+        assert!(
+            !window.msgs().iter().any(|m| matches!(m, ServerMsg::RunCommand { .. })),
+            "窓は知らない id を受け取るべきではない"
+        );
+    }
+
+    #[test]
+    fn a_dead_extension_takes_its_commands_with_it() {
+        let (mut st, _tx) = bare_state();
+        let _ext = join(&mut st, 1);
+        let window = join(&mut st, 2);
+        st.on_client(
+            1,
+            ClientMsg::RegisterCommand {
+                command: ExtCommand {
+                    id: "ext.blame".into(),
+                    title: "行の来歴".into(),
+                    title_en: "Blame this line".into(),
+                    keys: vec![],
+                    menu: None,
+                },
+            },
+        )
+        .unwrap();
+        assert_eq!(st.ext.len(), 1);
+
+        st.handle(Event::ClientGone { id: 1 });
+        assert!(st.ext.is_empty(), "落ちた拡張の語彙が残っている");
+        // 窓には「もう無い」が配り直されている
+        assert!(
+            window.msgs().iter().any(|m| matches!(
+                m,
+                ServerMsg::ExtCommands { commands } if commands.is_empty()
+            )),
+            "窓へ配り直していない"
+        );
+    }
+
+    #[test]
+    fn a_finished_command_is_counted_from_the_shell_marks() {
+        // OSC 133 が言ってきたことだけを数える。**画面から当てない。**
+        let mut term = Terminal::new(20, 5, tsg_term::ambiguous());
+        assert_eq!(finished_blocks(&term.state.marks), 0);
+        term.feed(b"]133;A$ ls
+]133;Ca.txt
+]133;D;0");
+        assert_eq!(finished_blocks(&term.state.marks), 1);
+        // まだ終わっていない塊は数えない
+        term.feed(b"]133;A$ sleep
+]133;C");
+        assert_eq!(finished_blocks(&term.state.marks), 1);
+        term.feed(b"]133;D;1");
+        assert_eq!(finished_blocks(&term.state.marks), 2);
+    }
+
+    /// 拡張のペインの引き当て。**生きているかを毎回見る。**
+    #[test]
+    fn an_extension_pane_is_only_handed_back_while_it_lives() {
+        let mut ext: BTreeMap<String, (u64, u32)> = BTreeMap::new();
+        ext.insert("ext.blame".into(), (1, 7));
+        let alive: BTreeMap<u32, ()> = [(7u32, ())].into_iter().collect();
+        let gone: BTreeMap<u32, ()> = BTreeMap::new();
+
+        assert_eq!(live_ext_pane(&ext, &alive, "ext.blame", 1), Some(7));
+        // 人が閉じた後。**古い番号を握ったままにすると、書いたものが
+        // 「もう無いペイン」へ行って黙って消える。**
+        assert_eq!(live_ext_pane(&ext, &gone, "ext.blame", 1), None);
+        // 別の拡張のものは触らせない。
+        assert_eq!(live_ext_pane(&ext, &alive, "ext.blame", 2), None);
+        // 開いていない名前。
+        assert_eq!(live_ext_pane(&ext, &alive, "ext.other", 1), None);
+    }
+
+    /// 落ちた拡張の**語彙は消すが、ペインは残す**。
+    ///
+    /// 押しても何も起きない項目は嘘になるが、ペインの中身は読めるもので、
+    /// 読んでいる途中に消えるほうが困る。
+    #[test]
+    fn a_dead_extension_keeps_its_pane_but_loses_the_name() {
+        let (mut st, _tx) = bare_state();
+        let _ext = join(&mut st, 1);
+        st.ext_panes.insert("ext.blame".into(), (1, 7));
+        st.on_client(
+            1,
+            ClientMsg::RegisterCommand {
+                command: ExtCommand {
+                    id: "ext.blame".into(),
+                    title: "来歴".into(),
+                    title_en: "Blame".into(),
+                    keys: vec![],
+                    menu: None,
+                },
+            },
+        )
+        .unwrap();
+
+        st.handle(Event::ClientGone { id: 1 });
+        assert!(st.ext.is_empty(), "落ちた拡張の語彙が残っている");
+        assert!(
+            st.ext_panes.is_empty(),
+            "名前は手放すべき（次の拡張が同じ名前を使えるように）"
+        );
+    }
+
+    // ---- 拡張の記録 -------------------------------------------------------
+
+    /// **断った理由は必ず残る。** 「繋がっているのに何も起きない」を
+    /// 人が調べられる場所が、どこにも無いのが一番困る。
+    #[test]
+    fn every_refusal_leaves_a_record() {
+        let (mut st, _tx) = bare_state();
+        let _sink = join(&mut st, 1);
+        st.on_client(
+            1,
+            ClientMsg::Subscribe {
+                events: vec!["comand_end".into()],
+            },
+        )
+        .unwrap();
+        let refused: Vec<&ExtLogEntry> = st.ext_log.iter().filter(|e| e.refused).collect();
+        assert_eq!(refused.len(), 1, "断ったのに記録が無い");
+        assert!(refused[0].what.contains("知らない出来事"));
+    }
+
+    /// 名乗れば記録が読める形になる。名乗らなければ接続の番号のまま。
+    #[test]
+    fn naming_yourself_makes_the_record_readable() {
+        let (mut st, _tx) = bare_state();
+        let _sink = join(&mut st, 1);
+        let _other = join(&mut st, 2);
+
+        st.on_client(
+            1,
+            ClientMsg::ExtHello {
+                name: "blame".into(),
+            },
+        )
+        .unwrap();
+        st.on_client(
+            2,
+            ClientMsg::RegisterCommand {
+                command: ExtCommand {
+                    id: "bad".into(),
+                    title: "x".into(),
+                    title_en: "x".into(),
+                    keys: vec![],
+                    menu: None,
+                },
+            },
+        )
+        .unwrap();
+
+        let names: Vec<&str> = st.ext_log.iter().map(|e| e.who.as_str()).collect();
+        assert!(names.contains(&"blame"), "名乗った名前が出ていない");
+        assert!(names.contains(&"#2"), "名乗らない接続は番号で出るべき");
+    }
+
+    /// 記録は輪。**走らせっぱなしのサーバで静かに太らない。**
+    #[test]
+    fn the_record_is_a_ring_and_does_not_grow_forever() {
+        let (mut st, _tx) = bare_state();
+        let _sink = join(&mut st, 1);
+        for i in 0..(EXT_LOG_MAX + 25) {
+            st.note(1, format!("{i}"), false);
+        }
+        assert_eq!(st.ext_log.len(), EXT_LOG_MAX);
+        // 捨てるのは古いほうから。
+        assert_eq!(st.ext_log.front().map(|e| e.what.as_str()), Some("25"));
+    }
+
+    /// 返すのは新しいほうから n 本、並びは**古い順**（読む順）。
+    #[test]
+    fn the_log_comes_back_newest_first_but_in_reading_order() {
+        let (mut st, _tx) = bare_state();
+        let sink = join(&mut st, 1);
+        for i in 0..10 {
+            st.note(1, format!("{i}"), false);
+        }
+        st.on_client(1, ClientMsg::ExtLog { limit: Some(3) })
+            .unwrap();
+        let got = sink
+            .msgs()
+            .into_iter()
+            .find_map(|m| match m {
+                ServerMsg::ExtLog { entries } => Some(entries),
+                _ => None,
+            })
+            .expect("記録が返っていない");
+        let what: Vec<String> = got.into_iter().map(|e| e.what).collect();
+        assert_eq!(what, vec!["7", "8", "9"]);
+    }
+
+    // ---- 待つときに見る字 -------------------------------------------------
+
+    /// **飾りを落とす。** 色を付けて出すテストランナーで
+    /// `PASS` が探せないと、待ちの半分は使いものにならない。
+    #[test]
+    fn colours_do_not_hide_the_word_you_are_waiting_for() {
+        let got = plain_text(b"[32mPASS[0m 12 tests");
+        assert_eq!(got, "PASS 12 tests");
+    }
+
+    #[test]
+    fn osc_sequences_are_dropped_whole() {
+        // OSC 7（居場所）は BEL で終わる。
+        let got = plain_text(b"]7;file:///c:/wdone");
+        assert_eq!(got, "done");
+        // ST（`ESC \`）で終わる書き方もある。
+        let got = plain_text(b"\x1b]0;title\x1b\\after");
+        assert_eq!(got, "after");
+    }
+
+    #[test]
+    fn newlines_and_tabs_survive_but_other_controls_do_not() {
+        let got = plain_text(b"a	b
+cd");
+        assert_eq!(got, "a	b
+cd", "改行とタブは残す。ベルと CR は落とす");
+    }
+
+    /// 控えは頭から捨てる。**字の境目で切る**（途中で切ると落ちる）。
+    #[test]
+    fn the_tail_is_trimmed_from_the_front_at_a_character_boundary() {
+        let (mut st, _tx) = bare_state();
+        let _sink = join(&mut st, 1);
+        st.waits.push(Waiting {
+            client: 1,
+            pane: None,
+            matcher: Match::Substring {
+                text: "NOPE".into(),
+            },
+            tail: String::new(),
+            deadline: None,
+        });
+        // 全角で埋める（1 字 3 バイト）。
+        let chunk = "あ".repeat(WAIT_TAIL_MAX);
+        st.push_tails(1, &chunk);
+        let tail = &st.waits[0].tail;
+        assert!(tail.len() <= WAIT_TAIL_MAX, "捨てていない");
+        assert!(tail.chars().all(|c| c == 'あ'), "字の途中で切っている");
+    }
+
+    // ---- 作業ツリー -------------------------------------------------------
+
+    /// `git worktree list --porcelain` の読み方。
+    /// **枝の無い塊もある**ので、そこで諦めないこと。
+    #[test]
+    fn worktrees_are_read_from_the_porcelain_form() {
+        let out = "worktree /home/a/repo
+HEAD abc123
+branch refs/heads/main
+
+worktree /home/a/repo-fix
+HEAD def456
+branch refs/heads/fix/login
+
+worktree /home/a/repo-detached
+HEAD 999999
+detached
+";
+        let got = parse_worktrees(out);
+        assert_eq!(got.len(), 3);
+        assert_eq!(got[0].branch, "main");
+        assert!(got[0].main, "1 つ目が本体");
+        // `refs/heads/` は落とすが、`/` を含む枝名は残す。
+        assert_eq!(got[1].branch, "fix/login");
+        assert!(!got[1].main);
+        // detached は枝が空。**そこで塊ごと捨てない。**
+        assert_eq!(got[2].path, "/home/a/repo-detached");
+        assert!(got[2].branch.is_empty());
+    }
+
+    #[test]
+    fn an_empty_worktree_list_is_empty_not_a_ghost() {
+        assert!(parse_worktrees("").is_empty());
+        assert!(parse_worktrees("
+
+").is_empty());
+    }
+
+    #[test]
+    fn a_range_from_outside_is_clipped_instead_of_panicking() {
+        assert_eq!(clip_range(10, None, None), (0, 10));
+        assert_eq!(clip_range(10, Some(2), Some(4)), (2, 5));
+        // 端を越えて頼まれても、あるところまで
+        assert_eq!(clip_range(10, Some(8), Some(99)), (8, 10));
+        // 逆さに頼まれても空で返す（落ちない）
+        assert_eq!(clip_range(10, Some(6), Some(2)), (6, 6));
+        assert_eq!(clip_range(0, Some(3), Some(5)), (0, 0));
     }
 }

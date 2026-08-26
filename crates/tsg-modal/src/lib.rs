@@ -28,7 +28,7 @@ pub use keymap::{Keymap, When as KeyWhen, parse_key};
 pub use motion::{Motion, MotionKind, View, find_match, matches_in};
 pub use search::Search;
 pub use text::{Lang, lang, set_lang};
-pub use textobj::TextObject;
+pub use textobj::{TextObject, range_of as textobj_range_of};
 
 pub use tsg_buffer::markdown;
 pub use tsg_buffer::{

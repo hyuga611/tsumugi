@@ -102,8 +102,16 @@ Open it and press **F1**. The help starts with what the mouse alone can do.
 
 **Reading and editing** — vim motions over scrollback, text objects
 (`ac` command block, `io` output, `if` path, `iu` URL, `ih` hash), operators
-(`d` `c` `y` `=` `>`), marks, macros, registers, undo/redo.
-`:e` turns the pane into an editor; `:w` saves; `:q` goes back to the shell.
+(`d` `c` `y` `=` `>`), marks, macros, registers, undo/redo, and `.` to repeat
+the last change. `:e` turns the pane into an editor; `:w` saves; `:q` goes
+back to the shell.
+
+**The same key points at whatever is nearest to what you are looking at.**
+`af` is a file path in the terminal and a **function** in a file (`it` a type,
+struct or class; `ia` one argument — `aa` takes the comma with it, so deleting
+one doesn't leave the syntax broken). The tree comes from tree-sitter: Rust, C,
+Python, JavaScript, Go and JSON. There is no per-language table of node names,
+so **adding one grammar is all it takes** for that language to work.
 
 **Finding things** — `/` searches as you type and highlights every match.
 `Space l` labels every path and URL on screen so one keypress opens it.
@@ -123,7 +131,10 @@ line, `s/old/new/` (`%s` for the whole file) substitutes. `o` and `O` keep the
 indent of the line you were on.
 
 **Language servers (LSP)** — errors are underlined with a squiggle and `[e`
-`]e` walk them; `gd` goes to the definition, Ctrl+Space completes. It is
+`]e` walk them; `gd` goes to the definition, Ctrl+Space completes, `K` says
+what something is, `gr` lists where it is used (in a buffer, so `[[` and `af`
+still work there) and `gn` renames it (one undo step). When other files need
+the same change, it says how many **instead of quietly applying half**. It is
 **use-it-if-you-have-it**: with no language server installed, nothing happens
 (you just get no diagnostics). Defaults cover rust-analyzer, gopls, pyright,
 typescript-language-server and clangd; add more under `[lsp.<ext>]`.
@@ -144,6 +155,10 @@ OSC 8 hyperlinks, a position indicator on the right edge. Narrowing the window
 
 **Looks** — three themes plus per-colour overrides, ligatures, a translucent
 blurred background by default, Japanese/English UI, IME that follows the mode.
+When the window is translucent the tab bar and status line are **not painted**
+— a see-through window with an opaque band across it reads as something else
+sitting on top. The status line carries the error count and the branch
+(`✗3 ▲7  main +12 -3`; diagnostics use the same colour as the squiggles).
 
 ## For agents
 
@@ -207,6 +222,20 @@ name = "yogiri"               # yogiri / sumi / hakuji
 Saving takes effect immediately. **Your bindings are layered on top of the
 defaults**, so keys you do not mention keep working.
 
+**To compute the configuration**, put a `config.lua` next to it that returns a
+table of the same shape (Lua wins if both exist). It is there to let one
+configuration differ per machine — not as a place for extensions.
+
+```lua
+local t = { window = { opacity = 0.85 } }
+if tsumugi.hostname == "work" then t.theme = { name = "sumi" } end
+return t
+```
+
+All it can see is `tsumugi.os`, `tsumugi.hostname` and `tsumugi.env("NAME")`.
+A config it cannot read still **opens the terminal** — it falls back to the
+defaults and puts the reason on screen.
+
 ## Driving it from outside
 
 The multiplexer speaks JSON Lines over a socket that is closed to everyone but
@@ -218,8 +247,22 @@ tsg --capture                  # what a pane shows, as text
 tsg --open README.md --render  # open a file in the running window
 tsg --search "TODO"            # search from outside; n / N still work
 tsg --run <command-id>         # any command in the UI (--commands lists them)
+tsg --notify "build finished"  # tell the running window
+tsg --wait --until exit:1      # wait for a command to fail
+tsg --layout-export            # write the current layout out as a shape (JSON)
+tsg --worktrees                # list the git worktrees
+tsg --subscribe command_end    # watch what happens, before writing an extension
 tsg --rpc                      # raw protocol on stdin/stdout — see docs/rpc.md
 ```
+
+There is also a way to **add** things from outside (`docs/rpc.md` §5). An
+extension runs as its own process: it subscribes to what happens, adds commands
+(which land in the palette, the right-click menu and `--run` — **the same path
+as the built-in ones**) and can own a pane. No scripting language runs inside,
+so **an extension that dies doesn't take the terminal with it**. What each one
+did is readable with `tsg --ext-log`, refusals included.
+
+`examples/herdr-agents.py` is a working one.
 
 ## Status
 

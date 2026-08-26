@@ -12,11 +12,13 @@
 pub mod file;
 pub mod markdown;
 pub mod syntax;
+pub mod tree;
 
 use tsg_term::{Cell, Grid, SemanticMarks};
 
 pub use file::{FileBuffer, Splice};
 pub use syntax::{Lang, State as SyntaxState, Token, highlight, highlight_from};
+pub use tree::{Grammar, Syntax, TreeObject};
 
 pub use tsg_term::{Cell as BufferCell, CommandBlock, MarkKind, SemanticMarks as Marks};
 
@@ -88,6 +90,16 @@ pub trait Buffer {
 
     /// OSC 133 由来のセマンティックマーク。File バッファでは空。
     fn marks(&self) -> &SemanticMarks;
+
+    /// 構文木で指せるもの（`tree.rs`）。**端末には無い。**
+    ///
+    /// 端末の「行」はコマンドの出力が積み上がったもので、そこに関数や型は
+    /// 無い。木を持てるのはファイルバッファだけなので、既定は `None`。
+    /// 木そのものではなく答えを返すのは、`tsg-modal` を純粋なまま
+    /// （借用も内部可変性も持ち込まずに）保つため。
+    fn syntax_object(&self, _at: Pos, _what: TreeObject, _around: bool) -> Option<Range> {
+        None
+    }
 
     /// `modal-spec.md` §7 の可否表。
     fn allows(&self, op: OperatorId) -> bool {

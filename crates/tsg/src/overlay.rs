@@ -8,28 +8,45 @@
 //! `MousePath::Palette` と宣言されたコマンドは必ずマウスから 2 アクションで届く。
 
 use tsg_modal::{CommandSpec, MousePath, REGISTRY, t};
+use tsg_mux::ExtCommand;
 
 /// 一覧に出す 1 項目。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Item {
-    pub id: &'static str,
-    pub title: &'static str,
+    /// **借りた文字列にしない。** 外から登録された語彙（`ext.*`）は
+    /// 実行時にしか無いので、静的な寿命では持てない。
+    pub id: String,
+    pub title: String,
     /// 既定のキー。「マウスから始めた人がキーボードを覚える導線」（§4.7）。
     pub keys: String,
     /// メニューの見出し。項目が増えても読める形にするために持つ。
-    pub section: &'static str,
+    pub section: String,
 }
 
 impl Item {
     fn of(spec: &'static CommandSpec) -> Self {
         Self {
-            id: spec.id,
-            title: spec.label(),
+            id: spec.id.to_string(),
+            title: spec.label().to_string(),
             keys: spec.keys.join(" "),
             section: match spec.mouse {
-                MousePath::Menu(s) => s,
-                _ => "",
+                MousePath::Menu(s) => s.to_string(),
+                _ => String::new(),
             },
+        }
+    }
+
+    /// 外から登録された語彙。**本体のコマンドと同じ形に落とす**ので、
+    /// パレットもメニューも「拡張のための別の道」を持たずに済む。
+    fn of_ext(cmd: &ExtCommand) -> Self {
+        Self {
+            id: cmd.id.clone(),
+            title: match tsg_modal::lang() {
+                tsg_modal::Lang::Ja => cmd.title.clone(),
+                tsg_modal::Lang::En => cmd.title_en.clone(),
+            },
+            keys: cmd.keys.join(" "),
+            section: cmd.menu.clone().unwrap_or_default(),
         }
     }
 }
@@ -55,8 +72,11 @@ pub enum Row {
 /// 一覧で起きたこと。
 #[derive(Debug, PartialEq, Eq)]
 pub enum Action {
-    /// この id を実行する
-    Run(&'static str),
+    /// この id を実行する。
+    ///
+    /// **借りた文字列にしない。** 外から登録された語彙（`ext.*`）は
+    /// 実行時にしか無く、静的な寿命では持てない。
+    Run(String),
     /// 名前を選んだ（セッション一覧）。レジストリの id ではないので別にする。
     Pick(String),
     Close,
@@ -96,9 +116,19 @@ pub struct Palette {
     /// 見せ始めの位置。`view()` が選択に合わせて寄せる。
     offset: usize,
     items: Vec<Item>,
+    /// 外から登録された語彙。**本体のものと同じ一覧に並べる。**
+    ext: Vec<ExtCommand>,
 }
 
 impl Palette {
+    /// 外から登録された語彙を置き換える（サーバは総取り替えで配ってくる）。
+    pub fn set_ext(&mut self, ext: Vec<ExtCommand>) {
+        self.ext = ext;
+        if self.open {
+            self.refresh();
+        }
+    }
+
     pub fn show(&mut self) {
         self.open = true;
         self.kind = PaletteKind::Command;
@@ -159,6 +189,19 @@ impl Palette {
             })
             .map(Item::of)
             .collect();
+        // 拡張のぶんは後ろへ。**本体の語彙を押し下げない。**
+        self.items.extend(
+            self.ext
+                .iter()
+                .map(Item::of_ext)
+                .filter(|i| {
+                    q.is_empty()
+                        || i.id.to_lowercase().contains(&q)
+                        || i.title.to_lowercase().contains(&q)
+                        || i.keys.to_lowercase().contains(&q)
+                })
+                .collect::<Vec<_>>(),
+        );
         self.selected = self.selected.min(self.items.len().saturating_sub(1));
         self.offset = self.offset.min(self.selected);
     }
@@ -192,7 +235,7 @@ impl Palette {
 
     pub fn accept(&mut self) -> Action {
         match self.items.get(self.selected) {
-            Some(item) => Action::Run(item.id),
+            Some(item) => Action::Run(item.id.clone()),
             None => Action::Close,
         }
     }
@@ -200,7 +243,7 @@ impl Palette {
     /// 一覧のどの行がクリックされたか。`row` は**見えている**先頭を 0 とした行。
     pub fn click(&mut self, row: usize) -> Action {
         match self.items.get(self.offset + row) {
-            Some(item) => Action::Run(item.id),
+            Some(item) => Action::Run(item.id.clone()),
             None => Action::None,
         }
     }
@@ -227,20 +270,34 @@ pub struct Menu {
     offset: usize,
     /// 実際に描く行数。`fit()` が窓の高さから決める。
     view_h: usize,
+    /// 外から登録された語彙のうち、節を名乗ったもの。
+    ext: Vec<ExtCommand>,
 }
 
 impl Menu {
+    /// 外から登録された語彙を置き換える。
+    pub fn set_ext(&mut self, ext: Vec<ExtCommand>) {
+        self.ext = ext;
+    }
     /// その場に合わせてメニューを組む。
     ///
     /// `has_selection` が偽なら、範囲を要する項目は出さない
     /// （押せるのに何も起きない項目を並べない）。
     pub fn show(&mut self, at: (usize, usize), has_selection: bool) {
-        let items: Vec<Item> = REGISTRY
+        let mut items: Vec<Item> = REGISTRY
             .iter()
             .filter(|s| matches!(s.mouse, MousePath::Menu(_)))
             .filter(|s| has_selection || !needs_range(s.id))
             .map(Item::of)
             .collect();
+        // 節を名乗った拡張だけがメニューへ出る。名乗らなければパレット止まり
+        // ——`mouse-parity.md` の「経路を宣言する」がそのまま拡張にも効く。
+        items.extend(
+            self.ext
+                .iter()
+                .filter(|c| c.menu.is_some())
+                .map(Item::of_ext),
+        );
 
         // 見出しでまとめる。20 項目を平らに並べると、目で追えない。
         self.rows.clear();
@@ -255,10 +312,10 @@ impl Menu {
             }
         }
         self.rows.push(Row::Item(Item {
-            id: OPEN_PALETTE,
-            title: t!("すべてのコマンド…", "All commands…"),
+            id: OPEN_PALETTE.to_string(),
+            title: t!("すべてのコマンド…", "All commands…").to_string(),
             keys: ":".into(),
-            section: "",
+            section: String::new(),
         }));
         self.at = at;
         self.selected = None;
@@ -318,7 +375,7 @@ impl Menu {
             .iter()
             .map(|r| match r {
                 Row::Header(h) => display_width(h) + 4,
-                Row::Item(i) => display_width(i.title) + display_width(&i.keys) + 6,
+                Row::Item(i) => display_width(&i.title) + display_width(&i.keys) + 6,
             })
             .max()
             .unwrap_or(24)
@@ -359,7 +416,7 @@ impl Menu {
             return Action::Close;
         };
         match self.item_at(r) {
-            Some(item) => Action::Run(item.id),
+            Some(item) => Action::Run(item.id.clone()),
             None => Action::None,
         }
     }
@@ -399,8 +456,10 @@ impl Menu {
     }
 
     /// 今選んでいる項目の id。
-    pub fn chosen(&self) -> Option<&'static str> {
-        self.selected.and_then(|r| self.item_at(r)).map(|i| i.id)
+    pub fn chosen(&self) -> Option<String> {
+        self.selected
+            .and_then(|r| self.item_at(r))
+            .map(|i| i.id.clone())
     }
 }
 
@@ -543,7 +602,7 @@ mod tests {
             p.push(c);
         }
         assert_eq!(p.items().len(), 1);
-        assert_eq!(p.accept(), Action::Run("layout.detach"));
+        assert_eq!(p.accept(), Action::Run("layout.detach".into()));
     }
 
     #[test]
@@ -588,11 +647,11 @@ mod tests {
         assert_eq!(p.accept(), Action::Close);
     }
 
-    fn menu_ids(m: &Menu) -> Vec<&'static str> {
+    fn menu_ids(m: &Menu) -> Vec<String> {
         m.rows()
             .iter()
             .filter_map(|r| match r {
-                Row::Item(i) => Some(i.id),
+                Row::Item(i) => Some(i.id.clone()),
                 Row::Header(_) => None,
             })
             .collect()
@@ -603,12 +662,12 @@ mod tests {
         let mut m = Menu::default();
         m.show((0, 0), false);
         assert!(
-            !menu_ids(&m).contains(&"op.yank"),
+            !menu_ids(&m).iter().any(|i| i == "op.yank"),
             "選択が無いのにコピーを出している"
         );
 
         m.show((0, 0), true);
-        assert!(menu_ids(&m).contains(&"op.yank"));
+        assert!(menu_ids(&m).iter().any(|i| i == "op.yank"));
     }
 
     #[test]
@@ -616,7 +675,7 @@ mod tests {
         // これがメニューに無いと「メニューに出ていない機能」へマウスで届かなくなる
         let mut m = Menu::default();
         m.show((0, 0), false);
-        assert_eq!(menu_ids(&m).last().copied(), Some(OPEN_PALETTE));
+        assert_eq!(menu_ids(&m).last().map(String::as_str), Some(OPEN_PALETTE));
     }
 
     /// 見出しは選べない。キーで動かしたときに空行で止まると、
@@ -655,7 +714,7 @@ mod tests {
             .iter()
             .map(|r| match r {
                 Row::Header(h) => display_width(h),
-                Row::Item(i) => display_width(i.title) + display_width(&i.keys),
+                Row::Item(i) => display_width(&i.title) + display_width(&i.keys),
             })
             .max()
             .unwrap();
@@ -694,7 +753,7 @@ mod tests {
             p.move_by(1);
         }
         let (start, view) = p.view(h);
-        let want = view[1].id;
+        let want = view[1].id.clone();
         assert!(start > 0, "この時点では窓は動いているはず");
         assert_eq!(
             p.click(1),
@@ -760,7 +819,7 @@ mod tests {
         assert!(start > 0);
         // 画面の 3 行目（y=2 の 1 つ下）を押したら、そこに見えている項目が動く
         let want = match &view[1] {
-            Row::Item(i) => i.id,
+            Row::Item(i) => i.id.clone(),
             Row::Header(_) => unreachable!("見出しの直後は項目"),
         };
         assert_eq!(m.click(2, 3), Action::Run(want));

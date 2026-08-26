@@ -15,6 +15,7 @@ mod cli;
 mod config;
 mod input;
 mod install;
+mod lua;
 mod mouse;
 mod overlay;
 mod platform;
@@ -90,6 +91,67 @@ fn background_of(th: &Theme, opacity: f32) -> [f32; 4] {
     [th.bg[0], th.bg[1], th.bg[2], opacity]
 }
 
+/// 帯（タブ行・ステータス行）の下地。**窓が透けているときは塗らない。**
+///
+/// 窓の背景だけが透けて帯は不透明のまま、という絵は「別のものが上に
+/// 乗っている」ように見える。透過を入れた端末でいちばん最初に直されるのが
+/// ここで、WezTerm でタブバーの背景を `rgba(0,0,0,0)` にするのが定石なのも
+/// 同じ理由。
+///
+/// **塗り重ねる限り、帯の透け方を窓と一致させる方法は「塗らない」しか無い。**
+/// α 合成の結果は `a + o(1-a)` で、`a > 0` なら必ず窓（`o`）より濃くなる。
+/// 「少しだけ薄く塗る」という逃げ道は数の上で存在しない。
+///
+/// 不透明な窓では今までどおり塗る。透ける先が無いので、地続きにする相手が
+/// 居ない。境目はモードの色帯とアクティブなタブが受け持つ。
+fn band_bg(th: &Theme, opacity: f32) -> Option<[f32; 4]> {
+    (opacity >= 1.0).then_some(th.status_bg)
+}
+
+/// いま開いているファイルの git の状態。**開いたときと保存したときだけ**呼ぶ。
+///
+/// 取れなければ `None`。git が入っていない・リポジトリの外・追跡されて
+/// いないファイル、どれも普通に起きるので、**出せないことを事故にしない**。
+fn git_info(path: &std::path::Path) -> Option<session::GitInfo> {
+    let dir = path.parent()?;
+    let name = path.to_str()?;
+    let branch = git_out(dir, &["rev-parse", "--abbrev-ref", "HEAD"])?
+        .trim()
+        .to_string();
+    // `--numstat` は「足した行 \t 消した行 \t パス」。バイナリは `-` で来る。
+    let (mut added, mut removed) = (0, 0);
+    if let Some(out) = git_out(dir, &["diff", "--numstat", "--", name])
+        && let Some(line) = out.lines().next()
+    {
+        let mut cols = line.split('\t');
+        added = cols.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+        removed = cols.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+    }
+    Some(session::GitInfo {
+        branch,
+        added,
+        removed,
+    })
+}
+
+/// git を 1 回起こして標準出力を取る。**窓は出さない。**
+fn git_out(dir: &std::path::Path, args: &[&str]) -> Option<String> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.args(args).current_dir(dir);
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    let out = cmd.output().ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
@@ -113,7 +175,13 @@ struct App {
     /// **載せ直さない**ための控え。
     image_slots: BTreeMap<(u32, u64), tsg_render::ImageSlot>,
     /// 外から頼まれたコマンド（`tsg --run`）。次の待ち時間に実行する。
-    queued_command: Option<(&'static str, Option<String>)>,
+    queued_command: Option<(String, Option<String>)>,
+    /// 外から登録された語彙。サーバが総取り替えで配ってくる。
+    ext_commands: Vec<tsg_mux::ExtCommand>,
+    /// いまの `status_msg` の重さ。**知らせだけが上げる。**
+    status_level: tsg_mux::Level,
+    /// そのうち、キーを名乗って**受け付けられた**ぶん。
+    ext_keys: std::collections::BTreeMap<tsg_modal::KeyInput, String>,
     /// 画面に出ているものへのラベル。空でなければラベル待ち。
     hints: Vec<Hint>,
     hint_typed: String,
@@ -204,6 +272,9 @@ impl App {
                 _ => 0,
             },
             queued_command: None,
+            ext_commands: Vec::new(),
+            status_level: tsg_mux::Level::Info,
+            ext_keys: std::collections::BTreeMap::new(),
             image_slots: BTreeMap::new(),
             hints: Vec::new(),
             hint_typed: String::new(),
@@ -541,6 +612,18 @@ impl App {
             }
             MuxRequest::Complete => {
                 self.ask_completion();
+                None
+            }
+            MuxRequest::Hover => {
+                self.ask_lsp(|pane, line, col| ClientMsg::Hover { pane, line, col });
+                None
+            }
+            MuxRequest::References => {
+                self.ask_lsp(|pane, line, col| ClientMsg::References { pane, line, col });
+                None
+            }
+            MuxRequest::Rename => {
+                self.start_rename();
                 None
             }
             MuxRequest::ApplyHunk { stage } => {
@@ -1384,6 +1467,8 @@ impl App {
                         }
                     }
                     got = true;
+                    // 開いた時点の git を数える（`refresh_git`）。
+                    self.refresh_git(pane);
                     self.status_msg =
                         t!(format!("{title} を開きました"), format!("opened {title}"));
                 }
@@ -1396,8 +1481,25 @@ impl App {
                     {
                         f.dirty = false;
                     }
+                    // 保存で差分が変わった。**ここでだけ**数え直す。
+                    self.refresh_git(pane);
                     self.status_msg = t!(format!("{path} を保存しました"), format!("saved {path}"));
                     got = true;
+                }
+                // 意味の粒の通知と、`GetBuffer` の答えは**外の拡張のためのもの**。
+                // 窓は形と生バイトだけ見ていればよい。
+                ServerMsg::Event { .. }
+                | ServerMsg::Buffer { .. }
+                | ServerMsg::ExtPane { .. }
+                | ServerMsg::ExtLog { .. }
+                | ServerMsg::Waited { .. }
+                | ServerMsg::LayoutSpec { .. }
+                | ServerMsg::Worktrees { .. } => {}
+                ServerMsg::ExtCommands { commands } => {
+                    self.ext_commands = commands;
+                    self.palette.set_ext(self.ext_commands.clone());
+                    self.menu.set_ext(self.ext_commands.clone());
+                    self.rebuild_ext_keys();
                 }
                 ServerMsg::NeedFullFile { pane } => {
                     // 差分がずれた。黙って進まず、全文で立て直す。
@@ -1406,8 +1508,8 @@ impl App {
                 ServerMsg::RunCommand { id, arg } => {
                     // ここでは実行しない。**イベントループを持っている
                     // ところまで持ち越す**（コマンドは窓を閉じることもある）。
-                    if let Some(spec) = tsg_modal::REGISTRY.iter().find(|s| s.id == id) {
-                        self.queued_command = Some((spec.id, arg));
+                    if tsg_modal::REGISTRY.iter().any(|s| s.id == id) {
+                        self.queued_command = Some((id, arg));
                     }
                 }
                 ServerMsg::FileClosed { pane } => {
@@ -1508,6 +1610,56 @@ impl App {
                         self.show_completions(items);
                         got = true;
                     }
+                }
+                ServerMsg::Hover { pane, text } => {
+                    if pane == self.session.active {
+                        // 1 行にする。**status は 1 行しか出せない**ので、
+                        // 溢れるぶんを黙って切るより、区切りを見せて畳む。
+                        let one = text
+                            .lines()
+                            .map(str::trim)
+                            .filter(|l| !l.is_empty() && !l.starts_with("```"))
+                            .collect::<Vec<_>>()
+                            .join(" · ");
+                        self.status_msg = one;
+                        got = true;
+                    }
+                }
+                ServerMsg::Locations { pane, items } => {
+                    if pane == self.session.active {
+                        // **バッファにする。** 一覧を出す専用の窓を作らないのは、
+                        // ここに出せば `[[` も `af`（パス）もそのまま効くから。
+                        let text = items
+                            .iter()
+                            .map(|l| format!("{}:{}:{}", l.path, l.line + 1, l.col + 1))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        let n = items.len();
+                        self.send_msg(&ClientMsg::PipeResult {
+                            pane,
+                            dir: tsg_mux::Dir::Horizontal,
+                            title: t!(format!("使われている場所 ({n})"), format!("used in {n} places")),
+                            text,
+                        });
+                        got = true;
+                    }
+                }
+                ServerMsg::Edits {
+                    pane,
+                    edits,
+                    others,
+                } => {
+                    if pane == self.session.active {
+                        self.apply_edits(&edits, others);
+                        got = true;
+                    }
+                }
+                ServerMsg::Notify { text, level } => {
+                    // **status に出す。** 別の窓を作らないのは、いま見ている
+                    // ところから目を離さずに読めるのがいちばん速いから。
+                    self.status_msg = text;
+                    self.status_level = level;
+                    got = true;
                 }
                 ServerMsg::Pong => {}
                 ServerMsg::Error { message } => self.status_msg = message,
@@ -2083,6 +2235,21 @@ impl App {
             self.palette.hide();
             return true;
         }
+        if let Some(name) = q.strip_prefix("rename").map(str::trim) {
+            self.palette.hide();
+            if name.is_empty() {
+                self.status_msg = t!("新しい名前が空です", "the new name is empty").into();
+                return true;
+            }
+            let at = self.engine.cursor();
+            self.send_msg(&ClientMsg::Rename {
+                pane: self.session.active,
+                line: at.line,
+                col: at.col,
+                new_name: name.to_string(),
+            });
+            return true;
+        }
         match q {
             "w" => {
                 self.palette.hide();
@@ -2211,6 +2378,99 @@ impl App {
             line: at.line,
             col: at.col,
         });
+    }
+
+    /// いまの位置で言語サーバに訊く。**ファイルを開いているときだけ。**
+    ///
+    /// 端末の行はコマンドの出力で、そこに「この名前の定義」は無い。
+    /// 黙って何も起きないと押した人が困るので、理由を出す。
+    fn ask_lsp(&mut self, msg: impl FnOnce(u32, usize, usize) -> ClientMsg) {
+        if !self.active_view().is_some_and(PaneView::editing) {
+            self.status_msg = t!(
+                "言語サーバに訊けるのはファイルを開いているときだけです",
+                "the language server can only answer about an open file"
+            )
+            .into();
+            return;
+        }
+        let at = self.engine.cursor();
+        self.send_msg(&msg(self.session.active, at.line, at.col));
+    }
+
+    /// 名前を変える。**新しい名前は人に訊く**（勝手に決めない）。
+    ///
+    /// 入力欄には**今の名前を入れておく**。1 文字だけ変えたいことが多く、
+    /// 空欄から打ち直させると、そのたびに全部打つことになる。
+    fn start_rename(&mut self) {
+        if !self.active_view().is_some_and(PaneView::editing) {
+            self.status_msg = t!(
+                "名前を変えられるのはファイルを開いているときだけです",
+                "renaming works on an open file only"
+            )
+            .into();
+            return;
+        }
+        let at = self.engine.cursor();
+        let current = self
+            .active_view()
+            .and_then(|v| v.file.as_ref())
+            .and_then(|f| {
+                let word = tsg_modal::TextObject::from_key('w', tsg_buffer::BufferKind::File)?;
+                let range = tsg_modal::textobj_range_of(f, at, word, false)?;
+                Some(tsg_buffer::extract(f, &range))
+            })
+            .unwrap_or_default();
+        self.palette_with(&format!("rename {}", current.trim()));
+    }
+
+    /// 言語サーバが返した書き換えを当てる。**取り消しは 1 段**。
+    ///
+    /// 後ろから当てる。前から当てると、1 か所直した時点で後ろの位置が
+    /// ずれて、2 か所目から**別の場所を書き換える**。
+    fn apply_edits(&mut self, edits: &[tsg_lsp::TextEdit], others: usize) {
+        let active = self.session.active;
+        let group_at = self.engine.cursor();
+        let mut sorted = edits.to_vec();
+        sorted.sort_by_key(|e| (e.line, e.col));
+        let count = sorted.len();
+        let Some(view) = self.session.panes.get_mut(&active) else {
+            return;
+        };
+        let Some(file) = view.file.as_mut() else {
+            return;
+        };
+        file.begin_group(group_at);
+        for e in sorted.iter().rev() {
+            let start = Pos::new(e.line, e.col);
+            if (e.line, e.col) == (e.end_line, e.end_col) {
+                file.insert(start, &e.text);
+                continue;
+            }
+            // LSP の終わりは含まない。範囲の終わりは含む側なので 1 つ戻す。
+            let end = if e.end_col > 0 {
+                Pos::new(e.end_line, e.end_col - 1)
+            } else {
+                let prev = e.end_line.saturating_sub(1);
+                Pos::new(prev, tsg_buffer::line_width(file, prev).saturating_sub(1))
+            };
+            file.replace(
+                &tsg_buffer::Range::new(start, end, tsg_buffer::RangeKind::Char),
+                &e.text,
+            );
+        }
+        self.push_file();
+        self.status_msg = if others == 0 {
+            t!(
+                format!("{count} か所を書き換えました"),
+                format!("changed {count} places")
+            )
+        } else {
+            // **黙って一部だけ当てない。** 他のファイルにも要ることを言う。
+            t!(
+                format!("このファイルの {count} か所だけ書き換えました（他に {others} ファイル。開いて同じことをしてください）"),
+                format!("changed {count} places in this file only ({others} more files need the same)")
+            )
+        };
     }
 
     /// いまの位置で補完を頼む。
@@ -2450,7 +2710,61 @@ impl App {
         };
     }
 
-    fn invoke(&mut self, id: &'static str, event_loop: &ActiveEventLoop) {
+    /// 外から登録された語彙のキーを組み直す。
+    ///
+    /// **素の 1 文字は渡さない。** `d` や `w` はモーダルの文法そのもので、
+    /// 拡張に 1 つ持っていかれると `[count] operator motion` の掛け算が
+    /// その字のところだけ欠ける。渡すのは Ctrl 付きと F キーだけにする。
+    /// 既定が名乗っているキーも渡さない（先に立って黙って奪わせない）。
+    fn rebuild_ext_keys(&mut self) {
+        self.ext_keys.clear();
+        let mut refused: Vec<String> = Vec::new();
+        for cmd in &self.ext_commands {
+            for key in &cmd.keys {
+                let Some(input) = tsg_modal::parse_key(key) else {
+                    refused.push(format!("{key}（読めません）"));
+                    continue;
+                };
+                if !matches!(
+                    input,
+                    tsg_modal::KeyInput::Ctrl(_) | tsg_modal::KeyInput::Function(_)
+                ) {
+                    refused.push(format!("{key}（素の字は渡せません）"));
+                    continue;
+                }
+                let taken = tsg_modal::REGISTRY.iter().any(|s| {
+                    s.keys
+                        .iter()
+                        .any(|k| tsg_modal::parse_key(k) == Some(input))
+                });
+                if taken || self.cfg.keys.lookup(tsg_modal::KeyWhen::Normal, input).is_some() {
+                    refused.push(format!("{key}（もう使われています）"));
+                    continue;
+                }
+                self.ext_keys.insert(input, cmd.id.clone());
+            }
+        }
+        if !refused.is_empty() {
+            // **黙って捨てない。** 効かないキーを名乗ったまま気づかないのが一番困る。
+            self.status_msg = t!(
+                format!("拡張のキーを受け付けませんでした: {}", refused.join(" / ")),
+                format!("extension keys refused: {}", refused.join(" / "))
+            );
+        }
+    }
+
+    fn invoke(&mut self, id: &str, event_loop: &ActiveEventLoop) {
+        // 外から登録された語彙は、**登録した拡張へ返す**。ここで実行しない
+        // （何をするかを知っているのは向こうだけ）。
+        if id.starts_with("ext.") {
+            self.menu.hide();
+            self.palette.hide();
+            self.send_msg(&ClientMsg::RunCommand {
+                id: id.to_string(),
+                arg: None,
+            });
+            return;
+        }
         // 何か別のことを始めたら、出しっぱなしのラベルは消す。
         // **残っていると本文の 1 文字目を隠したまま**になる（実機で見た）。
         if id != "hints" && !self.hints.is_empty() {
@@ -2478,7 +2792,7 @@ impl App {
     /// 一覧からの返事を捌く。
     fn apply_action(&mut self, action: overlay::Action, event_loop: &ActiveEventLoop) {
         match action {
-            overlay::Action::Run(id) => self.invoke(id, event_loop),
+            overlay::Action::Run(id) => self.invoke(&id, event_loop),
             overlay::Action::Pick(name) => {
                 let kind = self.picker.kind;
                 // 補完は「何番目か」で引く。**見出しは字を足してある**
@@ -3330,6 +3644,14 @@ impl App {
         };
         if let Some(id) = self.cfg.keys.lookup(when, input) {
             self.invoke(id, event_loop);
+            return;
+        }
+        // 外から登録された語彙のキー。**読むモードだけ**で、
+        // 素の 1 文字は受け付けない（`rebuild_ext_keys`）。
+        if when == tsg_modal::KeyWhen::Normal
+            && let Some(id) = self.ext_keys.get(&input).cloned()
+        {
+            self.invoke(&id, event_loop);
             return;
         }
 
@@ -4528,10 +4850,13 @@ impl App {
             .map(|(_, _, id, ..)| self.tab_agent(*id).map(|a| Self::agent_color(&th, a)))
             .collect();
         let cols = self.cols;
+        let opacity = self.cfg.opacity;
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
-        renderer.rect(0.0, 0.0, cols as f32, 1.0, th.status_bg);
+        if let Some(bg) = band_bg(&th, opacity) {
+            renderer.rect(0.0, 0.0, cols as f32, 1.0, bg);
+        }
         for (i, (x, w, _, label, active)) in spans.iter().enumerate() {
             let (x, w, active) = (*x, *w, *active);
             if active {
@@ -4723,7 +5048,7 @@ impl App {
                     if *sel {
                         r.rect(x as f32, ry, w as f32, 1.0, th.panel_sel);
                     }
-                    r.text((x + 2) as f32, ry, it.title, th.fg, true);
+                    r.text((x + 2) as f32, ry, &it.title, th.fg, true);
                     if !it.keys.is_empty() {
                         let kw = display_width(&it.keys);
                         r.text(
@@ -4988,12 +5313,24 @@ impl App {
 
         let status_row = self.rows.saturating_sub(1) as f32;
         let cols = self.cols;
+        let opacity = self.cfg.opacity;
         let mode_bg = Self::mode_color(&th, mode);
+        // ② ファイルを開いているときだけ出す一組。**端末には無いもの。**
+        let (errors, warnings) = self.diagnostic_counts();
+        // 知らせが出ているときだけ重さを見る（他の案内は今までどおり）。
+        let level = if self.status_msg.is_empty() {
+            tsg_mux::Level::Info
+        } else {
+            self.status_level
+        };
+        let git = self.active_view().and_then(|v| v.git.clone());
 
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
-        renderer.rect(0.0, status_row, cols as f32, 1.0, th.status_bg);
+        if let Some(bg) = band_bg(&th, opacity) {
+            renderer.rect(0.0, status_row, cols as f32, 1.0, bg);
+        }
 
         let mut x = 0usize;
         for (label, target) in &buttons {
@@ -5020,6 +5357,37 @@ impl App {
             x += w;
         }
 
+        // 診断は**波線と同じ色**で出す。数だけ見て色が違うと、画面の中の赤と
+        // ステータスの赤が別のものに見える。
+        if errors > 0 {
+            let label = format!(" ✗{errors}");
+            renderer.text(x as f32, status_row, &label, th.gut_err, true);
+            x += display_width(&label);
+        }
+        if warnings > 0 {
+            let label = format!(" ▲{warnings}");
+            renderer.text(x as f32, status_row, &label, th.gut_run, true);
+            x += display_width(&label);
+        }
+        if let Some(g) = &git {
+            if !g.branch.is_empty() {
+                let label = format!("  {}", g.branch);
+                renderer.text(x as f32, status_row, &label, th.dim, true);
+                x += display_width(&label);
+            }
+            // **保存した時点の数**。直しかけかどうかは題名の `*` が言っている。
+            if g.added > 0 {
+                let label = format!(" +{}", g.added);
+                renderer.text(x as f32, status_row, &label, th.gut_ok, true);
+                x += display_width(&label);
+            }
+            if g.removed > 0 {
+                let label = format!(" -{}", g.removed);
+                renderer.text(x as f32, status_row, &label, th.gut_err, true);
+                x += display_width(&label);
+            }
+        }
+
         let rw = display_width(&right);
         renderer.text(
             cols.saturating_sub(rw) as f32,
@@ -5033,13 +5401,55 @@ impl App {
         // （出ないより、途中で切れてでも出ているほうが手がかりになる）。
         let room = cols.saturating_sub(rw).saturating_sub(x + 3);
         if room > 8 {
+            // 知らせの重さで色を変える。**普段は今までどおり控えめ**で、
+            // 上げるのは外から「これは見て」と言われたときだけ。
+            let color = match level {
+                tsg_mux::Level::Info => th.dim,
+                tsg_mux::Level::Warn => th.gut_run,
+                tsg_mux::Level::Error => th.gut_err,
+            };
             renderer.text(
                 (x + 2) as f32,
                 status_row,
                 &truncate_width(&hint, room),
-                th.dim,
+                color,
                 true,
             );
+        }
+    }
+
+    /// いまのペインの誤りと警告の数。ファイルを開いていなければ 0。
+    fn diagnostic_counts(&self) -> (usize, usize) {
+        let Some(view) = self.active_view() else {
+            return (0, 0);
+        };
+        if !view.editing() {
+            return (0, 0);
+        }
+        let errors = view
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == tsg_lsp::Severity::Error)
+            .count();
+        let warnings = view
+            .diagnostics
+            .iter()
+            .filter(|d| d.severity == tsg_lsp::Severity::Warning)
+            .count();
+        (errors, warnings)
+    }
+
+    /// git の状態を数え直す。**開いたときと保存したときだけ。**
+    fn refresh_git(&mut self, pane: u32) {
+        let path = self
+            .session
+            .panes
+            .get(&pane)
+            .and_then(|v| v.file.as_ref())
+            .and_then(|f| f.path.clone());
+        let info = path.as_deref().and_then(git_info);
+        if let Some(view) = self.session.panes.get_mut(&pane) {
+            view.git = info;
         }
     }
 
@@ -6354,7 +6764,7 @@ impl ApplicationHandler for App {
             return;
         }
         if let Some((id, arg)) = self.queued_command.take() {
-            self.invoke(id, event_loop);
+            self.invoke(&id, event_loop);
             // 値を伴うものは、開いた入力欄へそのまま入れて走らせる。
             if let Some(text) = arg
                 && self.palette.searching()
@@ -6543,6 +6953,19 @@ fn main() -> Result<()> {
         }
         cli::Mode::Send(text) => return rpc::send(&cli.session, text),
         cli::Mode::Tap => return rpc::tap(&cli.session),
+        cli::Mode::Subscribe(events) => return rpc::subscribe(&cli.session, events),
+        cli::Mode::ExtLog(limit) => return rpc::ext_log(&cli.session, *limit),
+        cli::Mode::LayoutExport => return rpc::layout_export(&cli.session),
+        cli::Mode::LayoutApply(path) => return rpc::layout_apply(&cli.session, path),
+        cli::Mode::Notify { text, level } => {
+            return rpc::notify(&cli.session, text, *level);
+        }
+        cli::Mode::Worktrees => return rpc::worktrees(&cli.session),
+        cli::Mode::WorktreeOpen(path) => return rpc::worktree_open(&cli.session, path),
+        cli::Mode::WorktreeAdd { path, branch } => {
+            return rpc::worktree_add(&cli.session, path, branch.as_deref());
+        }
+        cli::Mode::WorktreeRemove(path) => return rpc::worktree_remove(&cli.session, path),
         cli::Mode::List => return rpc::list(),
         cli::Mode::Capture(pane) => return rpc::capture(&cli.session, *pane),
         cli::Mode::Rpc => return rpc::raw(&cli.session, cli.spawn),
@@ -7180,6 +7603,23 @@ diff --git a/f.txt b/f.txt
             sanitize_paste("one\ntwo\nthree").matches('\r').count() + 1,
             3
         );
+    }
+
+    /// 透けている窓では帯を塗らない。**塗ると必ず窓より濃くなる**ので、
+    /// 「別のものが上に乗っている」絵になる。
+    #[test]
+    fn a_see_through_window_has_no_painted_bands() {
+        let th = theme::builtin("yogiri").expect("既定のテーマが無い");
+        assert!(
+            band_bg(&th, 0.85).is_none(),
+            "透けているのに帯を塗っている"
+        );
+        assert!(
+            band_bg(&th, 0.99).is_none(),
+            "わずかでも透けていれば塗らない"
+        );
+        // 不透明なら今までどおり。地続きにする相手が居ない。
+        assert_eq!(band_bg(&th, 1.0), Some(th.status_bg));
     }
 
     #[test]

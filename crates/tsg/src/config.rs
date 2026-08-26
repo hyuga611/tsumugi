@@ -438,6 +438,28 @@ fn take_first_run_at(mark: &std::path::Path) -> bool {
 impl Config {
     /// 設定ファイルを読む。無ければ既定。壊れていれば既定＋警告。
     pub fn load() -> (Self, Option<String>) {
+        // `config.lua` があればそちらが勝つ。**両方は読まない** —
+        // 混ぜると「どちらに書いたほうが効くのか」を毎回考えることになる。
+        if let Some(p) = crate::lua::path()
+            && p.exists()
+        {
+            return match crate::lua::load(&p) {
+                Ok(value) => match File::deserialize(value) {
+                    Ok(f) => {
+                        let (cfg, warn) = Self::from_file(&f);
+                        (cfg, warn.map(|w| format!("{}: {w}", p.display())))
+                    }
+                    Err(e) => (
+                        Self::default(),
+                        Some(format!("{} の中身が設定の形ではありません: {e}", p.display())),
+                    ),
+                },
+                Err(e) => (
+                    Self::default(),
+                    Some(format!("{} が読めません: {e}", p.display())),
+                ),
+            };
+        }
         let Some(p) = path() else {
             return (Self::default(), None);
         };

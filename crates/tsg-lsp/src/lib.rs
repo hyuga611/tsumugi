@@ -83,6 +83,16 @@ pub struct Location {
     pub col: usize,
 }
 
+/// 1 か所の書き換え。**行も桁も 0 起点**、終わりは含まない（LSP と同じ）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextEdit {
+    pub line: usize,
+    pub col: usize,
+    pub end_line: usize,
+    pub end_col: usize,
+    pub text: String,
+}
+
 /// 言語サーバから届いたもの。
 #[derive(Debug, Clone)]
 pub enum Incoming {
@@ -162,7 +172,13 @@ impl Server {
                         "definition": { "linkSupport": true },
                         "completion": {
                             "completionItem": { "snippetSupport": false }
-                        }
+                        },
+                        // ここから「直す側」。**読む側だけでは足りない**
+                        // ——名前を変える・使われている場所を並べる・
+                        // その場で意味を訊く、が編集の掛け算になる。
+                        "hover": { "contentFormat": ["plaintext", "markdown"] },
+                        "references": {},
+                        "rename": { "prepareSupport": false }
                     },
                     "workspace": { "configuration": false }
                 }
@@ -285,6 +301,42 @@ impl Server {
             }),
         )
     }
+
+    /// その場で意味を訊く（`K`）。
+    pub fn hover(&mut self, path: &str, line: usize, col: usize) -> Result<u64> {
+        self.send_request(
+            "textDocument/hover",
+            json!({
+                "textDocument": { "uri": path_to_uri(path) },
+                "position": { "line": line, "character": col }
+            }),
+        )
+    }
+
+    /// 使われている場所（`gr`）。**宣言も入れる** — 探しているのは
+    /// 「この名前がどこに出るか」で、宣言だけ抜けていると数が合わない。
+    pub fn references(&mut self, path: &str, line: usize, col: usize) -> Result<u64> {
+        self.send_request(
+            "textDocument/references",
+            json!({
+                "textDocument": { "uri": path_to_uri(path) },
+                "position": { "line": line, "character": col },
+                "context": { "includeDeclaration": true }
+            }),
+        )
+    }
+
+    /// 名前を変える（`gn`）。答えは WorkspaceEdit。
+    pub fn rename(&mut self, path: &str, line: usize, col: usize, new_name: &str) -> Result<u64> {
+        self.send_request(
+            "textDocument/rename",
+            json!({
+                "textDocument": { "uri": path_to_uri(path) },
+                "position": { "line": line, "character": col },
+                "newName": new_name
+            }),
+        )
+    }
 }
 
 /// 答えを読み続ける。**壊れた頭は捨てて次を待つ**（落とさない）。
@@ -392,6 +444,112 @@ pub fn parse_definition(result: &Value) -> Option<Location> {
         line: start.get("line")?.as_u64()? as usize,
         col: start.get("character")?.as_u64()? as usize,
     })
+}
+
+/// `textDocument/hover` の答え。人が読む 1 かたまりにする。
+///
+/// **形が 3 通りある**（文字列 / `{value}` / その並び）。どれも
+/// 「中身は `contents`」という一点だけは同じなので、そこから畳む。
+pub fn parse_hover(result: &Value) -> Option<String> {
+    fn one(v: &Value) -> Option<String> {
+        match v {
+            Value::String(s) => Some(s.clone()),
+            Value::Object(o) => o.get("value")?.as_str().map(str::to_string),
+            _ => None,
+        }
+    }
+    let contents = result.get("contents")?;
+    let text = match contents {
+        Value::Array(a) => a
+            .iter()
+            .filter_map(one)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        other => one(other)?,
+    };
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+/// 場所の並び（参照）。**`Location` と `LocationLink` の両方を受ける。**
+pub fn parse_locations(result: &Value) -> Vec<Location> {
+    let items = match result {
+        Value::Array(a) => a.as_slice(),
+        Value::Object(_) => std::slice::from_ref(result),
+        _ => return Vec::new(),
+    };
+    items
+        .iter()
+        .filter_map(|one| {
+            let (uri, range) = match one.get("targetUri") {
+                Some(u) => (
+                    u,
+                    one.get("targetSelectionRange")
+                        .or_else(|| one.get("targetRange"))?,
+                ),
+                None => (one.get("uri")?, one.get("range")?),
+            };
+            let start = range.get("start")?;
+            Some(Location {
+                path: uri_to_path(uri.as_str()?)?,
+                line: start.get("line")?.as_u64()? as usize,
+                col: start.get("character")?.as_u64()? as usize,
+            })
+        })
+        .collect()
+}
+
+/// 名前を変える答え（WorkspaceEdit）を、ファイルごとに割る。
+///
+/// **形が 2 通りある**（`changes` / `documentChanges`）。返すのは
+/// パスごとの書き換えで、どのファイルが何か所かを呼ぶ側が数えられるようにする
+/// （「このファイルだけ当てて、他は当てない」と正直に言うために要る）。
+pub fn parse_rename(result: &Value) -> Vec<(String, Vec<TextEdit>)> {
+    fn edits_of(v: &Value) -> Vec<TextEdit> {
+        v.as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| {
+                        let range = e.get("range")?;
+                        let start = range.get("start")?;
+                        let end = range.get("end")?;
+                        Some(TextEdit {
+                            line: start.get("line")?.as_u64()? as usize,
+                            col: start.get("character")?.as_u64()? as usize,
+                            end_line: end.get("line")?.as_u64()? as usize,
+                            end_col: end.get("character")?.as_u64()? as usize,
+                            text: e.get("newText")?.as_str()?.to_string(),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    let mut out: Vec<(String, Vec<TextEdit>)> = Vec::new();
+    if let Some(changes) = result.get("changes").and_then(Value::as_object) {
+        for (uri, edits) in changes {
+            if let Some(path) = uri_to_path(uri) {
+                out.push((path, edits_of(edits)));
+            }
+        }
+    }
+    if let Some(docs) = result.get("documentChanges").and_then(Value::as_array) {
+        for d in docs {
+            // `create` / `rename` / `delete` は当てない（ファイルを作る・
+            // 消すのは、名前を変えるつもりの人が頼んだことではない）。
+            let Some(uri) = d.pointer("/textDocument/uri").and_then(Value::as_str) else {
+                continue;
+            };
+            if let Some(path) = uri_to_path(uri)
+                && let Some(edits) = d.get("edits")
+            {
+                out.push((path, edits_of(edits)));
+            }
+        }
+    }
+    out.retain(|(_, e)| !e.is_empty());
+    out
 }
 
 /// 補完の答えを読む。**形が 2 通りある**（並び / `items` を持つ物）。
@@ -614,5 +772,89 @@ mod tests {
         assert_eq!(items[0].end_col, 5);
         // 下の行は 1 行しかない。**長い説明の 1 行目だけ**を持つ
         assert_eq!(items[0].message, "unused variable");
+    }
+
+    // ---- 直す側 -----------------------------------------------------------
+
+    /// `contents` の形は 3 通りある。**どれで来ても読めること。**
+    #[test]
+    fn hover_reads_all_three_shapes() {
+        let plain = json!({ "contents": "fn main()" });
+        assert_eq!(parse_hover(&plain).as_deref(), Some("fn main()"));
+
+        let marked = json!({ "contents": { "kind": "markdown", "value": "fn main()" } });
+        assert_eq!(parse_hover(&marked).as_deref(), Some("fn main()"));
+
+        let many = json!({ "contents": ["fn main()", { "value": "in crate x" }] });
+        assert_eq!(
+            parse_hover(&many).as_deref(),
+            Some("fn main()\nin crate x")
+        );
+    }
+
+    /// 「そこには何も無い」を、空文字ではなく `None` で返す。
+    #[test]
+    fn an_empty_hover_is_none_not_a_blank_line() {
+        assert!(parse_hover(&json!({ "contents": "   " })).is_none());
+        assert!(parse_hover(&json!({ "contents": [] })).is_none());
+        assert!(parse_hover(&json!({})).is_none());
+    }
+
+    #[test]
+    fn references_read_both_location_shapes() {
+        let plain = json!([
+            { "uri": "file:///c:/x/a.rs", "range": { "start": { "line": 3, "character": 4 } } },
+            { "targetUri": "file:///c:/x/b.rs",
+              "targetSelectionRange": { "start": { "line": 9, "character": 1 } } },
+        ]);
+        let got = parse_locations(&plain);
+        assert_eq!(got.len(), 2);
+        assert_eq!((got[0].line, got[0].col), (3, 4));
+        assert_eq!((got[1].line, got[1].col), (9, 1));
+    }
+
+    /// 名前を変える答えも形が 2 通り。**どちらもファイルごとに割れること。**
+    #[test]
+    fn rename_reads_both_workspace_edit_shapes() {
+        let changes = json!({
+            "changes": {
+                "file:///c:/x/a.rs": [{
+                    "range": { "start": { "line": 1, "character": 4 },
+                               "end": { "line": 1, "character": 7 } },
+                    "newText": "bar"
+                }]
+            }
+        });
+        let got = parse_rename(&changes);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].1[0].text, "bar");
+        assert_eq!((got[0].1[0].col, got[0].1[0].end_col), (4, 7));
+
+        let docs = json!({
+            "documentChanges": [{
+                "textDocument": { "uri": "file:///c:/x/a.rs", "version": 1 },
+                "edits": [{
+                    "range": { "start": { "line": 0, "character": 0 },
+                               "end": { "line": 0, "character": 3 } },
+                    "newText": "baz"
+                }]
+            }]
+        });
+        let got = parse_rename(&docs);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].1[0].text, "baz");
+    }
+
+    /// ファイルを作る・消す指示は当てない。
+    /// **名前を変えるつもりの人が頼んだことではない。**
+    #[test]
+    fn rename_ignores_file_creation_and_deletion() {
+        let docs = json!({
+            "documentChanges": [
+                { "kind": "create", "uri": "file:///c:/x/new.rs" },
+                { "kind": "delete", "uri": "file:///c:/x/old.rs" },
+            ]
+        });
+        assert!(parse_rename(&docs).is_empty());
     }
 }

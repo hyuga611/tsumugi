@@ -11,7 +11,7 @@
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 20;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -374,6 +374,332 @@ pub struct SessionInfo {
     pub panes: Vec<PaneInfo>,
 }
 
+// ---------------------------------------------------------------------------
+// 拡張（別プロセスのプラグイン）
+// ---------------------------------------------------------------------------
+//
+// `concept.md` の「捨てるもの 5」で約束した口の続き。スクリプト言語を
+// 抱えるのではなく、**外のプロセスへ意味を配り、外から語彙を足させる**。
+// 中で動かさないので、拡張が落ちても本体は落ちない。
+
+/// 拡張が受け取る出来事。
+///
+/// **意味の粒で配る。** 生バイト（`Output`）はもう配っているが、拡張が要るのは
+/// 「コマンドが終わった」「終了コードは何だったか」であって、それを画面から
+/// 当てさせると、出力の形が変わった日に黙って壊れる（左ガターと同じ
+/// OSC 133 を情報源にする）。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "e", rename_all = "snake_case")]
+pub enum PluginEvent {
+    /// コマンドが 1 つ終わった。
+    CommandEnd {
+        pane: u32,
+        /// シェル統合が言ってこなければ `None`。**0 で埋めない。**
+        exit_code: Option<i32>,
+        /// 打たれた行（取れなければ空）。
+        command: String,
+        /// 出力の範囲（ドキュメント絶対行）。`GetBuffer` へそのまま渡せる。
+        output_start: Option<usize>,
+        output_end: Option<usize>,
+    },
+    PaneOpened {
+        pane: u32,
+        cwd: Option<String>,
+    },
+    PaneClosed {
+        pane: u32,
+    },
+    /// エージェントが状態を名乗った（hooks 由来。画面から当てたものではない）。
+    AgentState {
+        pane: u32,
+        state: AgentState,
+        agent: Option<String>,
+    },
+    /// 場所が変わった。
+    Cwd {
+        pane: u32,
+        cwd: String,
+    },
+    /// 外から登録した語彙が呼ばれた。**呼んだのは人**（キー・メニュー・パレット）。
+    Command {
+        id: String,
+        pane: Option<u32>,
+        arg: Option<String>,
+    },
+}
+
+impl PluginEvent {
+    /// 購読の名前。`Subscribe` はこの名前で選ぶ。
+    ///
+    /// ペインの開閉を 1 つの名前にまとめてあるのは、片方だけ購読して
+    /// 状態が片肺になる書き方を避けるため。
+    pub fn name(&self) -> &'static str {
+        match self {
+            PluginEvent::CommandEnd { .. } => "command_end",
+            PluginEvent::PaneOpened { .. } | PluginEvent::PaneClosed { .. } => "pane",
+            PluginEvent::AgentState { .. } => "agent",
+            PluginEvent::Cwd { .. } => "cwd",
+            PluginEvent::Command { .. } => "command",
+        }
+    }
+
+    /// 購読できる名前の全部。`tsg --subscribe` の案内と検証に使う。
+    pub const NAMES: &'static [&'static str] =
+        &["command_end", "pane", "agent", "cwd", "command"];
+}
+
+/// 知らせの重さ。**色を決めるためだけ**にある。
+///
+/// 段を増やさない。読む人が「これは 3 段目だから…」と考え始めた時点で、
+/// 知らせとしては失敗している。
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Level {
+    #[default]
+    Info,
+    Warn,
+    Error,
+}
+
+/// git の作業ツリー 1 つ。
+///
+/// **エージェントを並べるなら、置き場所も要る。** 3 本走らせるのに 3 つの
+/// 枝を 1 つの作業ツリーで回すことはできない。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct WorktreeInfo {
+    pub path: String,
+    /// いま出ている枝。取れなければ空（detached など）。
+    pub branch: String,
+    /// 本体（`git worktree list` の 1 つ目）か。
+    pub main: bool,
+}
+
+/// 形だけの割り付け。**ペインの番号を持たない。**
+///
+/// 番号ごと書き出すと、次に当てるときには「その番号のペイン」がもう無い。
+/// 持つのは形（割る向き・取り分）と、葉で何を開くか（場所と起動するもの）だけ。
+///
+/// これがあると、いつもの並べ方を 1 つのファイルにして配れる——
+/// 「左にエディタ、右上にテスト、右下にログ」を毎朝組み直さずに済む。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "k", rename_all = "snake_case")]
+pub enum LayoutSpec {
+    Leaf {
+        /// そこで開く場所。書かなければ、当てるときに居た場所。
+        #[serde(default)]
+        cwd: Option<String>,
+        /// シェルの代わりに走らせるもの。
+        #[serde(default)]
+        command: Option<Vec<String>>,
+    },
+    Split {
+        dir: Dir,
+        children: Vec<LayoutSpec>,
+        /// 子の取り分。長さが合わなければ均等に読み替える。
+        #[serde(default)]
+        weights: Vec<u16>,
+    },
+}
+
+impl LayoutSpec {
+    /// 葉の数＝開くペインの数。
+    pub fn leaves(&self) -> usize {
+        match self {
+            LayoutSpec::Leaf { .. } => 1,
+            LayoutSpec::Split { children, .. } => children.iter().map(LayoutSpec::leaves).sum(),
+        }
+    }
+
+    /// 葉を順に取り出す（開くときの順序）。
+    pub fn leaf_list(&self) -> Vec<(Option<String>, Option<Vec<String>>)> {
+        match self {
+            LayoutSpec::Leaf { cwd, command } => vec![(cwd.clone(), command.clone())],
+            LayoutSpec::Split { children, .. } => {
+                children.iter().flat_map(LayoutSpec::leaf_list).collect()
+            }
+        }
+    }
+
+    /// 開いたペインを順に当てはめて、実際の木にする。
+    ///
+    /// 数が足りなければ `None`。**足りないまま組むと、葉の無い枝ができて
+    /// そこへは二度と行けなくなる。**
+    pub fn to_layout(&self, panes: &mut impl Iterator<Item = u32>) -> Option<Layout> {
+        Some(match self {
+            LayoutSpec::Leaf { .. } => Layout::leaf(panes.next()?),
+            LayoutSpec::Split {
+                dir,
+                children,
+                weights,
+            } => {
+                if children.is_empty() {
+                    return None;
+                }
+                let built: Option<Vec<Layout>> =
+                    children.iter().map(|c| c.to_layout(panes)).collect();
+                let built = built?;
+                let weights = if weights.len() == built.len() && !weights.contains(&0) {
+                    weights.clone()
+                } else {
+                    vec![WEIGHT_UNIT; built.len()]
+                };
+                Layout::Split {
+                    dir: *dir,
+                    children: built,
+                    weights,
+                }
+            }
+        })
+    }
+}
+
+/// 待つ条件。**組み合わせられる。**
+///
+/// 一語の決め打ち（`--wait --until done`）では、台本が書きたいことの半分も
+/// 言えない。「テストが終わって、しかも終了コードが 0 でない」は 2 つの
+/// 条件の重なりで、片方ずつ待つと**間の一瞬を取りこぼす**。
+///
+/// ⚠️ `not` は「**この一回の見比べで当たらなかった**」であって、
+/// 「二度と当たらない」ではない。出力が 1 回来るたびに見比べるので、
+/// `not` 単体で待つと、たいてい最初の出力で当たって返る。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[serde(tag = "m", rename_all = "snake_case")]
+pub enum Match {
+    /// 画面に出た字。**打った通りに探す**（`.` も `(` もそのままの字）。
+    Substring { text: String },
+    /// 正規表現。読めない式は待ち始めた時点で断る。
+    Regex { pattern: String },
+    /// コマンドが終わった。`code` を書けば、その終了コードのときだけ。
+    CommandEnd {
+        #[serde(default)]
+        code: Option<i32>,
+    },
+    /// エージェントがその状態を名乗った。
+    Agent { state: AgentState },
+    /// その名前の出来事が起きた（`command_end` / `pane` / `agent` / `cwd` /
+    /// `command`。購読と同じ名前）。
+    ///
+    /// **待ちと購読で別の仕組みを作らない。** 「起きるまで待つ」と
+    /// 「起きたら知らせて」は同じことを別の向きから見ているだけなので、
+    /// 名前の付け方まで分けると、片方だけ増える日が来る。
+    Event { name: String },
+    All { of: Vec<Match> },
+    Any { of: Vec<Match> },
+    Not { of: Box<Match> },
+}
+
+impl Match {
+    /// 中の正規表現を先に組んでみる。**待ち始める前に断るため。**
+    ///
+    /// 待たせておいて「実は式が読めませんでした」は、待った時間が丸ごと
+    /// 無駄になる（しかも黙って当たらないので原因が分からない）。
+    pub fn check(&self) -> Result<(), String> {
+        match self {
+            Match::Regex { pattern } => regex::Regex::new(pattern)
+                .map(|_| ())
+                .map_err(|e| format!("正規表現を読めません: {e}")),
+            Match::Event { name } => {
+                if PluginEvent::NAMES.contains(&name.as_str()) {
+                    Ok(())
+                } else {
+                    // **待たせてから「そんな出来事はありません」は最悪。**
+                    Err(format!(
+                        "知らない出来事です: {name}（あるのは {}）",
+                        PluginEvent::NAMES.join(", ")
+                    ))
+                }
+            }
+            Match::All { of } | Match::Any { of } => of.iter().try_for_each(Match::check),
+            Match::Not { of } => of.check(),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// 見比べる材料。**その一回で新しく分かったことだけ**を入れる。
+pub struct MatchInput<'a> {
+    /// 新しく出た字（前に見比べてから増えたぶん）。
+    pub text: &'a str,
+    /// このとき終わったコマンドの終了コード。終わっていなければ `None`。
+    pub ended: Option<Option<i32>>,
+    /// このとき名乗った状態。名乗っていなければ `None`。
+    pub agent: Option<AgentState>,
+    /// このとき起きた出来事の名前。
+    pub event: Option<&'a str>,
+}
+
+impl Match {
+    /// 当たったか。
+    pub fn hit(&self, input: &MatchInput) -> bool {
+        match self {
+            Match::Substring { text } => input.text.contains(text.as_str()),
+            Match::Regex { pattern } => regex::Regex::new(pattern)
+                .map(|re| re.is_match(input.text))
+                .unwrap_or(false),
+            Match::CommandEnd { code } => match (input.ended, code) {
+                (Some(actual), Some(want)) => actual == Some(*want),
+                (Some(_), None) => true,
+                (None, _) => false,
+            },
+            Match::Agent { state } => input.agent == Some(*state),
+            Match::Event { name } => input.event == Some(name.as_str()),
+            Match::All { of } => !of.is_empty() && of.iter().all(|m| m.hit(input)),
+            Match::Any { of } => of.iter().any(|m| m.hit(input)),
+            Match::Not { of } => !of.hit(input),
+        }
+    }
+}
+
+/// 拡張が何をしたかの 1 行。
+///
+/// **断った理由も必ず残す。** 拡張が動かないとき、人が最初に見る場所が
+/// どこにも無いと、「繋がっているのに何も起きない」を調べる手がかりが
+/// 画面のどこにもなくなる。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ExtLogEntry {
+    /// unix 秒。**形にするのは出す側**（サーバは時計を持つだけ）。
+    pub at: u64,
+    /// 名乗った名前。名乗っていなければ `#3` のような接続の番号。
+    pub who: String,
+    pub what: String,
+    /// 断った記録か。人はまずここだけを拾って読む。
+    #[serde(default)]
+    pub refused: bool,
+}
+
+/// 外から足された語彙。
+///
+/// **静的な `REGISTRY` と同じ形に落とす。** パレットも右クリックメニューも
+/// キーマップもレジストリから生成しているので、同じ形にしておけば
+/// 「拡張のコマンドだけ別の道」を作らずに済む。マウス経路の約束
+/// （`mouse-parity.md`）も、`menu` を書かなければパレット止まりという形で
+/// 拡張にそのまま効く。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ExtCommand {
+    /// **`ext.` で始まること。** 名前空間を分けないと、次の版で本体が
+    /// 同じ id を使った日に黙って取り合いになる。
+    pub id: String,
+    pub title: String,
+    pub title_en: String,
+    /// 既定のキー。空ならパレット（と `menu` を書けばメニュー）から。
+    #[serde(default)]
+    pub keys: Vec<String>,
+    /// 右クリックメニューのどの節に出すか。
+    #[serde(default)]
+    pub menu: Option<String>,
+}
+
+impl ExtCommand {
+    /// 名乗ってよい id か。
+    pub fn id_is_valid(id: &str) -> bool {
+        id.len() > 4
+            && id.starts_with("ext.")
+            && id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "t", rename_all = "snake_case")]
 pub enum ClientMsg {
@@ -485,6 +811,28 @@ pub enum ClientMsg {
         line: usize,
         col: usize,
     },
+    /// その場で意味を訊く（`K`）。答えは `ServerMsg::Hover`。
+    Hover {
+        pane: u32,
+        line: usize,
+        col: usize,
+    },
+    /// 使われている場所（`gr`）。答えは `ServerMsg::Locations`。
+    References {
+        pane: u32,
+        line: usize,
+        col: usize,
+    },
+    /// 名前を変える（`gn`）。答えは `ServerMsg::Edits`。
+    ///
+    /// **当てるのはクライアント。** サーバが黙って書き換えると、
+    /// 取り消し（undo）の 1 段がどこにも無いまま中身が変わる。
+    Rename {
+        pane: u32,
+        line: usize,
+        col: usize,
+        new_name: String,
+    },
     /// 境界のドラッグ。`pane` の取り分を隣から `delta` だけ奪う。
     ResizeSplit {
         pane: u32,
@@ -570,6 +918,158 @@ pub enum ClientMsg {
     SelectTab {
         tab: u32,
     },
+    // ---- 拡張（別プロセス） ----
+    /// 名乗る。**記録を人が読めるようにするためだけ**にある。
+    ///
+    /// 名乗らなくても全部動く。名乗らない拡張は記録に `#3` のような
+    /// 接続の番号で出るので、どれが何をしたのか分からなくなるだけ。
+    ExtHello {
+        name: String,
+    },
+    /// 画面へ知らせる。**返事は無い。**
+    ///
+    /// 拡張や台本から「終わったよ」を出すための口。窓が 1 枚も開いて
+    /// いなければ、どこにも出ない（溜めない）——後から出てくる知らせは、
+    /// たいてい手遅れで、しかも文脈を失っている。
+    Notify {
+        text: String,
+        #[serde(default)]
+        level: Level,
+    },
+    /// 作業ツリーを並べる。答えは `ServerMsg::Worktrees`。
+    WorktreeList {
+        /// どのペインの場所で git を訊くか。書かなければ、いま選ばれているところ。
+        #[serde(default)]
+        pane: Option<u32>,
+        /// ペインの場所が分からないときに使う場所。
+        ///
+        /// **シェル統合が入っていないと、ペインがどこに居るのか分からない**
+        /// （OSC 7 が来ない）。打った側は自分の居場所を知っているので、
+        /// それを持たせる。無ければ、出せないと答える。
+        #[serde(default)]
+        cwd: Option<String>,
+    },
+    /// 作業ツリーを足す（`git worktree add`）。
+    WorktreeAdd {
+        #[serde(default)]
+        pane: Option<u32>,
+        #[serde(default)]
+        cwd: Option<String>,
+        path: String,
+        /// 新しく作る枝の名前。書かなければ git に任せる。
+        #[serde(default)]
+        branch: Option<String>,
+    },
+    /// 作業ツリーを消す（`git worktree remove`）。
+    ///
+    /// **`force` は既定で偽。** 直しかけが残っているツリーを git が断るのに
+    /// 任せる。こちらで押し切ると、消えたものが戻らない。
+    WorktreeRemove {
+        #[serde(default)]
+        pane: Option<u32>,
+        #[serde(default)]
+        cwd: Option<String>,
+        path: String,
+        #[serde(default)]
+        force: bool,
+    },
+    /// その場所で新しいタブを開く。
+    WorktreeOpen {
+        path: String,
+    },
+    /// いまの並べ方を形だけ書き出す。答えは `ServerMsg::LayoutSpec`。
+    LayoutExport {
+        /// どのタブか。書かなければ、いま選ばれているもの。
+        #[serde(default)]
+        tab: Option<u32>,
+    },
+    /// 書き出した形で開く。
+    ///
+    /// **新しいタブに開く。** いまのタブを組み替えると、そこに居るペインを
+    /// 閉じることになる。走っているものを黙って殺すのは、頼まれていない。
+    LayoutApply {
+        spec: LayoutSpec,
+    },
+    /// 条件が満たされるまで待つ。答えは `ServerMsg::Waited`（1 通だけ）。
+    ///
+    /// **待つのはサーバ。** 画面に出たものを全部見ているのはこちらなので、
+    /// 台本が生バイトを追いかけて自分で判定する必要が無い。
+    Wait {
+        /// どのペインを見るか。書かなければ全部。
+        #[serde(default)]
+        pane: Option<u32>,
+        matcher: Match,
+        /// 諦めるまでの長さ。0 と書かなければ待ち続ける。
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
+    /// 拡張が何をしたかの記録。答えは `ServerMsg::ExtLog`。
+    ExtLog {
+        /// 新しいほうから何本まで。既定は 50。
+        #[serde(default)]
+        limit: Option<usize>,
+    },
+    /// 出来事を購読する。**名前を挙げたものだけ**が届く。
+    ///
+    /// 既定で全部配ると、`--tap` のつもりで繋いだ台本にまで意味の通知が
+    /// 流れ込む。黙って増えない口にしておく。
+    Subscribe {
+        #[serde(default)]
+        events: Vec<String>,
+    },
+    Unsubscribe {
+        #[serde(default)]
+        events: Vec<String>,
+    },
+    /// 語彙を足す。同じ id を送り直せば置き換わる。
+    ///
+    /// **登録した接続が切れたら消える。** 落ちた拡張のコマンドがメニューに
+    /// 残り続けると、押しても何も起きない項目が増えていく。
+    RegisterCommand {
+        command: ExtCommand,
+    },
+    UnregisterCommand {
+        id: String,
+    },
+    /// 拡張が自分のペインを開く。答えは `ServerMsg::ExtPane`。
+    ///
+    /// **同じ `id` で開き直すと同じペインに書く。** そうしないと、コマンドを
+    /// 押すたびにペインが増えていき、片付けるのが人の仕事になる。
+    ///
+    /// 中身はテキスト。プロセスは持たない（`pipe_result` と同じ形）ので、
+    /// スクロールも `af` も検索も、開いたファイルと同じように効く。
+    ExtPaneOpen {
+        id: String,
+        /// どのペインの隣に開くか。書かなければ、いま選ばれているところ。
+        #[serde(default)]
+        near: Option<u32>,
+        #[serde(default)]
+        dir: Option<Dir>,
+        title: String,
+        text: String,
+    },
+    /// 開いてあるペインの中身を差し替える。無ければ何もしない。
+    ExtPaneWrite {
+        id: String,
+        text: String,
+    },
+    /// 閉じる。
+    ExtPaneClose {
+        id: String,
+    },
+    /// バッファの中身を取り出す。答えは `ServerMsg::Buffer`。
+    ///
+    /// `--capture` が「いま見えている画面」なのに対し、こちらは
+    /// **ドキュメント絶対行で範囲を指定できる**（`CommandEnd` が返す
+    /// 出力の範囲をそのまま渡せる）。
+    GetBuffer {
+        pane: u32,
+        #[serde(default)]
+        start: Option<usize>,
+        #[serde(default)]
+        end: Option<usize>,
+    },
+
     /// 切断するがプロセスは生かす（これが永続性の本体）。
     Detach,
     /// サーバごと落とす。
@@ -674,6 +1174,78 @@ pub enum ServerMsg {
         pane: u32,
         items: Vec<tsg_lsp::Completion>,
     },
+    /// その場の意味。無ければ来ない（`error` が来る）。
+    Hover {
+        pane: u32,
+        text: String,
+    },
+    /// 場所の並び（参照）。
+    Locations {
+        pane: u32,
+        items: Vec<tsg_lsp::Location>,
+    },
+    /// 名前を変える書き換え。**このペインで開いているファイルのぶんだけ。**
+    ///
+    /// `others` は当てなかったファイルの数。0 でなければ「ここだけ変えた」と
+    /// 正直に言う必要がある（黙って一部だけ当てるのが一番悪い）。
+    Edits {
+        pane: u32,
+        edits: Vec<tsg_lsp::TextEdit>,
+        others: usize,
+    },
+    /// 購読している出来事。
+    Event {
+        event: PluginEvent,
+    },
+    /// 外から足された語彙の全体。**総取り替えで配る。**
+    ///
+    /// 差分で配ると、繋いだ時点の全体像を別の通で送る必要が出て、
+    /// 2 つの道が食い違う日が来る。
+    ExtCommands {
+        commands: Vec<ExtCommand>,
+    },
+    /// 画面へ出す知らせ。
+    Notify {
+        text: String,
+        #[serde(default)]
+        level: Level,
+    },
+    /// `worktree_list` の答え。
+    Worktrees {
+        items: Vec<WorktreeInfo>,
+    },
+    /// `layout_export` の答え。
+    LayoutSpec {
+        spec: LayoutSpec,
+    },
+    /// `wait` の答え。**1 通だけ**返る。
+    Waited {
+        /// 当たったか。偽なら時間切れ。
+        matched: bool,
+        /// 当たったペイン。
+        #[serde(default)]
+        pane: Option<u32>,
+    },
+    /// 拡張が何をしたかの記録。**古いものが先**（読む順）。
+    ExtLog {
+        entries: Vec<ExtLogEntry>,
+    },
+    /// 拡張のペインの居場所。`ext_pane_open` の返事。
+    ///
+    /// **番号を返す。** 拡張はこれを `get_buffer` や `input` にそのまま渡せる。
+    ExtPane {
+        id: String,
+        pane: u32,
+    },
+    /// `GetBuffer` の答え。
+    Buffer {
+        pane: u32,
+        /// `term`（端末のグリッド）か `file`（開いているファイル）。
+        kind: String,
+        /// `lines[0]` のドキュメント絶対行番号。
+        start: usize,
+        lines: Vec<String>,
+    },
     Error {
         message: String,
     },
@@ -690,6 +1262,269 @@ pub fn decode_bytes(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn saw(text: &str) -> MatchInput<'_> {
+        MatchInput {
+            text,
+            ended: None,
+            agent: None,
+            event: None,
+        }
+    }
+
+    // ---- 形だけの割り付け -------------------------------------------------
+
+    fn leaf() -> LayoutSpec {
+        LayoutSpec::Leaf {
+            cwd: None,
+            command: None,
+        }
+    }
+
+    #[test]
+    fn a_spec_becomes_a_tree_with_the_panes_you_opened() {
+        let spec = LayoutSpec::Split {
+            dir: Dir::Horizontal,
+            children: vec![
+                leaf(),
+                LayoutSpec::Split {
+                    dir: Dir::Vertical,
+                    children: vec![leaf(), leaf()],
+                    weights: vec![30, 70],
+                },
+            ],
+            weights: vec![60, 40],
+        };
+        assert_eq!(spec.leaves(), 3);
+
+        let mut panes = [10u32, 11, 12].into_iter();
+        let tree = spec.to_layout(&mut panes).expect("組めない");
+        assert_eq!(tree.panes(), vec![10, 11, 12], "葉の順が入れ替わっている");
+        // 取り分もそのまま写る。
+        match &tree {
+            Layout::Split { weights, .. } => assert_eq!(weights, &vec![60, 40]),
+            Layout::Leaf { .. } => panic!("割れていない"),
+        }
+    }
+
+    /// **足りないまま組まない。** 葉の無い枝ができると、そこへは二度と行けない。
+    #[test]
+    fn a_spec_with_too_few_panes_is_refused() {
+        let spec = LayoutSpec::Split {
+            dir: Dir::Horizontal,
+            children: vec![leaf(), leaf()],
+            weights: vec![],
+        };
+        let mut only_one = [10u32].into_iter();
+        assert!(spec.to_layout(&mut only_one).is_none());
+    }
+
+    #[test]
+    fn broken_weights_fall_back_to_equal_shares() {
+        let spec = LayoutSpec::Split {
+            dir: Dir::Horizontal,
+            children: vec![leaf(), leaf()],
+            // 長さが合わない・0 が混ざる、はどちらも均等に読み替える。
+            weights: vec![0, 5, 5],
+        };
+        let mut panes = [1u32, 2].into_iter();
+        match spec.to_layout(&mut panes).expect("組めない") {
+            Layout::Split { weights, .. } => {
+                assert_eq!(weights, vec![WEIGHT_UNIT, WEIGHT_UNIT]);
+            }
+            Layout::Leaf { .. } => panic!("割れていない"),
+        }
+    }
+
+    /// 葉の場所と起動するものは、開く順に取り出せる。
+    #[test]
+    fn the_leaves_come_out_in_opening_order() {
+        let spec = LayoutSpec::Split {
+            dir: Dir::Vertical,
+            children: vec![
+                LayoutSpec::Leaf {
+                    cwd: Some("/a".into()),
+                    command: None,
+                },
+                LayoutSpec::Leaf {
+                    cwd: Some("/b".into()),
+                    command: Some(vec!["top".into()]),
+                },
+            ],
+            weights: vec![],
+        };
+        let got = spec.leaf_list();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].0.as_deref(), Some("/a"));
+        assert_eq!(got[1].1.as_deref().map(<[String]>::to_vec), Some(vec!["top".to_string()]));
+    }
+
+    #[test]
+    fn a_substring_is_taken_as_typed() {
+        // 端末で探すのはパスやエラー文。`.` も `(` もそのままの字。
+        let m = Match::Substring {
+            text: "a.out(1)".into(),
+        };
+        assert!(m.hit(&saw("running a.out(1) now")));
+        assert!(!m.hit(&saw("running axout 1 now")), "正規表現として読んでいる");
+    }
+
+    #[test]
+    fn a_regex_is_read_as_a_pattern() {
+        let m = Match::Regex {
+            pattern: r"FAILED \d+".into(),
+        };
+        assert!(m.hit(&saw("FAILED 3 tests")));
+        assert!(!m.hit(&saw("FAILED tests")));
+    }
+
+    /// **待たせてから「読めませんでした」は最悪。** 先に断れること。
+    #[test]
+    fn a_broken_regex_is_refused_before_waiting() {
+        assert!(
+            Match::Regex {
+                pattern: "(".into()
+            }
+            .check()
+            .is_err()
+        );
+        // 組み合わせの中に混ざっていても見つける。
+        let nested = Match::All {
+            of: vec![
+                Match::Substring { text: "x".into() },
+                Match::Not {
+                    of: Box::new(Match::Regex {
+                        pattern: "[".into(),
+                    }),
+                },
+            ],
+        };
+        assert!(nested.check().is_err());
+    }
+
+    #[test]
+    fn a_command_end_can_ask_for_a_particular_code() {
+        let any = Match::CommandEnd { code: None };
+        let one = Match::CommandEnd { code: Some(1) };
+        let ended = |c: Option<i32>| MatchInput {
+            text: "",
+            ended: Some(c),
+            agent: None,
+            event: None,
+        };
+        assert!(any.hit(&ended(Some(0))));
+        assert!(any.hit(&ended(None)), "終了コードが取れなくても「終わった」");
+        assert!(one.hit(&ended(Some(1))));
+        assert!(!one.hit(&ended(Some(0))));
+        // 終わっていないときは当たらない。
+        assert!(!any.hit(&saw("still running")));
+    }
+
+    /// 「終わって、しかも失敗した」は 2 つの条件の重なり。
+    /// **片方ずつ待つと間の一瞬を取りこぼす。**
+    #[test]
+    fn conditions_combine() {
+        let m = Match::All {
+            of: vec![
+                Match::CommandEnd { code: Some(1) },
+                Match::Substring {
+                    text: "test".into(),
+                },
+            ],
+        };
+        let input = MatchInput {
+            text: "test result: FAILED",
+            ended: Some(Some(1)),
+            agent: None,
+            event: None,
+        };
+        assert!(m.hit(&input));
+
+        let wrong_code = MatchInput {
+            ended: Some(Some(0)),
+            ..input
+        };
+        assert!(!m.hit(&wrong_code));
+    }
+
+    /// 空の `all` は当たらない。**「条件が無い」を「いつでも当たる」に
+    /// しない**（書き忘れた台本が即座に返ってしまう）。
+    #[test]
+    fn an_empty_all_never_hits() {
+        assert!(!Match::All { of: vec![] }.hit(&saw("anything")));
+        assert!(!Match::Any { of: vec![] }.hit(&saw("anything")));
+    }
+
+    #[test]
+    fn any_and_not_work_as_written() {
+        let m = Match::Any {
+            of: vec![
+                Match::Substring { text: "ok".into() },
+                Match::Substring {
+                    text: "done".into(),
+                },
+            ],
+        };
+        assert!(m.hit(&saw("all done")));
+        assert!(!m.hit(&saw("still going")));
+
+        let n = Match::Not {
+            of: Box::new(Match::Substring { text: "ok".into() }),
+        };
+        assert!(n.hit(&saw("failure")));
+        assert!(!n.hit(&saw("ok")));
+    }
+
+    /// 待ちと購読は**同じ名前**を使う。片方だけ増える形にしない。
+    #[test]
+    fn an_event_can_be_waited_for_by_its_subscription_name() {
+        let m = Match::Event {
+            name: "pane".into(),
+        };
+        let happened = MatchInput {
+            text: "",
+            ended: None,
+            agent: None,
+            event: Some("pane"),
+        };
+        assert!(m.hit(&happened));
+        assert!(!m.hit(&saw("pane")), "画面の字から当てている");
+    }
+
+    /// 知らない出来事の名前は、**待ち始める前に**断る。
+    #[test]
+    fn waiting_for_an_event_that_does_not_exist_is_refused_up_front() {
+        assert!(
+            Match::Event {
+                name: "pane_opened".into()
+            }
+            .check()
+            .is_err(),
+            "購読名は `pane`。中の種類名では待てない"
+        );
+        assert!(
+            Match::Event {
+                name: "pane".into()
+            }
+            .check()
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn an_agent_state_is_matched_when_it_is_announced() {
+        let m = Match::Agent {
+            state: AgentState::Blocked,
+        };
+        let named = MatchInput {
+            text: "",
+            ended: None,
+            agent: Some(AgentState::Blocked),
+            event: None,
+        };
+        assert!(m.hit(&named));
+        assert!(!m.hit(&saw("blocked")), "画面の字から当てている");
+    }
 
     #[test]
     fn an_edit_that_does_not_fit_is_refused_instead_of_applied() {

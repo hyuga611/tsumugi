@@ -16,7 +16,9 @@ mod win_sd;
 pub use client::Client;
 pub use endpoint::Endpoint;
 pub use protocol::{
-    ClientMsg, Dir, Edit, Layout, PROTOCOL_VERSION, PaneInfo, ServerMsg, SessionInfo, TabInfo,
+    ClientMsg, Dir, Edit, ExtCommand, ExtLogEntry, Layout, LayoutSpec, Level, Match, MatchInput, PROTOCOL_VERSION,
+    PaneInfo, PluginEvent, ServerMsg,
+    SessionInfo, TabInfo,
     decode_bytes, encode_bytes,
 };
 pub use server::{ServerHandle, run_with, spawn};

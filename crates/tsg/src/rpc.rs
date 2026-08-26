@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use tsg_mux::protocol::AgentState;
-use tsg_mux::{Client, ClientMsg, PROTOCOL_VERSION, ServerMsg, SessionInfo};
+use tsg_mux::{Client, ClientMsg, Match, PROTOCOL_VERSION, ServerMsg, SessionInfo};
 
 /// 窓を持たないクライアントが名乗る大きさ。
 ///
@@ -245,6 +245,315 @@ pub fn tap(session: &str) -> Result<()> {
     }
 }
 
+/// `--until` の書き方を `Match` にする。
+///
+/// **組み合わせ（`all` / `any` / `not`）はコマンドラインに載せない。**
+/// 括弧を打ちながら組む形にすると、打ち間違いを画面で直す羽目になる。
+/// 組み合わせたいものは生の口（`docs/rpc.md`）から JSON で渡す。
+fn parse_matcher(until: &str) -> Result<Match> {
+    let t = until.trim();
+    if let Some(text) = t.strip_prefix("text:") {
+        if text.is_empty() {
+            bail!("`text:` の後ろが空です");
+        }
+        return Ok(Match::Substring {
+            text: text.to_string(),
+        });
+    }
+    if let Some(pattern) = t.strip_prefix("re:") {
+        let m = Match::Regex {
+            pattern: pattern.to_string(),
+        };
+        m.check().map_err(anyhow::Error::msg)?;
+        return Ok(m);
+    }
+    if let Some(name) = t.strip_prefix("event:") {
+        let m = Match::Event {
+            name: name.to_string(),
+        };
+        m.check().map_err(anyhow::Error::msg)?;
+        return Ok(m);
+    }
+    if t == "exit" {
+        return Ok(Match::CommandEnd { code: None });
+    }
+    if let Some(code) = t.strip_prefix("exit:") {
+        let code: i32 = code
+            .parse()
+            .map_err(|_| anyhow::anyhow!("終了コードを読めません: {code}"))?;
+        return Ok(Match::CommandEnd { code: Some(code) });
+    }
+    bail!(
+        "'{until}' を知りません（working / blocked / done / failed / idle / \
+         text:<字> / re:<正規表現> / exit / exit:<番号> / event:<名前>）"
+    )
+}
+
+/// サーバに待ってもらう。答えは `Waited` が 1 通。
+fn wait_for(session: &str, matcher: Match, timeout: u64, pane: Option<u32>) -> Result<bool> {
+    let (mut client, _) = attach(session)?;
+    client.send(&ClientMsg::Wait {
+        pane,
+        matcher,
+        timeout_ms: (timeout > 0).then(|| timeout * 1000),
+    })?;
+    loop {
+        match client.recv_timeout(Duration::from_millis(500)) {
+            Some(ServerMsg::Waited { matched, .. }) => return Ok(matched),
+            // 待ち始める前に断られた（読めない式など）。
+            Some(ServerMsg::Error { message }) => bail!("{message}"),
+            Some(_) | None => {}
+        }
+    }
+}
+
+/// 走っている窓へ知らせる。**返事は待たない。**
+///
+/// 窓が 1 枚も開いていなければ、どこにも出ない（溜めない）。後から
+/// 出てくる知らせは、たいてい手遅れで、しかも文脈を失っている。
+pub fn notify(session: &str, text: &str, level: tsg_mux::Level) -> Result<()> {
+    let (mut client, _) = attach(session)?;
+    client.send(&ClientMsg::Notify {
+        text: text.to_string(),
+        level,
+    })?;
+    std::thread::sleep(Duration::from_millis(150));
+    let _ = client.send(&ClientMsg::Detach);
+    Ok(())
+}
+
+/// 打った側の居場所。ペインの居場所が分からないときの受け皿。
+fn here() -> Option<String> {
+    std::env::current_dir()
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// git の作業ツリーを並べる。
+///
+/// **エージェントを並べるなら、置き場所も要る。** 3 本走らせるのに
+/// 1 つの作業ツリーで 3 つの枝は回せない。
+pub fn worktrees(session: &str) -> Result<()> {
+    let (mut client, _) = attach(session)?;
+    client.send(&ClientMsg::WorktreeList {
+        pane: None,
+        cwd: here(),
+    })?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        match client.recv_timeout(Duration::from_millis(200)) {
+            Some(ServerMsg::Worktrees { items }) => {
+                let mut out = std::io::stdout().lock();
+                for w in items {
+                    writeln!(
+                        out,
+                        "{}\t{}\t{}",
+                        if w.main { "*" } else { " " },
+                        if w.branch.is_empty() {
+                            "(detached)"
+                        } else {
+                            &w.branch
+                        },
+                        w.path
+                    )?;
+                }
+                out.flush()?;
+                let _ = client.send(&ClientMsg::Detach);
+                return Ok(());
+            }
+            Some(ServerMsg::Error { message }) => bail!("{message}"),
+            Some(_) | None => {}
+        }
+    }
+    bail!("答えが返ってきません")
+}
+
+/// その作業ツリーで新しいタブを開く。
+pub fn worktree_open(session: &str, path: &str) -> Result<()> {
+    let full = std::fs::canonicalize(path)
+        .with_context(|| format!("{path} が見つかりません"))?
+        .to_string_lossy()
+        .trim_start_matches(r"\\?\")
+        .to_string();
+    let (mut client, _) = attach(session)?;
+    client.send(&ClientMsg::WorktreeOpen { path: full })?;
+    std::thread::sleep(Duration::from_millis(300));
+    let _ = client.send(&ClientMsg::Detach);
+    Ok(())
+}
+
+/// 作業ツリーを足して、そこで開く。
+pub fn worktree_add(session: &str, path: &str, branch: Option<&str>) -> Result<()> {
+    let (mut client, _) = attach(session)?;
+    client.send(&ClientMsg::WorktreeAdd {
+        pane: None,
+        cwd: here(),
+        path: path.to_string(),
+        branch: branch.map(str::to_string),
+    })?;
+    // 足せたら形が変わる。断られたら理由が返る。
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
+        match client.recv_timeout(Duration::from_millis(200)) {
+            Some(ServerMsg::Layout(_)) => {
+                let _ = client.send(&ClientMsg::Detach);
+                return Ok(());
+            }
+            Some(ServerMsg::Error { message }) => bail!("{message}"),
+            Some(_) | None => {}
+        }
+    }
+    bail!("できたかどうか分かりません")
+}
+
+/// 作業ツリーを消す。**押し切らない**（`--force` は渡さない）。
+pub fn worktree_remove(session: &str, path: &str) -> Result<()> {
+    let (mut client, _) = attach(session)?;
+    client.send(&ClientMsg::WorktreeRemove {
+        pane: None,
+        cwd: here(),
+        path: path.to_string(),
+        force: false,
+    })?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if let Some(ServerMsg::Error { message }) = client.recv_timeout(Duration::from_millis(200))
+        {
+            bail!("{message}")
+        }
+    }
+    // 断られなければ消えている（消えたことは `--worktrees` で確かめられる）。
+    let _ = client.send(&ClientMsg::Detach);
+    Ok(())
+}
+
+/// いまの並べ方を形だけ書き出す。
+///
+/// **番号は落とす。** 次に当てるときには、その番号のペインはもう無い。
+pub fn layout_export(session: &str) -> Result<()> {
+    let (mut client, _) = attach(session)?;
+    client.send(&ClientMsg::LayoutExport { tab: None })?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        match client.recv_timeout(Duration::from_millis(200)) {
+            Some(ServerMsg::LayoutSpec { spec }) => {
+                let mut out = std::io::stdout().lock();
+                writeln!(out, "{}", serde_json::to_string_pretty(&spec)?)?;
+                out.flush()?;
+                let _ = client.send(&ClientMsg::Detach);
+                return Ok(());
+            }
+            Some(ServerMsg::Error { message }) => bail!("{message}"),
+            Some(_) | None => {}
+        }
+    }
+    bail!("形が返ってきません")
+}
+
+/// 書き出した形で開く。**新しいタブに開く**（いまのペインは触らない）。
+pub fn layout_apply(session: &str, path: &str) -> Result<()> {
+    let text = if path == "-" {
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut buf)?;
+        buf
+    } else {
+        std::fs::read_to_string(path).with_context(|| format!("{path} を読めません"))?
+    };
+    let spec: tsg_mux::LayoutSpec =
+        serde_json::from_str(&text).context("形として読めません（--layout-export の出力です）")?;
+    let (mut client, _) = attach(session)?;
+    client.send(&ClientMsg::LayoutApply { spec })?;
+    // 形が変われば `layout` が返る。**返るまで切らない**（切ると届く前に終わる）。
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        match client.recv_timeout(Duration::from_millis(200)) {
+            Some(ServerMsg::Layout(_)) => {
+                let _ = client.send(&ClientMsg::Detach);
+                return Ok(());
+            }
+            Some(ServerMsg::Error { message }) => bail!("{message}"),
+            Some(_) | None => {}
+        }
+    }
+    bail!("開けたかどうか分かりません")
+}
+
+/// 拡張が何をしたかの記録を出す。
+///
+/// **断った理由がここに出る。** 「繋がっているのに何も起きない」を
+/// 調べるとき、人が最初に見る場所がこれ。
+pub fn ext_log(session: &str, limit: Option<usize>) -> Result<()> {
+    let (mut client, _) = attach(session)?;
+    client.send(&ClientMsg::ExtLog { limit })?;
+    let mut out = std::io::stdout().lock();
+    // 答えは 1 通だけ。**待ち続けない**（拡張が 1 つも繋がっていなければ空で返る）。
+    let deadline = std::time::Instant::now() + Duration::from_secs(3);
+    while std::time::Instant::now() < deadline {
+        if let Some(ServerMsg::ExtLog { entries }) = client.recv_timeout(Duration::from_millis(200))
+        {
+            if entries.is_empty() {
+                eprintln!("記録はまだありません");
+            }
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            for e in entries {
+                writeln!(
+                    out,
+                    "{:>8}  {:<12} {} {}",
+                    ago(now.saturating_sub(e.at)),
+                    e.who,
+                    if e.refused { "✗" } else { " " },
+                    e.what
+                )?;
+            }
+            out.flush()?;
+            let _ = client.send(&ClientMsg::Detach);
+            return Ok(());
+        }
+    }
+    bail!("記録が返ってきません")
+}
+
+/// 「いつ」を人の言葉で。**時計の形にしない** — 見たいのはたいてい
+/// 「さっき何が起きたか」で、そこに要るのは絶対時刻ではなく隔たり。
+fn ago(secs: u64) -> String {
+    match secs {
+        0..=1 => "たった今".into(),
+        2..=59 => format!("{secs}秒前"),
+        60..=3599 => format!("{}分前", secs / 60),
+        3600..=86399 => format!("{}時間前", secs / 3600),
+        _ => format!("{}日前", secs / 86400),
+    }
+}
+
+/// 意味の粒の出来事を覗く。
+///
+/// `--tap` が生バイトなのに対し、こちらは**シェル統合が言ってきたこと**を
+/// そのまま JSON Lines で出す。拡張を書く前に、何が届くのかを目で見るための口。
+pub fn subscribe(session: &str, events: &[String]) -> Result<()> {
+    let (mut client, _) = attach(session)?;
+    client.send(&ClientMsg::Subscribe {
+        events: events.to_vec(),
+    })?;
+    eprintln!(
+        "--subscribe: '{session}' の {} を覗いています（Ctrl-C で終了）",
+        events.join(", ")
+    );
+    let mut out = std::io::stdout().lock();
+    loop {
+        match client.recv_timeout(Duration::from_millis(500)) {
+            Some(ServerMsg::Event { event }) => {
+                writeln!(out, "{}", serde_json::to_string(&event)?)?;
+                out.flush()?;
+            }
+            // 知らない名前を挙げたときは、黙って待たせない。
+            Some(ServerMsg::Error { message }) => eprintln!("{message}"),
+            Some(_) | None => {}
+        }
+    }
+}
+
 /// 生のプロトコルを標準入出力で話す。
 ///
 /// 標準入力の 1 行 = `ClientMsg` 1 通、標準出力の 1 行 = `ServerMsg` 1 通。
@@ -389,8 +698,10 @@ pub fn agents(session: &str) -> Result<()> {
 /// 返り値は終了コードで返す（0 = なった / 2 = 時間切れ）。
 /// 台本が `if tsg --wait --until blocked; then ...` と書けることが目的。
 pub fn wait(session: &str, until: &str, timeout: u64, pane: Option<u32>) -> Result<bool> {
+    // 状態以外の待ち方は**サーバに待たせる**（画面を全部見ているのは向こう）。
     let Some(want) = AgentState::parse(until) else {
-        bail!("状態 '{until}' を知りません（working / blocked / done / failed / idle）");
+        let matcher = parse_matcher(until)?;
+        return wait_for(session, matcher, timeout, pane);
     };
     let (client, info) = attach(session)?;
     let matches = |i: &SessionInfo| {
@@ -581,12 +892,14 @@ pub fn compare(session: &str) -> Result<()> {
 /// 動かす。知らない id は先に弾く — 送っても何も起きないより、
 /// その場で「そんな id は無い」と言うほうがいい。
 pub fn run_command(session: &str, id: &str, arg: Option<String>) -> Result<()> {
-    let Some(spec) = tsg_modal::REGISTRY.iter().find(|s| s.id == id) else {
+    // `ext.` は外から登録された語彙。**こちらは中身を知らない**ので、
+    // 実在するかどうかはサーバに判断させる（知らない id なら error が返る）。
+    if !id.starts_with("ext.") && !tsg_modal::REGISTRY.iter().any(|s| s.id == id) {
         bail!("コマンド '{id}' を知りません（一覧は tsg --commands）");
-    };
+    }
     let (mut client, _) = attach(session)?;
     client.send(&ClientMsg::RunCommand {
-        id: spec.id.to_string(),
+        id: id.to_string(),
         arg,
     })?;
     std::thread::sleep(Duration::from_millis(200));

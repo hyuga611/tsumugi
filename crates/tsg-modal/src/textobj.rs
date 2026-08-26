@@ -64,7 +64,8 @@ impl TextObject {
             'n' => TextObject::Number,
             'e' => TextObject::ErrorBlock,
             'f' => match kind {
-                // File バッファの `if`（関数）は File バッファ実装と同時に入れる
+                // File バッファの `if` は関数。**木が答える**ので
+                // ここでは名乗らない（`tree.rs` / `engine::text_object`）。
                 BufferKind::File => return None,
                 _ => TextObject::Path,
             },

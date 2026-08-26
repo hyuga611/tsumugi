@@ -166,6 +166,12 @@ pub enum MuxRequest {
     GitDiff,
     /// 定義へ移動（`gd`）。言語サーバに聞く。
     Definition,
+    /// その場で意味を訊く（`K`）。
+    Hover,
+    /// 使われている場所を並べる（`gr`）。
+    References,
+    /// 名前を変える（`gn`）。**新しい名前は窓が訊く。**
+    Rename,
     /// 補完（入力モードで Ctrl+Space）。
     Complete,
     /// 差分のかたまりを 1 つ採用する / 取り消す（`Space G` / `Space R`）。
@@ -283,6 +289,15 @@ pub enum Command {
 
     /// `@{a}` — 記録したキー列を流し直す。
     MacroReplay(char),
+
+    /// `.` — 直前の「変えた操作」をもう一度。`count` は流す回数。
+    ///
+    /// マクロと同じ `KeyInput` の列で覚える。意味の層（オペレータ＋範囲）で
+    /// 覚え直すと、入力モードで打った字だけ別の道で覚えることになり、
+    /// 2 つの記録が食い違う日が必ず来る。
+    DotRepeat {
+        count: usize,
+    },
 
     /// 使い方の表示。起動しただけでは何をすればいいか分からない、を潰すための一級機能。
     ToggleHelp,
@@ -654,10 +669,53 @@ pub const REGISTRY: &[CommandSpec] = &[
     },
     CommandSpec {
         id: "textobj.path",
-        title: "ファイルパス（if / af）",
-        title_en: "File path (if / af)",
+        // 同じ字が、いま見ているものに応じていちばん近いものを指す。
+        // **キーを 2 つに割らない** — 端末に関数は無いし、ファイルに
+        // 「出力の中のパス」は無いので、迷う場面がそもそも無い。
+        title: "ファイルパス（端末）/ 関数（ファイル）（if / af）",
+        title_en: "File path (terminal) / function (file) (if / af)",
         keys: &["if", "af"],
         mouse: MousePath::Direct("パスの上をダブルクリック"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "lsp.hover",
+        title: "ここは何か（言語サーバに訊く）",
+        title_en: "What is this (ask the language server)",
+        keys: &["K"],
+        mouse: MousePath::Menu("編集"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "lsp.references",
+        title: "使われている場所を並べる",
+        title_en: "List where this is used",
+        keys: &["gr"],
+        mouse: MousePath::Menu("編集"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "lsp.rename",
+        title: "名前を変える（使われている場所ごと）",
+        title_en: "Rename (everywhere it is used)",
+        keys: &["gn"],
+        mouse: MousePath::Menu("編集"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "textobj.type",
+        title: "型・構造体・クラス（it / at）",
+        title_en: "Type, struct, class (it / at)",
+        keys: &["it", "at"],
+        mouse: MousePath::Palette,
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "textobj.argument",
+        title: "引数ひとつ（ia / aa。aa はカンマごと）",
+        title_en: "One argument (ia / aa; aa takes the comma)",
+        keys: &["ia", "aa"],
+        mouse: MousePath::Palette,
         in_palette: true,
     },
     CommandSpec {
@@ -978,6 +1036,14 @@ pub const REGISTRY: &[CommandSpec] = &[
         title_en: "Play the macro",
         keys: &["@{a}", "@@"],
         mouse: MousePath::Direct("ステータス行の再生ボタンをクリック"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "edit.repeat",
+        title: "直前の変更を繰り返す",
+        title_en: "Repeat the last change",
+        keys: &["."],
+        mouse: MousePath::Menu("編集"),
         in_palette: true,
     },
     CommandSpec {

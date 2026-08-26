@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use tsg_term::{AmbiguousWidth, Cell, SemanticMarks, char_width};
 
+use crate::tree::{Grammar, Syntax, TreeObject};
 use crate::{Buffer, BufferKind, Pos, Range, RangeKind};
 
 pub struct FileBuffer {
@@ -41,6 +42,12 @@ pub struct FileBuffer {
     /// 行をまたいで積み上げたものは、どこか 1 行でも変わると使えない。
     /// 変更の道を数え上げて回るより、番号を 1 つ見るほうが取りこぼさない。
     rev: u64,
+    /// 構文木。**要ると言われたときにだけ解く**（`tree.rs`）。
+    ///
+    /// 打つたびに解き直すと大きなファイルで指が止まる。テキストオブジェクトを
+    /// 指した瞬間にしか要らないので、そこまで遅らせる。`&self` から解くために
+    /// 内部可変性を使うが、**外へ出るのは答えだけ**（木は貸し出さない）。
+    syntax: std::cell::RefCell<Option<(Grammar, Syntax)>>,
 }
 
 /// 変更 1 つ分の置換。位置は `text()` が返す文字列の上のバイト。
@@ -108,6 +115,7 @@ impl FileBuffer {
             pending: Vec::new(),
             resync: false,
             rev: 0,
+            syntax: std::cell::RefCell::new(None),
         }
     }
 
@@ -154,6 +162,46 @@ impl FileBuffer {
     /// 中身の版。変わるたびに進む。
     pub fn rev(&self) -> u64 {
         self.rev
+    }
+
+    /// 表示桁 → その行の頭からのバイト数（構文木が数えるのはバイト）。
+    fn byte_col(&self, line: usize, col: usize) -> usize {
+        let Some(cells) = self.lines.get(line) else {
+            return 0;
+        };
+        cells
+            .iter()
+            .take(col)
+            .filter(|c| c.width != 0)
+            .map(|c| c.text.len())
+            .sum()
+    }
+
+    /// バイト数 → 表示桁。**全角の後ろ半分（幅 0）は数えない。**
+    fn cell_col(&self, line: usize, byte: usize) -> usize {
+        let Some(cells) = self.lines.get(line) else {
+            return 0;
+        };
+        let mut bytes = 0;
+        for (i, c) in cells.iter().enumerate() {
+            if bytes >= byte {
+                return i;
+            }
+            if c.width != 0 {
+                bytes += c.text.len();
+            }
+        }
+        cells.len()
+    }
+
+    /// 1 つ手前の位置。行頭なら前の行の末尾へ。先頭なら `None`。
+    fn before(&self, pos: Pos) -> Option<Pos> {
+        if pos.col > 0 {
+            return Some(Pos::new(pos.line, pos.col - 1));
+        }
+        let prev = pos.line.checked_sub(1)?;
+        let width = self.lines.get(prev).map_or(0, Vec::len);
+        Some(Pos::new(prev, width.saturating_sub(1)))
     }
 
     pub fn line_count(&self) -> usize {
@@ -442,6 +490,24 @@ impl FileBuffer {
 impl Buffer for FileBuffer {
     fn kind(&self) -> BufferKind {
         BufferKind::File
+    }
+
+    fn syntax_object(&self, at: Pos, what: TreeObject, around: bool) -> Option<Range> {
+        let ext = self.path.as_ref()?.extension()?.to_str()?;
+        let grammar = Grammar::of_extension(ext)?;
+        let mut slot = self.syntax.borrow_mut();
+        if slot.as_ref().map(|(g, _)| *g) != Some(grammar) {
+            *slot = Syntax::new(grammar).map(|s| (grammar, s));
+        }
+        let (_, syn) = slot.as_mut()?;
+        syn.ensure(&self.text(), self.rev);
+
+        let (start, end) = syn.object((at.line, self.byte_col(at.line, at.col)), what, around)?;
+        let start = Pos::new(start.0, self.cell_col(start.0, start.1));
+        // 木の終わりは**そこを含まない**。範囲の終わりは含む側なので 1 つ戻す。
+        let end = self.before(Pos::new(end.0, self.cell_col(end.0, end.1)))?;
+        (start.line < end.line || (start.line == end.line && start.col <= end.col))
+            .then(|| Range::new(start, end, RangeKind::Char))
     }
 
     fn line_count(&self) -> usize {

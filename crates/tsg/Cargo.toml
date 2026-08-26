@@ -22,6 +22,7 @@ tsg-pty = { version = "0.1.1", path = "../tsg-pty" }
 tsg-render = { version = "0.1.1", path = "../tsg-render" }
 tsg-term = { version = "0.1.1", path = "../tsg-term" }
 winit = "0.30.13"
+mlua = { version = "0.12.0", features = ["lua54", "vendored"] }
 
 [target."cfg(windows)".dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Console", "Win32_Graphics_Dwm", "Win32_UI_WindowsAndMessaging", "Win32_Globalization"] }

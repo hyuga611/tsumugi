@@ -108,11 +108,26 @@ pub struct PaneView {
     /// 言語サーバが言ってきた誤り。**行番号で持つ**（ファイルの行なので
     /// スクロールバックのように動かない）。
     pub diagnostics: Vec<tsg_lsp::Diagnostic>,
+    /// git から見た、いま開いているファイルの状態。
+    ///
+    /// **開いたときと保存したときにだけ数え直す。** 打つたびに `git` を
+    /// 起こすと、指の速さでプロセスが積み上がる。直しかけかどうかは
+    /// 題名の `*` が言っているので、ここは「保存した時点」でよい。
+    pub git: Option<GitInfo>,
     /// 畳んである出力の範囲（開始行, 終了行）。両端を含む。
     ///
     /// **行番号で持つ。** スクロールバックは末尾に足されるだけで、
     /// 既にある行の番号は動かない（`concept.md` の中心命題）。
     pub folds: Vec<(usize, usize)>,
+}
+
+/// git から見たファイルの状態。ステータス行に出す。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GitInfo {
+    /// いまの枝。取れなければ空（git の中に居ないファイルもある）。
+    pub branch: String,
+    pub added: usize,
+    pub removed: usize,
 }
 
 /// スクロールバックの上限。**プロセス全体で 1 つ**の設定なので、
@@ -240,6 +255,7 @@ impl PaneView {
             syntax_at: Vec::new(),
             syntax_rev: 0,
             diagnostics: Vec::new(),
+            git: None,
             folds: Vec::new(),
         }
     }

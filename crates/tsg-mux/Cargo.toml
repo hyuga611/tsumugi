@@ -15,6 +15,7 @@ serde_json = "1.0.151"
 tsg-pty = { version = "0.1.1", path = "../tsg-pty" }
 tsg-lsp = { version = "0.1.1", path = "../tsg-lsp" }
 tsg-term = { version = "0.1.1", path = "../tsg-term" }
+regex = "1.13.1"
 
 [target."cfg(unix)".dependencies]
 libc = "0.2"

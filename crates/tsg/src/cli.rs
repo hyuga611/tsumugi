@@ -19,6 +19,30 @@ pub enum Mode {
     Send(String),
     /// セッションの生バイトを覗く
     Tap,
+    /// 意味の粒の出来事を覗く（拡張を書く前に、まず目で見るための口）
+    Subscribe(Vec<String>),
+    /// 拡張が何をしたかの記録（断られた理由もここに出る）
+    ExtLog(Option<usize>),
+    /// 画面へ知らせる（台本から「終わったよ」を出す）
+    Notify {
+        text: String,
+        level: tsg_mux::Level,
+    },
+    /// git の作業ツリーを並べる
+    Worktrees,
+    /// その作業ツリーで新しいタブを開く
+    WorktreeOpen(String),
+    /// 作業ツリーを足して、そこで開く
+    WorktreeAdd {
+        path: String,
+        branch: Option<String>,
+    },
+    /// 作業ツリーを消す（直しかけが残っていれば git が断る）
+    WorktreeRemove(String),
+    /// いまの並べ方を形だけ書き出す（標準出力へ JSON）
+    LayoutExport,
+    /// 書き出した形で開く（`-` なら標準入力から）
+    LayoutApply(String),
     /// 走っているセッションの一覧。
     List,
     /// ペインに見えているものをテキストで取る。
@@ -178,6 +202,18 @@ tsumugi (tsg) — ターミナルの画面を vim で編集できるドキュメ
       --send <文字列>      走っているセッションへ入力を流す（\\n で改行）
       --capture [ペイン]   ペインに見えているものをテキストで取る（既定: いまのペイン）
       --tap                そのセッションの生バイトを覗く
+      --subscribe [名前]   出来事を覗く（command_end,pane,agent,cwd,command。既定は全部）
+      --ext-log [本数]     拡張が何をしたかの記録（断った理由もここ。既定は 50 本）
+      --notify <文> [--warn|--error]
+                           走っている窓へ知らせる（台本の「終わったよ」）
+      --worktrees          git の作業ツリーを並べる
+      --worktree-add <パス> [--branch <名前>]
+                           作業ツリーを足して、そこで新しいタブを開く
+      --worktree-open <パス> そこで新しいタブを開く
+      --worktree-remove <パス>
+                           作業ツリーを消す（直しかけが残っていれば git が断る）
+      --layout-export      いまの並べ方を形だけ書き出す（JSON）
+      --layout-apply <パス> その形で新しいタブを開く（`-` で標準入力）
       --rpc                生のプロトコルを標準入出力で話す（docs/rpc.md）
   -h, --help               これ
   -V, --version            版
@@ -228,6 +264,8 @@ AI エージェントを並べて使うなら:
 
     tsg --prompt \"テストを直して\" --wait  # 投げて、返事待ちになるまで待つ
     tsg --wait --until done --timeout 600  # 終わるまで待つ
+    tsg --wait --until exit:1              # 失敗したコマンドが出るまで待つ
+    tsg --wait --until text:PASS           # その字が画面に出るまで待つ
     tsg --agents                           # session<TAB>pane<TAB>state
 
 シェル統合（強く推奨）:
@@ -314,6 +352,78 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Cli {
             "--uninstall" => cli.mode = Mode::Uninstall,
             "--diagnose" => cli.mode = Mode::Diagnose,
             "--tap" => cli.mode = Mode::Tap,
+            "--notify" => {
+                if let Some(t) = next_value(&args, &mut i) {
+                    cli.mode = Mode::Notify {
+                        text: t,
+                        level: tsg_mux::Level::Info,
+                    };
+                }
+            }
+            "--warn" | "--error" => {
+                if let Mode::Notify { level, .. } = &mut cli.mode {
+                    *level = if a == "--warn" {
+                        tsg_mux::Level::Warn
+                    } else {
+                        tsg_mux::Level::Error
+                    };
+                }
+            }
+            "--worktrees" => cli.mode = Mode::Worktrees,
+            "--worktree-open" => {
+                if let Some(p) = next_value(&args, &mut i) {
+                    cli.mode = Mode::WorktreeOpen(p);
+                }
+            }
+            "--worktree-add" => {
+                if let Some(p) = next_value(&args, &mut i) {
+                    cli.mode = Mode::WorktreeAdd {
+                        path: p,
+                        branch: None,
+                    };
+                }
+            }
+            "--branch" => {
+                if let (Some(b), Mode::WorktreeAdd { branch, .. }) =
+                    (next_value(&args, &mut i), &mut cli.mode)
+                {
+                    *branch = Some(b);
+                }
+            }
+            "--worktree-remove" => {
+                if let Some(p) = next_value(&args, &mut i) {
+                    cli.mode = Mode::WorktreeRemove(p);
+                }
+            }
+            "--layout-export" => cli.mode = Mode::LayoutExport,
+            "--layout-apply" => {
+                let path = next_value(&args, &mut i).unwrap_or_else(|| "-".into());
+                cli.mode = Mode::LayoutApply(path);
+            }
+            "--ext-log" => {
+                let n = match args.get(i + 1) {
+                    Some(v) if !v.starts_with('-') => {
+                        i += 1;
+                        v.parse().ok()
+                    }
+                    _ => None,
+                };
+                cli.mode = Mode::ExtLog(n);
+            }
+            "--subscribe" => {
+                // 名前を書かなければ全部。`command_end,pane` のように選べる。
+                let names = match args.get(i + 1) {
+                    Some(v) if !v.starts_with('-') => {
+                        i += 1;
+                        v.split(',').map(|s| s.trim().to_string()).collect()
+                    }
+                    _ => tsg_mux::PluginEvent::NAMES
+                        .iter()
+                        .map(|s| (*s).to_string())
+                        .collect(),
+                };
+                cli.mode = Mode::Subscribe(names);
+            }
             "--list" => cli.mode = Mode::List,
             "--rpc" => cli.mode = Mode::Rpc,
             "--spawn" => cli.spawn = true,

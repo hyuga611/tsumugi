@@ -263,6 +263,40 @@ impl Macros {
     }
 }
 
+// ---- 直前の変更（`.`） ----------------------------------------------------
+
+/// `.` が流し直すもの。
+///
+/// **打鍵で覚える。** `Macros` と同じ形にしてあるのは、入力モードで打った字を
+/// 含めて 1 つの列にできるのがこの形だけだからで、意味の層で覚えると
+/// 「オペレータの記録」と「打った字の記録」の 2 本を同期させ続けることになる。
+#[derive(Default, Debug)]
+pub struct Dot {
+    /// いま組み立て中の操作。変えたと分かった時点で `stored` へ移る。
+    current: Vec<KeyInput>,
+    stored: Vec<KeyInput>,
+    /// `c` `i` `o` で入力モードへ入った変更の途中か。Esc まで溜め続ける。
+    in_insert: bool,
+}
+
+impl Dot {
+    /// `.` で流す打鍵。空なら、まだ繰り返せる変更が無い。
+    pub fn keys(&self) -> &[KeyInput] {
+        &self.stored
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.stored.is_empty()
+    }
+
+    fn commit(&mut self) {
+        if self.current.is_empty() {
+            return;
+        }
+        self.stored = std::mem::take(&mut self.current);
+    }
+}
+
 // ---- 保留状態 -------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -307,6 +341,14 @@ impl Pending {
     fn clear(&mut self) {
         *self = Pending::default();
     }
+
+    /// 何も組み立てていない＝次の打鍵が新しい操作の 1 打目になる。
+    fn is_idle(&self) -> bool {
+        self.count.is_none()
+            && self.operator.is_none()
+            && self.register.is_none()
+            && self.awaiting.is_none()
+    }
 }
 
 // ---- エンジン -------------------------------------------------------------
@@ -337,6 +379,8 @@ pub struct Engine {
     pub registers: Registers,
     pub marks: Marks,
     pub macros: Macros,
+    /// 直前の変更（`.`）。`macros` と同じ打鍵の列で持つ。
+    pub dot: Dot,
     /// Term バッファのヤンクを既定でシステムクリップボードへ入れるか
     /// （`modal-spec.md` §8。`:set clipboard=` で切れるようにする予定）
     pub clipboard_on_yank: bool,
@@ -364,6 +408,7 @@ impl Engine {
             registers: Registers::default(),
             marks: Marks::default(),
             macros: Macros::default(),
+            dot: Dot::default(),
             clipboard_on_yank: true,
         }
     }
@@ -434,6 +479,60 @@ impl Engine {
     // ---- キー解決 ---------------------------------------------------------
 
     pub fn key(&mut self, key: KeyInput, buf: &dyn Buffer) -> KeyOutcome {
+        // `.` の記録はここに集める。`key_inner` は途中で戻る道が多く、
+        // 各所へ散らすと必ずどれかを取りこぼす。
+        self.dot_note_key(key);
+        let outcome = self.key_inner(key, buf);
+        if let KeyOutcome::Handled(effects) = &outcome {
+            self.dot_note_effects(effects);
+        }
+        outcome
+    }
+
+    /// `.` が覚える打鍵を溜める。**変えた操作かどうかは実行の後にしか
+    /// 分からない**ので、ここでは組み立て中の列を作るだけで確定はしない。
+    fn dot_note_key(&mut self, key: KeyInput) {
+        let fresh = !self.dot.in_insert && self.mode == Mode::Normal && self.pending.is_idle();
+        // `.` そのものは覚えない。覚えると再生が自分を呼ぶ。
+        if fresh && key == KeyInput::Char('.') {
+            return;
+        }
+        // Normal で何も保留していないなら、そこが新しい操作の 1 打目。
+        // Visual と入力モードの途中では切らない（`viwd` と `ciw…Esc` を
+        // 1 つの変更として覚えるため）。
+        if fresh {
+            self.dot.current.clear();
+        }
+        self.dot.current.push(key);
+    }
+
+    /// 実行の結果を見て、溜めた列を「直前の変更」として確定する。
+    fn dot_note_effects(&mut self, effects: &[Effect]) {
+        if effects
+            .iter()
+            .any(|e| matches!(e, Effect::ModeChanged(Mode::Insert)))
+        {
+            // `c` `i` `o` はここで終わらない。Esc まで溜め続ける。
+            self.dot.in_insert = true;
+            return;
+        }
+        if self.dot.in_insert {
+            if effects.iter().any(|e| matches!(e, Effect::ModeChanged(_))) {
+                self.dot.in_insert = false;
+                self.dot.commit();
+            }
+            return;
+        }
+        // ヤンクも取り消しも「変更」ではない（vim と同じ）。
+        if effects
+            .iter()
+            .any(|e| matches!(e, Effect::Edit { .. } | Effect::Insert { .. }))
+        {
+            self.dot.commit();
+        }
+    }
+
+    fn key_inner(&mut self, key: KeyInput, buf: &dyn Buffer) -> KeyOutcome {
         // F1 はどのモードでも使い方を出す。初見で詰まらないことを最優先する。
         if key == KeyInput::Function(1) {
             return KeyOutcome::Handled(self.execute(Command::ToggleHelp, buf));
@@ -532,6 +631,17 @@ impl Engine {
                         'd' => {
                             self.pending.clear();
                             Some(Command::Mux(MuxRequest::Definition))
+                        }
+                        // `gr` 使われている場所、`gn` 名前を変える。
+                        // **読む側の隣に置く。** `gd` で見に行った先で
+                        // そのまま直せるのが、字を覚え直さずに済む形。
+                        'r' => {
+                            self.pending.clear();
+                            Some(Command::Mux(MuxRequest::References))
+                        }
+                        'n' => {
+                            self.pending.clear();
+                            Some(Command::Mux(MuxRequest::Rename))
                         }
                         'g' => {
                             let n = self.pending.count.take();
@@ -646,6 +756,8 @@ impl Engine {
                 None
             }
             'u' => Some(Command::History(HistoryAction::Undo)),
+            // `K` は vim と同じ字。**読む側の入口**なので 1 打で置く。
+            'K' if self.mode == Mode::Normal => Some(Command::Mux(MuxRequest::Hover)),
             'p' => Some(Command::Paste { before: false }),
             'P' => Some(Command::Paste { before: true }),
             'm' => {
@@ -667,6 +779,11 @@ impl Engine {
             '@' => {
                 self.pending.awaiting = Some(Awaiting::MacroReplay);
                 None
+            }
+            '.' => {
+                let count = self.take_count();
+                self.pending.clear();
+                Some(Command::DotRepeat { count })
             }
 
             'y' | 'd' | 'c' | '!' | '>' | '=' => {
@@ -976,6 +1093,9 @@ impl Engine {
                     )];
                 }
             }
+            "lsp.hover" => Command::Mux(MuxRequest::Hover),
+            "lsp.references" => Command::Mux(MuxRequest::References),
+            "lsp.rename" => Command::Mux(MuxRequest::Rename),
             "macro.replay" => {
                 if self.macros.last().is_some() {
                     Command::MacroReplay('@')
@@ -990,6 +1110,9 @@ impl Engine {
                     )];
                 }
             }
+            "edit.repeat" => Command::DotRepeat {
+                count: self.take_count(),
+            },
             "register.list" => {
                 let mut out: Vec<String> = self
                     .registers
@@ -1063,6 +1186,18 @@ impl Engine {
             }
             // テキストオブジェクトはカーソル位置から範囲を作る。
             _ if id.starts_with("textobj.") => {
+                // 木で指せるものは木に訊く。**端末では `None` が返る**ので、
+                // `textobj.path` は端末ならパス、ファイルなら関数になる。
+                let tree = match id {
+                    "textobj.path" => Some(tsg_buffer::TreeObject::Function),
+                    "textobj.type" => Some(tsg_buffer::TreeObject::Type),
+                    "textobj.argument" => Some(tsg_buffer::TreeObject::Argument),
+                    _ => None,
+                }
+                .and_then(|o| buf.syntax_object(self.cursor, o, true));
+                if let Some(range) = tree {
+                    return self.execute(Command::Select { range }, buf);
+                }
                 let obj = match id {
                     "textobj.command" => TextObject::CommandBlock,
                     "textobj.output" => TextObject::OutputBlock,
@@ -1133,8 +1268,15 @@ impl Engine {
     /// マウスのダブルクリックも同じ `textobj` を通って同じ `Command` を出す
     /// （`mouse-parity.md` §2.1 の単一コマンドバス）。
     fn text_object(&mut self, c: char, around: bool, buf: &dyn Buffer) -> Option<Command> {
-        let obj = TextObject::from_key(c, buf.kind());
-        let range = obj.and_then(|o| textobj::range_of(buf, self.cursor, o, around));
+        // 木で指せるものを先に見る。**端末では必ず `None` が返る**ので
+        // （`Buffer::syntax_object` の既定）、`af` は端末ならパス、
+        // ファイルなら関数、と同じ字のまま行き先が変わる。
+        let range = tsg_buffer::TreeObject::of_char(c)
+            .and_then(|o| buf.syntax_object(self.cursor, o, around))
+            .or_else(|| {
+                TextObject::from_key(c, buf.kind())
+                    .and_then(|o| textobj::range_of(buf, self.cursor, o, around))
+            });
 
         let Some(range) = range else {
             // 何も取れなかったことは黙って捨てない（`modal-spec.md` の方針）
@@ -1406,6 +1548,26 @@ impl Engine {
                     ];
                 };
                 self.macros.last = Some(name);
+                vec![Effect::MacroReplay(keys)]
+            }
+            Command::DotRepeat { count } => {
+                self.pending.clear();
+                if self.dot.is_empty() {
+                    return vec![
+                        Effect::Message(
+                            t!("繰り返せる変更がありません", "no change to repeat").into(),
+                        ),
+                        Effect::Bell,
+                    ];
+                }
+                // `3.` は「数を付け直す」ではなく**3 回流す**。
+                // 付け直すには覚えた打鍵を読み解く必要があり、
+                // 読み解いた瞬間に「打鍵で覚える」という形が崩れる。
+                let count = count.max(1);
+                let mut keys = Vec::with_capacity(self.dot.keys().len() * count);
+                for _ in 0..count {
+                    keys.extend_from_slice(self.dot.keys());
+                }
                 vec![Effect::MacroReplay(keys)]
             }
             Command::SetTheme(name) => vec![Effect::SetTheme(name.to_string())],
@@ -2354,24 +2516,39 @@ mod tests {
             }
         }
 
+        /// 拡張子を持たせる。**文法は拡張子で決まる**ので、名前が無いと
+        /// 木は作られない（`tree.rs`）。
+        fn rust(text: &str) -> Self {
+            let mut h = Self::new(text);
+            h.file.path = Some(std::path::PathBuf::from("t.rs"));
+            h
+        }
+
         fn keys(&mut self, s: &str) -> Vec<Effect> {
             let mut out = Vec::new();
             for c in s.chars() {
-                let fx = match self.engine.key(KeyInput::Char(c), &self.file) {
-                    KeyOutcome::Handled(fx) => fx,
-                    // 入力モードの素通しはホストがファイルへ入れる。
-                    // ここで捨てると「打った文字が入らない」テストになる。
-                    KeyOutcome::PassThrough => {
+                out.extend(self.key_in(KeyInput::Char(c)));
+            }
+            out
+        }
+
+        /// Esc など文字でないキーも打てる形。`keys` はこれを回すだけ。
+        fn key_in(&mut self, key: KeyInput) -> Vec<Effect> {
+            let fx = match self.engine.key(key, &self.file) {
+                KeyOutcome::Handled(fx) => fx,
+                // 入力モードの素通しはホストがファイルへ入れる。
+                // ここで捨てると「打った文字が入らない」テストになる。
+                KeyOutcome::PassThrough => {
+                    if let KeyInput::Char(c) = key {
                         let at = self.engine.cursor();
                         let end = self.file.insert(at, &c.to_string());
                         self.engine.set_cursor(end, &self.file);
-                        Vec::new()
                     }
-                };
-                self.apply(&fx);
-                out.extend(fx);
-            }
-            out
+                    Vec::new()
+                }
+            };
+            self.apply(&fx);
+            fx
         }
 
         /// ホストの代わり。編集を実際にバッファへ当て、カーソルを追わせる。
@@ -2380,7 +2557,10 @@ mod tests {
                 match fx {
                     Effect::Edit { range, text } => {
                         self.file.replace(range, text);
-                        let at = self.file.clamp(range.start);
+                        // カーソルはエンジンが既に置いている。ここで通常モードの
+                        // `clamp` を掛け直すと行末の空白を飛ばして引き戻され、
+                        // 続く入力が 1 つ手前へ入る（ホストは掛け直していない）。
+                        let at = self.engine.cursor();
                         self.engine.set_cursor(at, &self.file);
                     }
                     Effect::Insert { at, text, cursor } => {
@@ -2389,13 +2569,12 @@ mod tests {
                         self.engine.set_cursor(cursor.unwrap_or(end), &self.file);
                     }
                     Effect::MacroReplay(keys) => {
+                        // `key_in` を通す。ここで素通しを捨てると、
+                        // 入力モードで打った字が再生で消えるテストになる
+                        // （ホストの `replay_passthrough` は捨てない）。
                         let keys = keys.clone();
                         for k in keys {
-                            let fx = match self.engine.key(k, &self.file) {
-                                KeyOutcome::Handled(fx) => fx,
-                                KeyOutcome::PassThrough => Vec::new(),
-                            };
-                            self.apply(&fx);
+                            self.key_in(k);
                         }
                     }
                     _ => {}
@@ -2816,6 +2995,173 @@ def
         );
         assert_eq!(h.engine.cursor(), Pos::new(0, 13));
     }
+
+    // ---- 木のテキストオブジェクト -----------------------------------------
+
+    #[test]
+    fn af_takes_the_whole_function_in_a_file() {
+        let mut h = FileHarness::rust("fn a() {\n    let x = 1;\n}\nfn b() {}\n");
+        h.engine.set_cursor(Pos::new(1, 4), &h.file);
+        h.keys("daf");
+        assert_eq!(
+            h.file.text(),
+            "\nfn b() {}\n",
+            "関数ひとつを丸ごと取れていない"
+        );
+    }
+
+    #[test]
+    fn if_takes_only_the_body() {
+        let mut h = FileHarness::rust("fn a() {\n    let x = 1;\n}\n");
+        h.engine.set_cursor(Pos::new(1, 4), &h.file);
+        h.keys("dif");
+        assert_eq!(h.file.text(), "fn a() \n", "本体だけを取れていない");
+    }
+
+    #[test]
+    fn at_takes_the_type_around_the_cursor() {
+        let mut h = FileHarness::rust("struct S {\n    a: u8,\n}\nfn b() {}\n");
+        h.engine.set_cursor(Pos::new(1, 4), &h.file);
+        h.keys("dat");
+        assert_eq!(h.file.text(), "\nfn b() {}\n");
+    }
+
+    #[test]
+    fn aa_takes_the_argument_with_its_comma() {
+        // カンマが残ると、消したのに構文が壊れる。
+        let mut h = FileHarness::rust("fn a(x: u8, y: u8) {}\n");
+        h.engine.set_cursor(Pos::new(0, 5), &h.file);
+        h.keys("daa");
+        assert_eq!(h.file.text(), "fn a( y: u8) {}\n");
+    }
+
+    #[test]
+    fn ia_leaves_the_comma_alone() {
+        let mut h = FileHarness::rust("fn a(x: u8, y: u8) {}\n");
+        h.engine.set_cursor(Pos::new(0, 5), &h.file);
+        h.keys("dia");
+        assert_eq!(h.file.text(), "fn a(, y: u8) {}\n");
+    }
+
+    /// **端末に関数は無い。** 同じ `af` が、そこではパスを指す。
+    #[test]
+    fn af_is_still_a_path_in_a_terminal() {
+        let mut h = Harness::new("see src/main.rs:42 for details\r\n");
+        h.keys("wyaf");
+        assert_eq!(h.yanked(), "src/main.rs:42");
+    }
+
+    /// 文法を持たない拡張子では、木は黙って諦める（落ちない）。
+    #[test]
+    fn a_file_without_a_grammar_just_finds_nothing() {
+        let mut h = FileHarness::new("fn a() {}\n");
+        h.engine.set_cursor(Pos::new(0, 3), &h.file);
+        let fx = h.keys("daf");
+        assert_eq!(h.file.text(), "fn a() {}\n", "文法が無いのに何か消している");
+        assert!(fx.iter().all(|f| !matches!(f, Effect::Edit { .. })));
+    }
+
+    // ---- `.`（直前の変更） -------------------------------------------------
+
+    #[test]
+    fn dot_repeats_an_operator_and_its_motion() {
+        let mut h = FileHarness::new("alpha bravo charlie delta\n");
+        h.keys("dw");
+        assert_eq!(h.file.text(), "bravo charlie delta\n");
+        h.keys(".");
+        assert_eq!(
+            h.file.text(),
+            "charlie delta\n",
+            "`.` が直前の dw を繰り返していない"
+        );
+    }
+
+    #[test]
+    fn dot_takes_a_count_and_runs_that_many_times() {
+        let mut h = FileHarness::new("alpha bravo charlie delta echo\n");
+        h.keys("dw");
+        h.keys("3.");
+        assert_eq!(
+            h.file.text(),
+            "echo\n",
+            "`3.` が 3 回流れていない"
+        );
+    }
+
+    #[test]
+    fn dot_repeats_a_change_including_what_was_typed() {
+        let mut h = FileHarness::new("alpha bravo\n");
+        h.keys("ciw");
+        assert_eq!(h.engine.mode(), Mode::Insert);
+        h.keys("XY");
+        h.key_in(KeyInput::Esc);
+        assert_eq!(h.file.text(), "XY bravo\n");
+
+        // 次の語へ動いて `.`。打った字ごと繰り返される。
+        h.keys("w");
+        h.keys(".");
+        assert_eq!(
+            h.file.text(),
+            "XY XY\n",
+            "`.` が入力モードで打った字を含めて繰り返していない"
+        );
+    }
+
+    #[test]
+    fn a_yank_is_not_a_change() {
+        // vim と同じ。`y` の後の `.` は、その前の変更を繰り返す。
+        let mut h = FileHarness::new("alpha bravo charlie\n");
+        h.keys("dw");
+        h.keys("yw");
+        h.keys(".");
+        assert_eq!(
+            h.file.text(),
+            "charlie\n",
+            "ヤンクが直前の変更を上書きしている"
+        );
+    }
+
+    #[test]
+    fn undo_is_not_a_change_either() {
+        let mut h = FileHarness::new("alpha bravo charlie\n");
+        h.keys("dw");
+        h.keys("u");
+        h.keys(".");
+        // この harness は取り消しを巻き戻さない（ホストの仕事）。見たいのは
+        // 「`.` が u ではなく dw を繰り返すか」だけ。u を覚えていたら
+        // `.` は何も変えないので、文は "bravo charlie" のまま残る。
+        assert_eq!(
+            h.file.text(),
+            "charlie\n",
+            "取り消しが直前の変更を上書きしている"
+        );
+    }
+
+    #[test]
+    fn dot_says_so_when_there_is_nothing_to_repeat() {
+        let mut h = FileHarness::new("alpha\n");
+        let fx = h.keys(".");
+        assert!(
+            fx.iter()
+                .any(|f| matches!(f, Effect::Message(m) if m.contains("ありません"))),
+            "黙って何も起きないのが一番困る"
+        );
+        assert_eq!(h.file.text(), "alpha\n");
+    }
+
+    #[test]
+    fn a_visual_change_is_repeatable_too() {
+        let mut h = FileHarness::new("alpha bravo charlie\n");
+        h.keys("viwd");
+        assert_eq!(h.file.text(), " bravo charlie\n");
+        h.keys("w");
+        h.keys(".");
+        assert_eq!(
+            h.file.text(),
+            "  charlie\n",
+            "選択してからの変更が繰り返せていない"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2869,6 +3215,7 @@ mod space_keys {
         }
         assert!(clashes.is_empty(), "同じキーを名乗っている: {clashes:?}");
     }
+
 }
 
 /// その行の頭の空白（そのまま次の行へ引き継ぐ）。
