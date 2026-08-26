@@ -53,8 +53,9 @@ irm https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.ps1 | iex
 
 It downloads the latest `tsg.exe` into `%USERPROFILE%in` and runs `tsg --install`
 for you. The executable links the CRT statically, so it runs on machines **without
-the VC++ redistributable**. Use `-Dir 'D:	ools'` for a different location, or
-`-NoRegister` to skip the shortcuts.
+the VC++ redistributable**. Set `$env:TSUMUGI_DIR = 'D:	ools'` beforehand for a
+different location, `$env:TSUMUGI_NO_REGISTER = '1'` to skip the shortcuts, or
+`$env:TSUMUGI_VERSION = 'v0.1.0'` to pin a version.
 
 Building it yourself:
 

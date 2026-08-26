@@ -50,7 +50,8 @@ irm https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.ps1 | iex
 
 最新版の `tsg.exe` を `%USERPROFILE%in` へ置いて `tsg --install` まで済ませます。
 exe は CRT を静的リンクしてあるので、**VC++ 再頒布可能パッケージが無い PC でも動きます**。
-置き場所を変えるなら `-Dir 'D:	ools'`、登録が不要なら `-NoRegister`。
+置き場所を変えるなら先に `$env:TSUMUGI_DIR = 'D:	ools'`、登録が要らなければ
+`$env:TSUMUGI_NO_REGISTER = '1'`、版を選ぶなら `$env:TSUMUGI_VERSION = 'v0.1.0'`。
 
 自分でビルドするなら:
 

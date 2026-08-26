@@ -8,17 +8,23 @@
 # 管理者権限は要らない（触るのは HKCU とユーザー PATH だけ）。
 # 消すときは `tsg --uninstall` のあとフォルダごと削除。
 
-param(
-    # 置き場所。**%LOCALAPPDATA% を既定にしない** — アプリ制御の効いた PC では
-    # そこから起動できないことがある（実際に踏んだ）。
-    [string]$Dir = "$env:USERPROFILE\bin",
-    # 特定の版を入れる（既定は最新）。例: -Version v0.1.0
-    [string]$Version = "latest",
-    # 登録（スタートメニュー等）はしない。exe を置くだけ。
-    [switch]$NoRegister
-)
+# 指定は環境変数で受ける。
+#
+#   $env:TSUMUGI_DIR = 'D:\tools'   # 置き場所（既定: %USERPROFILE%\bin）
+#   $env:TSUMUGI_VERSION = 'v0.1.0' # 版（既定: latest）
+#   $env:TSUMUGI_NO_REGISTER = '1'  # 登録せず exe を置くだけ
+#
+# **`param()` を使わない。** `irm ... | iex` は param ブロックを解釈できず、
+# 「代入式が無効です」で落ちる（実際に踏んだ）。引数を受けるより、
+# 案内した 1 行がそのまま通ることを優先する。
 
 $ErrorActionPreference = 'Stop'
+
+# 置き場所の既定に **%LOCALAPPDATA% を使わない** — アプリ制御の効いた PC では
+# そこから起動できないことがある（実際に踏んだ）。
+$Dir = if ($env:TSUMUGI_DIR) { $env:TSUMUGI_DIR } else { "$env:USERPROFILE\bin" }
+$Version = if ($env:TSUMUGI_VERSION) { $env:TSUMUGI_VERSION } else { 'latest' }
+$NoRegister = [bool]$env:TSUMUGI_NO_REGISTER
 
 if ($env:OS -ne 'Windows_NT') {
     throw 'いまのところ Windows 専用です（macOS / Linux は自分でビルドしてください）'
@@ -70,8 +76,8 @@ if (-not $ok) {
 起動できませんでした: $exe
 アプリ制御（AppLocker / WDAC）やウイルス対策に弾かれている可能性があります。
 別の場所へ入れるなら:
-  `$s = irm https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.ps1
-  & ([scriptblock]::Create(`$s)) -Dir 'D:\tools'
+  `$env:TSUMUGI_DIR = 'D:\tools'
+  irm https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.ps1 | iex
 "@
 }
 Write-Host "起動を確認しました（$($release.tag_name)）"
