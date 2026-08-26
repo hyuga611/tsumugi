@@ -243,6 +243,7 @@ you. Convenience commands are wrappers; `--rpc` is the escape hatch.
 
 ```
 tsg --list                     # running sessions
+tsg --kill                     # stop the server (works across protocol versions)
 tsg --capture                  # what a pane shows, as text
 tsg --open README.md --render  # open a file in the running window
 tsg --search "TODO"            # search from outside; n / N still work

@@ -1017,15 +1017,17 @@ impl State {
                 command,
                 restore,
             } => {
+                // 版が違うのは、たいてい**古いサーバが残っている**とき。
+                // exe を焼き直しても、走っているプロセスの中身は入れ替わらない。
+                // 何が起きたかだけ言って放り出すと、読んだ人は PID を探しに行く
+                // ことになるので、直し方まで書く（`--kill` は版に依らず効く）。
                 if version != PROTOCOL_VERSION {
-                    self.send_to(
-                        id,
-                        &ServerMsg::Error {
-                            message: format!(
-                                "プロトコルの版が違います（サーバ {PROTOCOL_VERSION} / クライアント {version}）"
-                            ),
-                        },
+                    let message = format!(
+                        "プロトコルの版が違います（サーバ {PROTOCOL_VERSION} / クライアント {version}）。\
+                         古いサーバが残っています。`tsg -s {} --kill` で止めてから開き直してください",
+                        self.session
                     );
+                    self.send_to(id, &ServerMsg::Error { message });
                     return Ok(true);
                 }
                 // 0 は「大きさを持ち込まない」。窓を持たないクライアントが

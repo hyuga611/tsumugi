@@ -44,6 +44,7 @@ tsg -s work --send 'ls -la\n'   # いまのペインへ入力を流す（\n で�
 tsg -s work --capture           # いまのペインに見えているものをテキストで
 tsg -s work --capture 3         # ペイン 3 を指定して
 tsg -s work --tap               # 出てくる生バイトを覗く（Ctrl-C で終了）
+tsg -s work --kill              # そのサーバを止める（版が違っても効く）
 ```
 
 `--capture` が返すのは、サーバが再アタッチ用に持っている画面そのもの。

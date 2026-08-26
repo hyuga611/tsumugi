@@ -45,6 +45,8 @@ pub enum Mode {
     LayoutApply(String),
     /// 走っているセッションの一覧。
     List,
+    /// 走っているサーバを止める（**版が違っても効く**）。
+    Kill,
     /// ペインに見えているものをテキストで取る。
     Capture(Option<u32>),
     /// 生のプロトコルを標準入出力で話す。
@@ -199,6 +201,8 @@ tsumugi (tsg) — ターミナルの画面を vim で編集できるドキュメ
                            それを置いて、シェルの設定ファイルに 1 行足す
       --diagnose           フォントと CJK 幅の実測値を出して終了
       --list               走っているセッションを並べる
+      --kill               走っているサーバを止める（版が違っても効く。
+                           古いサーバが残って開けないときはこれ）
       --send <文字列>      走っているセッションへ入力を流す（\\n で改行）
       --capture [ペイン]   ペインに見えているものをテキストで取る（既定: いまのペイン）
       --tap                そのセッションの生バイトを覗く
@@ -425,6 +429,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Cli {
                 cli.mode = Mode::Subscribe(names);
             }
             "--list" => cli.mode = Mode::List,
+            "--kill" => cli.mode = Mode::Kill,
             "--rpc" => cli.mode = Mode::Rpc,
             "--spawn" => cli.spawn = true,
             "-d" | "--domain" => cli.domain = next_value(&args, &mut i),

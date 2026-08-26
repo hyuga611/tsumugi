@@ -6980,6 +6980,7 @@ fn main() -> Result<()> {
         }
         cli::Mode::WorktreeRemove(path) => return rpc::worktree_remove(&cli.session, path),
         cli::Mode::List => return rpc::list(),
+        cli::Mode::Kill => return rpc::kill(&cli.session),
         cli::Mode::Capture(pane) => return rpc::capture(&cli.session, *pane),
         cli::Mode::Rpc => return rpc::raw(&cli.session, cli.spawn),
         cli::Mode::Install => return report_install(install::install()),

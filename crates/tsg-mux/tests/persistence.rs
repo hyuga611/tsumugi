@@ -348,6 +348,60 @@ fn protocol_version_mismatch_is_reported() {
     handle.shutdown();
 }
 
+/// **版が違っても止められる。**
+///
+/// 版が違うと Attach は弾かれる。便利な口はどれも Attach を通るので、
+/// ここが塞がっていると「繋がるが何も言えない」サーバが残り、プロトコルを
+/// 上げるたびに PID を手で探して殺すことになる（実際に踏んだ）。
+/// `Shutdown` だけは Attach の前に受ける ── これが `tsg --kill` の土台。
+#[test]
+fn a_mismatched_client_can_still_shut_the_server_down() {
+    let session = unique_session("version-kill");
+    let handle = server::spawn(&session).expect("サーバを起こせない");
+
+    let mut client = Client::connect(&session).expect("接続できない");
+    client
+        .send(&ClientMsg::Attach {
+            version: PROTOCOL_VERSION + 99,
+            cols: 80,
+            rows: 24,
+            cwd: None,
+            command: None,
+            restore: false,
+        })
+        .expect("Attach を送れない");
+    client
+        .wait_for(TIMEOUT, |m| matches!(m, ServerMsg::Error { .. }))
+        .expect("版違いが握り潰されている");
+
+    // 止める前に、返事はすることを確かめる。**これが無いと空振りの試験**
+    // （Pong が来ない別の理由でも通ってしまう）。
+    client.send(&ClientMsg::Ping).expect("Ping を送れない");
+    assert!(
+        client
+            .wait_for(TIMEOUT, |m| matches!(m, ServerMsg::Pong))
+            .is_some(),
+        "版が違うと Ping にも答えない ── 前提が崩れている"
+    );
+
+    // Attach していないまま、止まれと言う。
+    client
+        .send(&ClientMsg::Shutdown)
+        .expect("Shutdown を送れない");
+
+    // 止まったことは「もう返事をしない」で見る。**繋ぎ直しでは見られない**
+    // （繋いだ口は同じプロセスの中では離れない ── 下の `shutting_down_releases_the_socket` を参照）。
+    client.send(&ClientMsg::Ping).expect("Ping を送れない");
+    assert!(
+        client
+            .wait_for(Duration::from_secs(2), |m| matches!(m, ServerMsg::Pong))
+            .is_none(),
+        "Shutdown を受けたのにまだ動いている"
+    );
+
+    handle.shutdown();
+}
+
 /// **止めたら口を手放す。** 同じ名前ですぐ開き直せる。
 ///
 /// `accept` は繋がるまで返らないので、止める合図だけでは受け側が起きない。
