@@ -1,4 +1,4 @@
-# tsumugi を入れる。手作業はここで終わり。
+﻿# tsumugi を入れる。手作業はここで終わり。
 #
 #   irm https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.ps1 | iex
 #
@@ -54,16 +54,27 @@ Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $exe -UseBasicParsin
 Write-Host "置きました: $exe ($($release.tag_name))"
 
 # 置いただけで動くかを確かめる。アプリ制御や AV で弾かれるのはここで分かる。
+#
+# **出力ではなく終了コードで見る。** tsumugi は GUI アプリ（windows subsystem）
+# なので、`& $exe --version` では文字を受け取れない。受け取れないことを
+# 「動かなかった」と読むと、動いているのに失敗扱いになる。
+$ok = $false
 try {
-    $ver = & $exe --version
+    $p = Start-Process -FilePath $exe -ArgumentList '--version' -PassThru -Wait -WindowStyle Hidden
+    $ok = ($p.ExitCode -eq 0)
 } catch {
+    $ok = $false
+}
+if (-not $ok) {
     throw @"
 起動できませんでした: $exe
 アプリ制御（AppLocker / WDAC）やウイルス対策に弾かれている可能性があります。
-別の場所を試すなら: irm .../install.ps1 | iex; install -Dir 'D:\tools'
+別の場所へ入れるなら:
+  `$s = irm https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.ps1
+  & ([scriptblock]::Create(`$s)) -Dir 'D:\tools'
 "@
 }
-Write-Host "動きました: $ver"
+Write-Host "起動を確認しました（$($release.tag_name)）"
 
 if (-not $NoRegister) {
     & $exe --install
