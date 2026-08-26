@@ -92,6 +92,8 @@ impl Rasterizer {
 pub struct FontStack {
     /// `[0]` が基準（セル寸法の決定元）。以降がフォールバック。
     pub fonts: Vec<FontData>,
+    /// `fonts[1..]` の段。伸縮のし直し（`rescale`）で要る。
+    tiers: Vec<Tier>,
     pub px: f32,
     /// セル幅（基準フォントの送り幅）
     pub cell_w: f32,
@@ -104,43 +106,81 @@ pub struct FontStack {
 /// 合字を持つか調べるときに試す並び。プログラマが実際に見る形にしてある。
 pub const LIGATURE_PROBES: [&str; 6] = ["->", "=>", "!=", "==", "<=", "|>"];
 
+/// フォールバックの段。**測り方が違う**ので段ごとに分ける。
+///
+/// CJK と絵文字は 2 セルに収める。記号は 1 セル。同じ物差しで測ると、
+/// `❯` や `⏵` のような 1 セルの記号が 2 セルぶんに伸びて隣を潰す。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tier {
+    Cjk,
+    Symbol,
+    Emoji,
+}
+
 /// プラットフォーム別の候補。前から順に、実在した最初のものを採る。
-fn candidates() -> (
-    &'static [&'static str],
-    &'static [&'static str],
-    &'static [&'static str],
-) {
+///
+/// **記号の段を CJK より先に置く。** `✳` `✔` `⚠` は日本語フォントにも
+/// 入っているが、そちらの字形は全角（2 セル）で設計されている。端末は
+/// これらを 1 セルと数えるので、日本語フォントから採ると隣の字に重なる。
+fn candidates() -> [(Tier, &'static [&'static str]); 3] {
     #[cfg(target_os = "windows")]
     {
-        (
-            // Cascadia Code を Mono より先に置く。寸法は同じで、
-            // **合字を持つかどうかだけ**が違う。合字を切りたい人は設定で切れる。
-            &["Cascadia Code", "Cascadia Mono", "Consolas", "Courier New"],
-            &[
-                "MS Gothic",
-                "Yu Gothic UI",
-                "Meiryo",
-                "Yu Gothic",
-                "MS Mincho",
-            ],
-            &["Segoe UI Emoji"],
-        )
+        [
+            // `❯` `⏵` `⠋`（点字のスピナー）`▛` `▝` は Consolas にも
+            // MS Gothic にも無い。Segoe UI Symbol が持っている。
+            (Tier::Symbol, &["Segoe UI Symbol", "Segoe UI"]),
+            (
+                Tier::Cjk,
+                &[
+                    "MS Gothic",
+                    "Yu Gothic UI",
+                    "Meiryo",
+                    "Yu Gothic",
+                    "MS Mincho",
+                ],
+            ),
+            (Tier::Emoji, &["Segoe UI Emoji"]),
+        ]
     }
     #[cfg(target_os = "macos")]
     {
-        (
-            &["SF Mono", "Menlo", "Monaco"],
-            &["Hiragino Sans", "Hiragino Kaku Gothic ProN"],
-            &["Apple Color Emoji"],
-        )
+        [
+            (Tier::Symbol, &["Apple Symbols", "Menlo"]),
+            (Tier::Cjk, &["Hiragino Sans", "Hiragino Kaku Gothic ProN"]),
+            (Tier::Emoji, &["Apple Color Emoji"]),
+        ]
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        (
-            &["DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono"],
-            &["Noto Sans CJK JP", "Noto Sans JP", "Source Han Sans JP"],
-            &["Noto Color Emoji"],
-        )
+        [
+            (
+                Tier::Symbol,
+                &["Noto Sans Symbols 2", "Noto Sans Symbols", "DejaVu Sans"],
+            ),
+            (
+                Tier::Cjk,
+                &["Noto Sans CJK JP", "Noto Sans JP", "Source Han Sans JP"],
+            ),
+            (Tier::Emoji, &["Noto Color Emoji"]),
+        ]
+    }
+}
+
+/// 等幅の基準フォントの候補。
+fn mono_candidates() -> &'static [&'static str] {
+    #[cfg(target_os = "windows")]
+    {
+        // Cascadia Code を Mono より先に置く。寸法は同じで、
+        // **合字を持つかどうかだけ**が違う。合字を切りたい人は設定で切れる。
+        &["Cascadia Code", "Cascadia Mono", "Consolas", "Courier New"]
+    }
+    #[cfg(target_os = "macos")]
+    {
+        &["SF Mono", "Menlo", "Monaco"]
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        &["DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono"]
     }
 }
 
@@ -188,21 +228,28 @@ fn load(db: &Database, id: fontdb::ID) -> Option<FontData> {
 /// そのフォントが持つ「全角であるべき文字」を1つ測り、`2 * cell_w` になるよう伸縮する。
 /// 実測（M0-b）: Consolas 9.9px に対し MS Gothic の全角が 18.0px で、
 /// そのままでは 1.80 セルにしかならなかった。
-fn fit_scale(font: &FontData, px: f32, cell_w: f32) -> f32 {
-    const PROBES: [char; 6] = ['日', '一', 'あ', '漢', '\u{1F415}', '\u{263A}'];
+fn fit_scale(font: &FontData, px: f32, cell_w: f32, tier: Tier) -> f32 {
+    // 全角の段は 2 セル、記号の段は 1 セルに合わせる。
+    let (probes, cells): (&[char], f32) = match tier {
+        Tier::Cjk | Tier::Emoji => (&['日', '一', 'あ', '漢', '\u{1F415}', '\u{263A}'], 2.0),
+        Tier::Symbol => (
+            &['\u{276f}', '\u{2192}', '\u{25cf}', '\u{2714}', '\u{25b6}'],
+            1.0,
+        ),
+    };
     let Some(fr) = font.font_ref() else {
         return 1.0;
     };
     let charmap = fr.charmap();
     let gm = fr.glyph_metrics(&[]).scale(px);
-    for c in PROBES {
-        let gid = charmap.map(c);
+    for c in probes {
+        let gid = charmap.map(*c);
         if gid == 0 {
             continue;
         }
         let advance = gm.advance_width(gid);
         if advance > 0.1 {
-            return (cell_w * 2.0) / advance;
+            return (cell_w * cells) / advance;
         }
     }
     1.0
@@ -222,11 +269,11 @@ impl FontStack {
         let mut db = Database::new();
         db.load_system_fonts();
 
-        let (mono, cjk, emoji) = candidates();
+        let tiers = candidates();
 
         let asked: Vec<&str> = want.into_iter().collect();
         let mono_id = find(&db, &asked)
-            .or_else(|| find(&db, mono))
+            .or_else(|| find(&db, mono_candidates()))
             .or_else(|| {
                 db.query(&Query {
                     families: &[Family::Monospace],
@@ -236,11 +283,13 @@ impl FontStack {
             .context("等幅フォントが1つも見つかりません")?;
 
         let mut fonts = vec![load(&db, mono_id).context("基準フォントの読み込みに失敗")?];
-        for group in [cjk, emoji] {
+        let mut tier_of = Vec::new();
+        for (tier, group) in tiers {
             if let Some(id) = find(&db, group)
                 && let Some(f) = load(&db, id)
             {
                 fonts.push(f);
+                tier_of.push(tier);
             }
         }
 
@@ -258,12 +307,13 @@ impl FontStack {
         };
 
         // 基準フォント以外を、セル格子に合うよう伸縮させる。
-        for font in &mut fonts[1..] {
-            font.scale = fit_scale(font, px, cell_w);
+        for (font, tier) in fonts[1..].iter_mut().zip(tier_of.iter().copied()) {
+            font.scale = fit_scale(font, px, cell_w, tier);
         }
 
         Ok(Self {
             fonts,
+            tiers: tier_of,
             px,
             cell_w,
             cell_h,
@@ -297,7 +347,8 @@ impl FontStack {
         self.cell_h = cell_h;
         self.ascent = ascent;
         for i in 1..self.fonts.len() {
-            self.fonts[i].scale = fit_scale(&self.fonts[i], px, cell_w);
+            let tier = self.tiers.get(i - 1).copied().unwrap_or(Tier::Cjk);
+            self.fonts[i].scale = fit_scale(&self.fonts[i], px, cell_w, tier);
         }
         true
     }
@@ -318,6 +369,18 @@ impl FontStack {
             }
         }
         None
+    }
+
+    /// そのグリフの送り幅（px）。伸縮を反映した実際の値。
+    ///
+    /// セル幅に収まるかを見るために要る（収まらなければ描く側が縮める）。
+    pub fn advance_of_gid(&self, font_idx: usize, gid: GlyphId) -> Option<f32> {
+        let fr = self.fonts.get(font_idx)?.font_ref()?;
+        Some(
+            fr.glyph_metrics(&[])
+                .scale(self.px_for(font_idx))
+                .advance_width(gid),
+        )
     }
 
     /// その文字の送り幅（px）。伸縮を反映した実際の値を返す。CJK 幅の検証に使う。

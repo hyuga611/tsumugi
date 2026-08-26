@@ -339,7 +339,9 @@ pub struct Renderer {
 
     atlas: Atlas,
     images: ImageStore,
-    cache: HashMap<(usize, u16), Option<AtlasEntry>>,
+    cache: HashMap<(usize, u16, u16), Option<AtlasEntry>>,
+    /// East Asian Ambiguous を 2 セルで数えるか（端末側の設定と揃える）。
+    amb_wide: bool,
     /// 合字を組むか。切ると `glyph_run` は 1 セル 1 文字で積む。
     ligatures: bool,
     /// シェーピングの結果。**同じ行を毎フレーム組み直さない**ための控え。
@@ -570,6 +572,7 @@ impl Renderer {
             cache: HashMap::new(),
             ligatures: true,
             shaped: HashMap::new(),
+            amb_wide: false,
             premultiplied,
             instances: Vec::new(),
             fonts,
@@ -669,17 +672,68 @@ impl Renderer {
         if c == ' ' {
             return;
         }
+        // 面で出来ている字は自分で塗る。字体に任せると隙間が空くか、
+        // そもそも持っていない（`block_shape` の説明）。
+        if let Some(b) = block_shape(c) {
+            let color = [color[0], color[1], color[2], color[3] * b.alpha];
+            for r in b.rects {
+                self.rect(col + r[0], row + r[1], r[2], r[3], color);
+            }
+            return;
+        }
         let Some((font_idx, gid)) = self.fonts.glyph_for(c) else {
             return;
         };
-        self.place_glyph(col, row, font_idx, gid, color);
+        self.place_glyph(col, row, font_idx, gid, color, self.cells_of(c));
+    }
+
+    /// その文字に割り当てられるセル数。**格子が正**なので、フォールバックの
+    /// 字形はこの幅へ押し込める。
+    fn cells_of(&self, c: char) -> f32 {
+        let w = if self.amb_wide {
+            unicode_advance_cjk(c)
+        } else {
+            unicode_advance(c)
+        };
+        w.max(1) as f32
+    }
+
+    /// East Asian Ambiguous を 2 セルとして数えるか（`[font] ambiguous_width`）。
+    ///
+    /// **セル数の数え方は端末側と揃える。** ずれると、フォールバックの字形を
+    /// 押し込める幅を間違える。
+    pub fn set_ambiguous_wide(&mut self, wide: bool) {
+        if self.amb_wide != wide {
+            self.amb_wide = wide;
+            self.cache.clear();
+        }
     }
 
     /// アトラスに載せて 1 つ積む。文字ではなく**グリフ ID** で指す
     /// （合字は元の文字に対応するグリフを持たない）。
-    fn place_glyph(&mut self, col: f32, row: f32, font_idx: usize, gid: u16, color: [f32; 4]) {
-        let entry = *self.cache.entry((font_idx, gid)).or_insert_with(|| {
-            let px = self.fonts.px_for(font_idx);
+    fn place_glyph(
+        &mut self,
+        col: f32,
+        row: f32,
+        font_idx: usize,
+        gid: u16,
+        color: [f32; 4],
+        cells: f32,
+    ) {
+        // **はみ出す字形は縮めて入れる。** フォールバックのフォントは
+        // 等幅ではないので、1 セルの記号（`✳` `✔` `⚠`）が 1.5〜2 セルの
+        // 幅で来る。そのまま置くと隣の字に重なって読めなくなる。
+        // 基準フォントは触らない（セル寸法の出どころで、合字は
+        // 何セルぶんかの幅を持つのが正しい）。
+        let squeeze = if font_idx == 0 {
+            1.0
+        } else {
+            let allot = cells * self.fonts.cell_w;
+            squeeze_to_fit(self.fonts.advance_of_gid(font_idx, gid), allot)
+        };
+        let key = (font_idx, gid, (squeeze * 64.0) as u16);
+        let entry = *self.cache.entry(key).or_insert_with(|| {
+            let px = self.fonts.px_for(font_idx) * squeeze;
             let g = self.raster.render(&self.fonts.fonts[font_idx], px, gid)?;
             let (uv0, uv1) = self.atlas.alloc(&self.queue, &g)?;
             Some(AtlasEntry {
@@ -749,7 +803,7 @@ impl Renderer {
             return;
         };
         for (gid, cell) in placed {
-            self.place_glyph(col + f32::from(cell), row, 0, gid, color);
+            self.place_glyph(col + f32::from(cell), row, 0, gid, color, 1.0);
         }
     }
 
@@ -865,6 +919,84 @@ impl Renderer {
     }
 }
 
+/// 罫線ではなく**面**で出来ている字（U+2580..U+259F）。
+///
+/// **字体から採らない。** 半分・八分の一・四分割は幾何そのものなので、
+/// セルに対する割合で塗れば必ず隙間なく敷き詰まる。字体に任せると
+/// ①持っていない字がある（Consolas と MS Gothic には四分割が無く、
+/// Claude Code のロゴが崩れた）②持っていても字体の em に合わせて
+/// 設計されているのでセル格子とずれる、の 2 つを同時に踏む。
+struct BlockShape {
+    /// セルを 1x1 としたときの (x, y, 幅, 高さ)。
+    rects: &'static [[f32; 4]],
+    /// 網かけ（░▒▓）の濃さ。面の字は 1.0。
+    alpha: f32,
+}
+
+const T: f32 = 1.0 / 8.0;
+
+fn block_shape(c: char) -> Option<BlockShape> {
+    let solid = |rects| Some(BlockShape { rects, alpha: 1.0 });
+    match c {
+        // 上半分・下から八分の n
+        '\u{2580}' => solid(&[[0.0, 0.0, 1.0, 0.5]]),
+        '\u{2581}' => solid(&[[0.0, 7.0 * T, 1.0, T]]),
+        '\u{2582}' => solid(&[[0.0, 6.0 * T, 1.0, 2.0 * T]]),
+        '\u{2583}' => solid(&[[0.0, 5.0 * T, 1.0, 3.0 * T]]),
+        '\u{2584}' => solid(&[[0.0, 0.5, 1.0, 0.5]]),
+        '\u{2585}' => solid(&[[0.0, 3.0 * T, 1.0, 5.0 * T]]),
+        '\u{2586}' => solid(&[[0.0, 2.0 * T, 1.0, 6.0 * T]]),
+        '\u{2587}' => solid(&[[0.0, T, 1.0, 7.0 * T]]),
+        '\u{2588}' => solid(&[[0.0, 0.0, 1.0, 1.0]]),
+        // 左から八分の n
+        '\u{2589}' => solid(&[[0.0, 0.0, 7.0 * T, 1.0]]),
+        '\u{258a}' => solid(&[[0.0, 0.0, 6.0 * T, 1.0]]),
+        '\u{258b}' => solid(&[[0.0, 0.0, 5.0 * T, 1.0]]),
+        '\u{258c}' => solid(&[[0.0, 0.0, 0.5, 1.0]]),
+        '\u{258d}' => solid(&[[0.0, 0.0, 3.0 * T, 1.0]]),
+        '\u{258e}' => solid(&[[0.0, 0.0, 2.0 * T, 1.0]]),
+        '\u{258f}' => solid(&[[0.0, 0.0, T, 1.0]]),
+        '\u{2590}' => solid(&[[0.5, 0.0, 0.5, 1.0]]),
+        // 網かけ。点の模様ではなく濃さで出す（拡大しても模様が壊れない）。
+        '\u{2591}' => Some(BlockShape {
+            rects: &[[0.0, 0.0, 1.0, 1.0]],
+            alpha: 0.25,
+        }),
+        '\u{2592}' => Some(BlockShape {
+            rects: &[[0.0, 0.0, 1.0, 1.0]],
+            alpha: 0.5,
+        }),
+        '\u{2593}' => Some(BlockShape {
+            rects: &[[0.0, 0.0, 1.0, 1.0]],
+            alpha: 0.75,
+        }),
+        '\u{2594}' => solid(&[[0.0, 0.0, 1.0, T]]),
+        '\u{2595}' => solid(&[[7.0 * T, 0.0, T, 1.0]]),
+        // 四分割
+        '\u{2596}' => solid(&[[0.0, 0.5, 0.5, 0.5]]),
+        '\u{2597}' => solid(&[[0.5, 0.5, 0.5, 0.5]]),
+        '\u{2598}' => solid(&[[0.0, 0.0, 0.5, 0.5]]),
+        '\u{2599}' => solid(&[[0.0, 0.0, 0.5, 0.5], [0.0, 0.5, 1.0, 0.5]]),
+        '\u{259a}' => solid(&[[0.0, 0.0, 0.5, 0.5], [0.5, 0.5, 0.5, 0.5]]),
+        '\u{259b}' => solid(&[[0.0, 0.0, 1.0, 0.5], [0.0, 0.5, 0.5, 0.5]]),
+        '\u{259c}' => solid(&[[0.0, 0.0, 1.0, 0.5], [0.5, 0.5, 0.5, 0.5]]),
+        '\u{259d}' => solid(&[[0.5, 0.0, 0.5, 0.5]]),
+        '\u{259e}' => solid(&[[0.5, 0.0, 0.5, 0.5], [0.0, 0.5, 0.5, 0.5]]),
+        '\u{259f}' => solid(&[[0.5, 0.0, 0.5, 0.5], [0.0, 0.5, 1.0, 0.5]]),
+        _ => None,
+    }
+}
+
+/// 割り当てた幅に収めるための倍率。**入っているものは触らない。**
+///
+/// 2% の遊びは、丸めで 1 画素はみ出しただけの字まで縮めないため。
+fn squeeze_to_fit(advance: Option<f32>, allot: f32) -> f32 {
+    match advance {
+        Some(a) if a > allot * 1.02 && a > 0.0 => allot / a,
+        _ => 1.0,
+    }
+}
+
 fn unicode_advance(c: char) -> usize {
     use unicode_width::UnicodeWidthChar;
     c.width().unwrap_or(0)
@@ -969,3 +1101,83 @@ fn fs(in: VsOut) -> @location(0) vec4<f32> {
   return vec4<f32>(in.color.rgb, in.color.a * a);
 }
 "#;
+
+#[cfg(test)]
+mod block_tests {
+    use super::*;
+
+    /// **面の字は隙間なく敷き詰まる。**
+    ///
+    /// 四分割（`▛▜▝▖`）は Consolas にも MS Gothic にも無く、Claude Code の
+    /// ロゴが崩れていた。字体に任せず自分で塗るので、ここでは「割合が
+    /// 正しいか」だけを見る。
+    #[test]
+    fn the_quadrants_and_halves_cover_exactly_their_share_of_the_cell() {
+        let area = |c: char| -> f32 {
+            block_shape(c)
+                .map(|b| b.rects.iter().map(|r| r[2] * r[3]).sum::<f32>() * b.alpha)
+                .unwrap_or(0.0)
+        };
+        assert_eq!(area('\u{2588}'), 1.0, "█ が全面でない");
+        assert_eq!(area('\u{2580}'), 0.5, "▀ が半分でない");
+        assert_eq!(area('\u{2584}'), 0.5, "▄ が半分でない");
+        assert_eq!(area('\u{258c}'), 0.5, "▌ が半分でない");
+        assert_eq!(area('\u{2590}'), 0.5, "▐ が半分でない");
+        assert_eq!(area('\u{259d}'), 0.25, "▝ が四分の一でない");
+        assert_eq!(area('\u{2596}'), 0.25, "▖ が四分の一でない");
+        assert_eq!(area('\u{259b}'), 0.75, "▛ が四分の三でない");
+        assert_eq!(area('\u{259f}'), 0.75, "▟ が四分の三でない");
+        assert_eq!(area('\u{259e}'), 0.5, "▞ が半分でない");
+        assert_eq!(area('\u{2592}'), 0.5, "▒ の濃さが半分でない");
+
+        // 上下・左右の対は、重ならずにセルを埋める。
+        for (a, b) in [
+            ('\u{2580}', '\u{2584}'),
+            ('\u{258c}', '\u{2590}'),
+            ('\u{259b}', '\u{2597}'),
+            ('\u{259e}', '\u{259a}'),
+        ] {
+            assert_eq!(area(a) + area(b), 1.0, "{a}{b} で埋まらない");
+        }
+
+        // 面ではない字（罫線・普通の字）はここへ来ない。
+        assert!(block_shape('\u{2500}').is_none(), "罫線を塗ってしまう");
+        assert!(block_shape('a').is_none());
+        assert!(block_shape('日').is_none());
+    }
+
+    /// **はみ出す字形は縮めて入れる。**
+    ///
+    /// フォールバックのフォントは等幅ではないので、1 セルの記号
+    /// （`✳` `✔` `⚠`）が 1.5〜2 セルの幅で来る。そのまま置くと隣に重なる。
+    #[test]
+    fn a_glyph_wider_than_its_cell_is_squeezed_into_it() {
+        assert_eq!(
+            squeeze_to_fit(Some(20.0), 10.0),
+            0.5,
+            "2 セルの字が縮まない"
+        );
+        assert_eq!(squeeze_to_fit(Some(15.0), 10.0), 10.0 / 15.0);
+        assert_eq!(squeeze_to_fit(Some(9.9), 10.0), 1.0, "入っている字を縮めた");
+        assert_eq!(squeeze_to_fit(Some(10.1), 10.0), 1.0, "丸め誤差で縮めた");
+        assert_eq!(squeeze_to_fit(None, 10.0), 1.0);
+        assert_eq!(squeeze_to_fit(Some(0.0), 10.0), 1.0, "幅 0 で 0 除算");
+    }
+
+    /// セルの外へはみ出す形を作らない。はみ出すと隣の字が欠ける。
+    #[test]
+    fn no_block_shape_reaches_outside_its_cell() {
+        for code in 0x2580u32..=0x259f {
+            let c = char::from_u32(code).unwrap();
+            let Some(b) = block_shape(c) else { continue };
+            for r in b.rects {
+                assert!(r[0] >= 0.0 && r[1] >= 0.0, "U+{code:04X} が左上へはみ出す");
+                assert!(
+                    r[0] + r[2] <= 1.0 + f32::EPSILON && r[1] + r[3] <= 1.0 + f32::EPSILON,
+                    "U+{code:04X} が右下へはみ出す"
+                );
+                assert!(r[2] > 0.0 && r[3] > 0.0, "U+{code:04X} に潰れた面がある");
+            }
+        }
+    }
+}

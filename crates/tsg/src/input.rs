@@ -27,6 +27,13 @@ pub fn encode(
 
     let bytes = match key {
         Key::Named(named) => match named {
+            // Shift＋Enter は**改行**。送るのは `ESC CR`。
+            //
+            // 端末には「送信」と「改行」を区別する仕組みが元から無いので、
+            // 受け取る側（Claude Code・Codex・多くの REPL）が決めた合図に
+            // 合わせる。iTerm2 や VS Code が `/terminal-setup` で入れるのも
+            // この 2 バイトで、素の `CR` を送ると 1 行で送信されてしまう。
+            NamedKey::Enter if mods.shift_key() => vec![0x1b, b'\r'],
             NamedKey::Enter => vec![b'\r'],
             NamedKey::Backspace => vec![0x7f],
             NamedKey::Tab => vec![b'\t'],
@@ -77,4 +84,27 @@ pub fn encode(
         return Some(v);
     }
     Some(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **Enter は送信、Shift＋Enter は改行。**
+    ///
+    /// 端末には元々この区別が無いので、受け取る側（Claude Code・Codex・
+    /// 多くの REPL）が決めた `ESC CR` に合わせる。素の `CR` を送ると、
+    /// 改行のつもりが 1 行で送信されてしまう。
+    #[test]
+    fn shift_enter_sends_a_newline_not_a_submit() {
+        let enter = Key::Named(NamedKey::Enter);
+        assert_eq!(
+            encode(&enter, None, ModifiersState::empty(), false),
+            Some(vec![b'\r'])
+        );
+        assert_eq!(
+            encode(&enter, None, ModifiersState::SHIFT, false),
+            Some(vec![0x1b, b'\r'])
+        );
+    }
 }

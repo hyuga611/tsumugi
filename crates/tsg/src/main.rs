@@ -5842,6 +5842,13 @@ fn help_lines() -> Vec<HelpLine> {
             ),
         ),
         (
+            "Shift＋Enter",
+            t!(
+                "改行（Enter は送信）。AI エージェントの入力欄で効きます",
+                "newline (plain Enter submits) — for AI agent prompts"
+            ),
+        ),
+        (
             t!(
                 "（読むモードの間は日本語入力が自動で切れます）",
                 "(IME turns off while reading)"
@@ -6058,6 +6065,9 @@ impl ApplicationHandler for App {
                 // `Color::Default` の解決先とクリア色を別々に持たせない
                 r.background = background_of(&self.theme, self.cfg.opacity);
                 r.set_ligatures(self.cfg.ligatures);
+                // 桁の数え方を端末側と揃える。ずれると、フォールバックの
+                // 字形を押し込める幅を間違える。
+                r.set_ambiguous_wide(self.cfg.ambiguous_width == tsg_term::AmbiguousWidth::Wide);
                 r
             }
             Err(e) => {
