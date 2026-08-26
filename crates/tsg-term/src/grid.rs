@@ -231,6 +231,16 @@ pub struct Grid {
     scroll_top: usize,
     scroll_bot: usize,
 
+    /// 右端まで書いたあと、「次の 1 字が来たら折り返す」保留状態。
+    ///
+    /// **桁を 1 つ増やして表してはいけない。** 桁で表すと、そのあとに来る
+    /// 改行・カーソル移動でも保留が残り、次に字が出たときに**もう 1 行
+    /// 送ってしまう**。実機では「プロンプトが 1 行おきに出る」「打った字が
+    /// 1 行下の別の桁に出る」という形で出た（ConPTY は絶対座標で位置を
+    /// 指してくるので、ずれた瞬間に前の出力へ字がかぶる）。
+    /// 保留はここで持ち、カーソルが動いたら消す。
+    wrap_pending: bool,
+
     /// スクロールバックに残す最大行数。
     max_scrollback: usize,
     /// 上限を超えて先頭から捨てた行数。**まだ印へ反映していない分。**
@@ -253,6 +263,7 @@ impl Grid {
             reflow_map: None,
             scroll_top: 0,
             scroll_bot: rows.saturating_sub(1),
+            wrap_pending: false,
             max_scrollback: DEFAULT_MAX_SCROLLBACK,
             dropped: 0,
         }
@@ -410,9 +421,12 @@ impl Grid {
             return;
         }
 
-        if self.cursor.col + w > self.cols {
+        // 右端で保留していた折り返しは、**次の字が来たいま**起きる。
+        // 全角が最後の 1 桁に入らないときも、ここで折り返す。
+        if self.wrap_pending || self.cursor.col + w > self.cols {
             self.screen[self.cursor.row].wrapped = true;
             self.cursor.col = 0;
+            self.wrap_pending = false;
             self.line_feed();
         }
 
@@ -430,7 +444,13 @@ impl Grid {
             sp.link = link;
             self.screen[row].cells[col + 1] = sp;
         }
-        self.cursor.col += w;
+        // 右端まで書いたら、桁は右端に留めて折り返しを保留する。
+        if col + w >= self.cols {
+            self.cursor.col = self.cols.saturating_sub(1);
+            self.wrap_pending = true;
+        } else {
+            self.cursor.col = col + w;
+        }
     }
 
     fn attach_to_previous(&mut self, c: char) {
@@ -450,10 +470,12 @@ impl Grid {
     // ---- カーソル移動 ----------------------------------------------------
 
     pub fn carriage_return(&mut self) {
+        self.wrap_pending = false;
         self.cursor.col = 0;
     }
 
     pub fn line_feed(&mut self) {
+        self.wrap_pending = false;
         if self.cursor.row == self.scroll_bot {
             self.scroll_up(1);
         } else if self.cursor.row + 1 < self.rows {
@@ -463,6 +485,7 @@ impl Grid {
 
     /// 逆改行（ESC M）
     pub fn reverse_index(&mut self) {
+        self.wrap_pending = false;
         if self.cursor.row == self.scroll_top {
             self.scroll_down(1);
         } else {
@@ -471,40 +494,49 @@ impl Grid {
     }
 
     pub fn backspace(&mut self) {
+        self.wrap_pending = false;
         self.cursor.col = self.cursor.col.saturating_sub(1);
     }
 
     pub fn tab(&mut self) {
+        self.wrap_pending = false;
         let next = ((self.cursor.col / 8) + 1) * 8;
         self.cursor.col = next.min(self.cols.saturating_sub(1));
     }
 
     pub fn move_to(&mut self, row: usize, col: usize) {
+        self.wrap_pending = false;
         self.cursor.row = row.min(self.rows.saturating_sub(1));
         self.cursor.col = col.min(self.cols.saturating_sub(1));
     }
 
     pub fn move_to_row(&mut self, row: usize) {
+        self.wrap_pending = false;
         self.cursor.row = row.min(self.rows.saturating_sub(1));
     }
 
     pub fn move_to_col(&mut self, col: usize) {
+        self.wrap_pending = false;
         self.cursor.col = col.min(self.cols.saturating_sub(1));
     }
 
     pub fn move_up(&mut self, n: usize) {
+        self.wrap_pending = false;
         self.cursor.row = self.cursor.row.saturating_sub(n);
     }
 
     pub fn move_down(&mut self, n: usize) {
+        self.wrap_pending = false;
         self.cursor.row = (self.cursor.row + n).min(self.rows.saturating_sub(1));
     }
 
     pub fn move_left(&mut self, n: usize) {
+        self.wrap_pending = false;
         self.cursor.col = self.cursor.col.saturating_sub(n);
     }
 
     pub fn move_right(&mut self, n: usize) {
+        self.wrap_pending = false;
         self.cursor.col = (self.cursor.col + n).min(self.cols.saturating_sub(1));
     }
 
@@ -513,12 +545,14 @@ impl Grid {
     }
 
     pub fn restore_cursor(&mut self) {
+        self.wrap_pending = false;
         self.cursor = self.saved_cursor;
         self.cursor.row = self.cursor.row.min(self.rows.saturating_sub(1));
         self.cursor.col = self.cursor.col.min(self.cols.saturating_sub(1));
     }
 
     pub fn set_scroll_region(&mut self, top: usize, bottom: usize) {
+        self.wrap_pending = false;
         if top < bottom && bottom < self.rows {
             self.scroll_top = top;
             self.scroll_bot = bottom;
@@ -532,6 +566,7 @@ impl Grid {
     // ---- スクロール ------------------------------------------------------
 
     pub fn scroll_up(&mut self, n: usize) {
+        self.wrap_pending = false;
         for _ in 0..n {
             let line = self.screen.remove(self.scroll_top);
             // スクロール領域が画面全体で、かつ primary のときだけ履歴に残す。
@@ -546,6 +581,7 @@ impl Grid {
     }
 
     pub fn scroll_down(&mut self, n: usize) {
+        self.wrap_pending = false;
         for _ in 0..n {
             self.screen.remove(self.scroll_bot);
             self.screen.insert(self.scroll_top, self.blank_line());
@@ -553,6 +589,7 @@ impl Grid {
     }
 
     pub fn insert_lines(&mut self, n: usize) {
+        self.wrap_pending = false;
         if self.cursor.row < self.scroll_top || self.cursor.row > self.scroll_bot {
             return;
         }
@@ -563,6 +600,7 @@ impl Grid {
     }
 
     pub fn delete_lines(&mut self, n: usize) {
+        self.wrap_pending = false;
         if self.cursor.row < self.scroll_top || self.cursor.row > self.scroll_bot {
             return;
         }
@@ -576,6 +614,7 @@ impl Grid {
 
     /// ED: 0 = カーソルから末尾, 1 = 先頭からカーソル, 2 = 画面全体, 3 = スクロールバック
     pub fn erase_display(&mut self, mode: u16) {
+        self.wrap_pending = false;
         let (row, col) = (self.cursor.row, self.cursor.col);
         let (blank, blank_line) = (self.blank_cell(), self.blank_line());
         match mode {
@@ -611,6 +650,7 @@ impl Grid {
 
     /// EL: 0 = カーソルから行末, 1 = 行頭からカーソル, 2 = 行全体
     pub fn erase_line(&mut self, mode: u16) {
+        self.wrap_pending = false;
         let (row, col) = (self.cursor.row, self.cursor.col);
         let range = match mode {
             0 => col..self.cols,
@@ -625,6 +665,7 @@ impl Grid {
     }
 
     pub fn erase_chars(&mut self, n: usize) {
+        self.wrap_pending = false;
         let (row, col) = (self.cursor.row, self.cursor.col);
         let blank = self.blank_cell();
         for c in col..(col + n).min(self.cols) {
@@ -633,6 +674,7 @@ impl Grid {
     }
 
     pub fn delete_chars(&mut self, n: usize) {
+        self.wrap_pending = false;
         let (row, col) = (self.cursor.row, self.cursor.col);
         let blank = self.blank_cell();
         for _ in 0..n {
@@ -644,6 +686,7 @@ impl Grid {
     }
 
     pub fn insert_chars(&mut self, n: usize) {
+        self.wrap_pending = false;
         let (row, col) = (self.cursor.row, self.cursor.col);
         let blank = self.blank_cell();
         for _ in 0..n {
@@ -657,6 +700,7 @@ impl Grid {
     // ---- alt screen ------------------------------------------------------
 
     pub fn enter_alt(&mut self) {
+        self.wrap_pending = false;
         if self.is_alt() {
             // すでに alt。**画面は消す。** 2 度目の `?1049h` で何もしないと、
             // 前のアプリが描いたものが下に残ったまま次のアプリが描き始める。
@@ -683,6 +727,7 @@ impl Grid {
     }
 
     pub fn leave_alt(&mut self) {
+        self.wrap_pending = false;
         let Some(saved) = self.saved_primary.take() else {
             return;
         };
@@ -752,6 +797,7 @@ impl Grid {
     /// スクロール領域・いまの SGR。画面まで消すと、素へ戻したいだけの
     /// アプリが履歴を吹き飛ばす。
     pub fn soft_reset(&mut self) {
+        self.wrap_pending = false;
         self.cursor = Cursor::default();
         self.saved_cursor = Cursor::default();
         self.scroll_top = 0;
@@ -875,6 +921,7 @@ impl Grid {
     }
 
     pub fn resize(&mut self, cols: usize, rows: usize) {
+        self.wrap_pending = false;
         let (cols, rows) = (cols.max(1), rows.max(1));
         if cols == self.cols && rows == self.rows {
             return;
@@ -1086,11 +1133,49 @@ mod tests {
         let mut g = Grid::new(3, 3, AmbiguousWidth::Wide);
         g.print('a');
         g.print('日'); // 残り2セルだが col=1 なので 1+2 = 3 <= 3 で収まる
-        assert_eq!(g.cursor.col, 3);
+        // 右端まで書いたら、桁は右端に留めて折り返しは**保留**する
+        // （桁を 1 つ増やして表すと、改行を挟んだあとに余計な 1 行が入る）。
+        assert_eq!(g.cursor.col, 2);
         g.print('本'); // 収まらない -> 折り返す
         assert_eq!(g.cursor.row, 1);
         assert_eq!(g.cursor.col, 2);
         assert!(g.document_line(0).unwrap().wrapped);
+    }
+
+    /// **右端の折り返しは「次の 1 字」まで保留する。**
+    ///
+    /// 保留を桁で表す（`col == cols`）と、そのあとに来る改行やカーソル移動でも
+    /// 保留が残り、次に字が出たときにもう 1 行送ってしまう。実機では
+    /// 「プロンプトが 1 行おきに出る」「打った字が 1 行下の別の桁に出る」
+    /// という形で出た。ConPTY は絶対座標で位置を指してくるので、
+    /// ずれた瞬間に前の出力の上へ字がかぶる。
+    #[test]
+    fn a_line_feed_after_the_right_edge_does_not_eat_an_extra_row() {
+        let mut g = Grid::new(10, 4, AmbiguousWidth::Narrow);
+        for c in "0123456789".chars() {
+            g.print(c);
+        }
+        assert_eq!((g.cursor.row, g.cursor.col), (0, 9), "桁が右端を越えている");
+
+        g.line_feed();
+        assert_eq!((g.cursor.row, g.cursor.col), (1, 9), "改行で桁まで動いた");
+
+        g.print('x');
+        assert_eq!(
+            (g.cursor.row, g.cursor.col),
+            (1, 9),
+            "保留が残っていて 1 行余計に送った"
+        );
+        assert_eq!(g.document_line(1).unwrap().text().trim_end(), "         x");
+
+        // 折り返しそのものは今までどおり効く。
+        let mut g = Grid::new(10, 4, AmbiguousWidth::Narrow);
+        for c in "0123456789A".chars() {
+            g.print(c);
+        }
+        assert_eq!((g.cursor.row, g.cursor.col), (1, 1));
+        assert_eq!(g.document_line(1).unwrap().text().trim_end(), "A");
+        assert!(g.document_line(0).unwrap().wrapped, "折り返しの印が無い");
     }
 
     #[test]
