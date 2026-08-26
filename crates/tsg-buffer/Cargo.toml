@@ -7,4 +7,4 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-tsg-term = { version = "0.0.0", path = "../tsg-term" }
+tsg-term = { version = "0.1.0", path = "../tsg-term" }
