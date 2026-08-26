@@ -14,7 +14,7 @@ jobs:
   windows:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
 
       # CRT を静的リンクする。**入れた PC に VC++ 再頒布可能パッケージが
@@ -29,7 +29,7 @@ jobs:
           .\target\release\tsg.exe --version
           .\target\release\tsg.exe --diagnose
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: target/release/tsg.exe
           draft: false
