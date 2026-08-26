@@ -984,7 +984,7 @@ pub const REGISTRY: &[CommandSpec] = &[
         id: "edit.paste",
         title: "貼り付け（端末ではプロンプトへ入る）",
         title_en: "Paste (in a terminal it goes to the prompt)",
-        keys: &["p", "P"],
+        keys: &["p", "P", "Ctrl+Shift+V", "Shift+Insert"],
         mouse: MousePath::Menu("編集"),
         in_palette: true,
     },

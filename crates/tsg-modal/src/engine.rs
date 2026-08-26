@@ -70,6 +70,12 @@ pub enum Effect {
         lines: usize,
     },
     SetClipboard(String),
+    /// システムのクリップボードから貼る。**中身を知っているのはホストだけ。**
+    ///
+    /// エンジンは OS を触らない（`arch.md` の不変条件 2）ので、
+    /// 「レジスタが空だった」という判断だけをここで下して、実際に読むのは
+    /// ホストに任せる。
+    PasteClipboard,
     /// `!` — 範囲のテキストを現在のプロンプトへ挿入する。実行はしない。
     SendToPrompt(String),
     /// `>` — 範囲を外部コマンドへ通す。コマンド名を訊くのはホストの仕事。
@@ -1501,6 +1507,17 @@ impl Engine {
         let name = self.pending.register.take().unwrap_or('"');
         self.pending.clear();
         let Some(value) = self.registers.get(name).cloned() else {
+            // 端末で名前を指していないなら、**外で拾ったものを貼りたい**と
+            // みなす。ブラウザからコピーして tsumugi で `p`、が通らないほうが
+            // 驚く（こちらの `y` はシステムのクリップボードにも書いているので、
+            // 名無しのレジスタとクリップボードは普段そろっている）。
+            //
+            // ファイルを開いているときは今までどおり「空です」と言う。
+            // 貼り先が違う（ホストの貼り付けは PTY へ流す道）ので、
+            // ここで混ぜると編集中のファイルではなくシェルへ入ってしまう。
+            if name == '"' && buf.kind() != BufferKind::File {
+                return vec![Effect::PasteClipboard];
+            }
             return vec![
                 Effect::Message(t!(
                     format!("レジスタ {name} は空です"),
@@ -2603,6 +2620,29 @@ mod tests {
                 .any(|f| matches!(f, Effect::Message(m) if m.contains("空")))
         );
         assert_eq!(h.file.text(), "abc\n", "空なのに何か入った");
+    }
+
+    /// **端末では、名無しのレジスタが空なら外のクリップボードから貼る。**
+    ///
+    /// ブラウザでコピーしてきた文をシェルへ貼れないほうが驚く。
+    /// ファイルを開いているときは今までどおり「空です」と言う（貼り先が違う）。
+    #[test]
+    fn pasting_in_a_terminal_falls_back_to_the_system_clipboard() {
+        let mut h = Harness::new("hello");
+        let fx = h.keys("p");
+        assert!(
+            fx.iter().any(|f| matches!(f, Effect::PasteClipboard)),
+            "端末でクリップボードへ落ちていない: {fx:?}"
+        );
+
+        // 名前を指したときは、そのレジスタの話のまま。
+        let mut h = Harness::new("hello");
+        let fx = h.keys("\"ap");
+        assert!(
+            fx.iter()
+                .any(|f| matches!(f, Effect::Message(m) if m.contains("空"))),
+            "名前付きレジスタでクリップボードへ落ちている: {fx:?}"
+        );
     }
 
     #[test]

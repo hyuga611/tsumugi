@@ -58,6 +58,34 @@ const DOMAIN_MARK: &str = "@";
 
 /// クリア色。**`Color::Default` の解決先とクリア色を別々に持たせない。**
 /// 2 か所に書くと、テーマを変えたときに片方だけ古い色のまま残る。
+/// 貼り付ける文字列を、端末へ流せる形に均す。
+///
+/// - **改行は `CR` に揃える。** 端末の Enter は `CR`。`LF` のまま流すと、
+///   受け取り方によっては行が下がるだけで確定しない。
+/// - **制御文字は落とす**（タブと改行だけ残す）。貼り付けはあくまで「字」で、
+///   エスケープを流し込む口ではない。囲い（`ESC[201~`）を中身に混ぜて
+///   抜け出す手も、ここで一緒に塞がる。
+fn sanitize_paste(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                // `CRLF` は 1 つの改行として数える。
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.push('\r');
+            }
+            '\n' => out.push('\r'),
+            '\t' => out.push('\t'),
+            c if (c as u32) < 0x20 || c == '\u{7f}' => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn background_of(th: &Theme, opacity: f32) -> [f32; 4] {
     [th.bg[0], th.bg[1], th.bg[2], opacity]
 }
@@ -326,6 +354,7 @@ impl App {
                     };
                 }
                 Effect::SetClipboard(text) => self.set_clipboard(&text),
+                Effect::PasteClipboard => self.paste_clipboard(),
                 Effect::Edit { range, text } => {
                     self.apply_edit(&range, &text);
                     self.push_file();
@@ -358,11 +387,11 @@ impl App {
                 },
                 Effect::SendToPrompt(text) => {
                     // `!` は挿入するだけ。Enter は押さない（modal-spec.md §7）。
-                    self.snap_to_live_tail();
-                    self.send_input(text.as_bytes());
+                    let n = text.chars().count();
+                    self.paste_text(&text);
                     self.status_msg = t!(
-                        format!("プロンプトへ {} 文字を送りました", text.chars().count()),
-                        format!("sent {} characters to the prompt", text.chars().count())
+                        format!("プロンプトへ {n} 文字を送りました"),
+                        format!("sent {n} characters to the prompt")
                     );
                 }
                 Effect::Scrolled(delta) => self.scroll_by(delta),
@@ -1014,6 +1043,71 @@ impl App {
             format!("unsaved: {names} (:w to save, or repeat to discard)")
         );
         self.quit_warned = true;
+    }
+
+    /// システムのクリップボードから貼る（中クリック・Ctrl＋Shift＋V・`p`）。
+    fn paste_clipboard(&mut self) {
+        if self.clipboard.is_none() {
+            self.clipboard = arboard::Clipboard::new().ok();
+        }
+        let text = self
+            .clipboard
+            .as_mut()
+            .and_then(|c| c.get_text().ok())
+            .unwrap_or_default();
+        if text.trim().is_empty() {
+            self.status_msg = t!("貼り付けるものがありません", "nothing to paste").into();
+            return;
+        }
+        let lines = self.paste_text(&text);
+        // **何が起きたかを言う。** 相手が囲いを求めていなければ、改行はその場で
+        // 実行になる。貼ったあとに「なぜ走ったのか」を考えさせない。
+        self.status_msg = if lines > 1 && !self.bracketed_paste() {
+            t!(
+                format!(
+                    "{lines} 行を貼りました（相手が囲いを求めていないので、行ごとに実行されます）"
+                ),
+                format!(
+                    "pasted {lines} lines (the program did not ask for bracketed paste, so each line runs)"
+                )
+            )
+        } else {
+            t!(
+                format!("{} 文字を貼りました", text.chars().count()),
+                format!("pasted {} characters", text.chars().count())
+            )
+        };
+    }
+
+    /// いま見ているペインの相手が、貼り付けを囲って受け取りたいか（`?2004h`）。
+    fn bracketed_paste(&self) -> bool {
+        self.active_view()
+            .is_some_and(|v| v.term.state.modes.bracketed_paste)
+    }
+
+    /// 文字列をペインへ「貼る」。返すのは行数。
+    ///
+    /// **打鍵と貼り付けは別もの。** 相手が `?2004h` で求めていれば
+    /// `ESC[200~ … ESC[201~` で囲む。囲うと、相手は「人が打った」ではなく
+    /// 「貼られた」と分かるので、改行をその場で実行せずに済む
+    /// （Claude Code や vim がこれを見ている）。
+    fn paste_text(&mut self, text: &str) -> usize {
+        let body = sanitize_paste(text);
+        if body.is_empty() {
+            return 0;
+        }
+        let lines = body.matches('\r').count() + 1;
+        self.snap_to_live_tail();
+        if self.bracketed_paste() {
+            let mut out = Vec::with_capacity(body.len() + 12);
+            out.extend_from_slice(b"\x1b[200~");
+            out.extend_from_slice(body.as_bytes());
+            out.extend_from_slice(b"\x1b[201~");
+            self.send_input(&out);
+        } else {
+            self.send_input(body.as_bytes());
+        }
+        lines
     }
 
     fn set_clipboard(&mut self, text: &str) {
@@ -2536,20 +2630,8 @@ impl App {
 
         match button {
             MouseButton::Left => self.on_left_press(id, pos, event_loop),
-            MouseButton::Middle => {
-                // Unix の慣習。Windows でもクリップボードから貼るのが素直。
-                let text = self
-                    .clipboard
-                    .as_mut()
-                    .and_then(|c| c.get_text().ok())
-                    .unwrap_or_default();
-                if text.is_empty() {
-                    self.status_msg = t!("貼り付けるものがありません", "nothing to paste").into();
-                } else {
-                    self.snap_to_live_tail();
-                    self.send_input(text.as_bytes());
-                }
-            }
+            // Unix の慣習。Windows でもクリップボードから貼るのが素直。
+            MouseButton::Middle => self.paste_clipboard(),
             MouseButton::Right => {
                 // ここではまだメニューを出さない。離した場所で
                 // 「メニュー」か「プロンプトへ落とす」かが決まる（§4.4）。
@@ -3193,6 +3275,22 @@ impl App {
 
         if self.palette.open || self.menu.open || self.picker.open {
             self.overlay_key(&key, text.as_deref(), event_loop);
+            return;
+        }
+
+        // 貼り付けは**モードに関係なく**効く。打鍵の途中でも、読んでいる
+        // 最中でも、押したら貼れることを期待されるキーなので、
+        // モーダルの語彙へ入れずにここで受ける。
+        // （`Ctrl+V` は端末としては素通し。相手のシェルの行編集が使う。）
+        let paste_key = (self.mods.control_key()
+            && self.mods.shift_key()
+            && matches!(&key, Key::Character(s) if s.eq_ignore_ascii_case("v")))
+            || (self.mods.shift_key() && matches!(&key, Key::Named(NamedKey::Insert)));
+        if paste_key {
+            self.paste_clipboard();
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
             return;
         }
 
@@ -5813,6 +5911,13 @@ fn help_lines() -> Vec<HelpLine> {
             ),
         ),
         (
+            t!("中クリック", "middle-click"),
+            t!(
+                "クリップボードから貼り付け（Ctrl＋Shift＋V でも）",
+                "paste from the clipboard (Ctrl+Shift+V too)"
+            ),
+        ),
+        (
             t!("Ctrl＋クリック", "Ctrl+click"),
             t!("パスを開く / URL をブラウザで開く", "open a path or URL"),
         ),
@@ -7048,6 +7153,33 @@ diff --git a/f.txt b/f.txt
                 .any(|f| matches!(f, Effect::Message(m) if m.contains("ここからは実行できません")));
             assert!(!unhandled, "{} がパレットから実行できない", spec.id);
         }
+    }
+
+    /// **貼り付けは字だけ流す。**
+    ///
+    /// 改行は端末の Enter（`CR`）に揃える。制御文字は落とす — 貼り付けは
+    /// エスケープを流し込む口ではないし、囲い（`ESC[201~`）を中身に混ぜて
+    /// 抜け出す手もここで塞がる。
+    #[test]
+    fn a_paste_carries_text_and_nothing_else() {
+        assert_eq!(
+            sanitize_paste("a\r\nb\nc"),
+            "a\rb\rc",
+            "改行が CR に揃っていない"
+        );
+        assert_eq!(sanitize_paste("keep\tthe tab"), "keep\tthe tab");
+        assert_eq!(
+            sanitize_paste("before\x1b[201~after"),
+            "before[201~after",
+            "囲いの終わりを中身から流し込める"
+        );
+        assert_eq!(sanitize_paste("bell\x07 and \x00nul"), "bell and nul");
+        assert_eq!(sanitize_paste(""), "");
+        // 貼り付けの行数は CR の数 + 1（`paste_text` が数えるのと同じ）。
+        assert_eq!(
+            sanitize_paste("one\ntwo\nthree").matches('\r').count() + 1,
+            3
+        );
     }
 
     #[test]
