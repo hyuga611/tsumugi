@@ -813,7 +813,24 @@ impl State {
                         tab.active_pane = tab.layout.panes().first().copied().unwrap_or(0);
                     }
                 }
-                self.tabs.retain(|t| !t.layout.panes().is_empty());
+                // **在るペインで数える。** `Layout::remove` は葉（1 枚だけの
+                // タブ）を消せないので、`panes()` は閉じたはずの id を返し続ける。
+                // それを信じると、中身の無いタブが残って閉じられなくなる。
+                let alive: Vec<u32> = self.panes.keys().copied().collect();
+                let was = self
+                    .tabs
+                    .iter()
+                    .position(|t| t.id == self.active_tab)
+                    .unwrap_or(0);
+                self.tabs
+                    .retain(|t| t.layout.panes().iter().any(|p| alive.contains(p)));
+                // 見ていたタブが消えたら、その場所の隣へ移る。**居場所を残さない。**
+                // 消えた id を指したままだと、タブ帯でどれも選ばれていない状態になり、
+                // `Space n` / `Space p` の起点も無くなる。
+                if !self.tabs.iter().any(|t| t.id == self.active_tab) {
+                    let next = was.min(self.tabs.len().saturating_sub(1));
+                    self.active_tab = self.tabs.get(next).map_or(0, |t| t.id);
+                }
                 let info = self.info();
                 self.broadcast(&ServerMsg::Layout(info));
                 self.shape_changed();

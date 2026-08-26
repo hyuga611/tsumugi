@@ -414,6 +414,22 @@ impl App {
                 })
             }
             MuxRequest::ClosePane => Some(ClientMsg::ClosePane { pane }),
+            MuxRequest::CloseTab => {
+                // タブそのものを閉じる口はプロトコルに無い。**要らない。**
+                // タブは「ペインが 1 枚も無くなったら消える」ものなので、
+                // 中のペインを全部閉じれば同じところへ着く。
+                // ズーム中でも中身は全部閉じる（見えている 1 枚だけ、では
+                // 隠れたペインが残って「閉じたのに残る」になる）。
+                let panes = self
+                    .session
+                    .active_layout()
+                    .map(tsg_mux::Layout::panes)
+                    .unwrap_or_default();
+                for id in panes {
+                    self.send_msg(&ClientMsg::ClosePane { pane: id });
+                }
+                None
+            }
             MuxRequest::NewTab => Some(ClientMsg::NewTab {
                 cwd: None,
                 command: None,
@@ -6220,6 +6236,18 @@ impl ApplicationHandler for App {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         let mut dirty = self.pump();
+        // タブが 1 つも無くなったら窓は仕舞う。**空の窓を残さない。**
+        // （最後のタブを閉じた／中のペインを全部閉じた、の両方でここへ来る。
+        // セッションそのものは生きているので、開き直せば素のペインで戻る。）
+        if self
+            .session
+            .info
+            .as_ref()
+            .is_some_and(|i| i.tabs.is_empty())
+        {
+            event_loop.exit();
+            return;
+        }
         if let Some((id, arg)) = self.queued_command.take() {
             self.invoke(id, event_loop);
             // 値を伴うものは、開いた入力欄へそのまま入れて走らせる。

@@ -141,6 +141,11 @@ pub enum MuxRequest {
     /// 取り分を隣から奪う / 返す（`Space <>+-`）。
     Resize(i32),
     NewTab,
+    /// いまのタブを閉じる（中のペインごと。`Space X`）。
+    ///
+    /// **`Space x`（ペイン 1 枚）と分ける。** 分割して使っていると、
+    /// 最後の 1 枚まで x を押し続けることになる。
+    CloseTab,
     NextTab,
     PrevTab,
     /// タブを前後へ動かす（`Space <` / `Space >`）。
@@ -740,6 +745,14 @@ pub const REGISTRY: &[CommandSpec] = &[
         title: "ペインを閉じる",
         title_en: "Close the pane",
         keys: &["Space x"],
+        mouse: MousePath::Menu("配置"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "layout.tabclose",
+        title: "タブを閉じる（中のペインごと）",
+        title_en: "Close this tab (with its panes)",
+        keys: &["Space X"],
         mouse: MousePath::Menu("配置"),
         in_palette: true,
     },

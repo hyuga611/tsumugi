@@ -45,6 +45,19 @@ open and had not saved.
 
 ## Install
 
+One line in PowerShell. No admin rights needed.
+
+```powershell
+irm https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.ps1 | iex
+```
+
+It downloads the latest `tsg.exe` into `%USERPROFILE%in` and runs `tsg --install`
+for you. The executable links the CRT statically, so it runs on machines **without
+the VC++ redistributable**. Use `-Dir 'D:	ools'` for a different location, or
+`-NoRegister` to skip the shortcuts.
+
+Building it yourself:
+
 ```
 git clone https://github.com/hyuga611/tsumugi
 cd tsumugi

@@ -1,0 +1,36 @@
+name: Release
+
+# 版のタグ（v0.1.0 など）を押したら、Windows の exe を作って Release に付ける。
+# install.ps1 はこの Release から取ってくるので、ここが配布の本体。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      # CRT を静的リンクする。**入れた PC に VC++ 再頒布可能パッケージが
+      # 無くても動く**ようにするため（会社の PC では入れられないことがある）。
+      - name: build
+        run: cargo build --release -p tsg
+        env:
+          RUSTFLAGS: -C target-feature=+crt-static
+
+      - name: smoke test
+        run: |
+          .\target\release\tsg.exe --version
+          .\target\release\tsg.exe --diagnose
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/tsg.exe
+          draft: false
+          generate_release_notes: true

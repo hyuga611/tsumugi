@@ -42,6 +42,18 @@ Rust 製。いまのところ **Windows**。macOS と Linux はビルドは通�
 
 ## 入れる
 
+PowerShell に 1 行。管理者権限は要りません。
+
+```powershell
+irm https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.ps1 | iex
+```
+
+最新版の `tsg.exe` を `%USERPROFILE%in` へ置いて `tsg --install` まで済ませます。
+exe は CRT を静的リンクしてあるので、**VC++ 再頒布可能パッケージが無い PC でも動きます**。
+置き場所を変えるなら `-Dir 'D:	ools'`、登録が不要なら `-NoRegister`。
+
+自分でビルドするなら:
+
 ```
 git clone https://github.com/hyuga611/tsumugi
 cd tsumugi
