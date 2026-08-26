@@ -444,8 +444,7 @@ impl PluginEvent {
     }
 
     /// 購読できる名前の全部。`tsg --subscribe` の案内と検証に使う。
-    pub const NAMES: &'static [&'static str] =
-        &["command_end", "pane", "agent", "cwd", "command"];
+    pub const NAMES: &'static [&'static str] = &["command_end", "pane", "agent", "cwd", "command"];
 }
 
 /// 知らせの重さ。**色を決めるためだけ**にある。
@@ -566,26 +565,40 @@ impl LayoutSpec {
 #[serde(tag = "m", rename_all = "snake_case")]
 pub enum Match {
     /// 画面に出た字。**打った通りに探す**（`.` も `(` もそのままの字）。
-    Substring { text: String },
+    Substring {
+        text: String,
+    },
     /// 正規表現。読めない式は待ち始めた時点で断る。
-    Regex { pattern: String },
+    Regex {
+        pattern: String,
+    },
     /// コマンドが終わった。`code` を書けば、その終了コードのときだけ。
     CommandEnd {
         #[serde(default)]
         code: Option<i32>,
     },
     /// エージェントがその状態を名乗った。
-    Agent { state: AgentState },
+    Agent {
+        state: AgentState,
+    },
     /// その名前の出来事が起きた（`command_end` / `pane` / `agent` / `cwd` /
     /// `command`。購読と同じ名前）。
     ///
     /// **待ちと購読で別の仕組みを作らない。** 「起きるまで待つ」と
     /// 「起きたら知らせて」は同じことを別の向きから見ているだけなので、
     /// 名前の付け方まで分けると、片方だけ増える日が来る。
-    Event { name: String },
-    All { of: Vec<Match> },
-    Any { of: Vec<Match> },
-    Not { of: Box<Match> },
+    Event {
+        name: String,
+    },
+    All {
+        of: Vec<Match>,
+    },
+    Any {
+        of: Vec<Match>,
+    },
+    Not {
+        of: Box<Match>,
+    },
 }
 
 impl Match {
@@ -1356,7 +1369,10 @@ mod tests {
         let got = spec.leaf_list();
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].0.as_deref(), Some("/a"));
-        assert_eq!(got[1].1.as_deref().map(<[String]>::to_vec), Some(vec!["top".to_string()]));
+        assert_eq!(
+            got[1].1.as_deref().map(<[String]>::to_vec),
+            Some(vec!["top".to_string()])
+        );
     }
 
     #[test]
@@ -1366,7 +1382,10 @@ mod tests {
             text: "a.out(1)".into(),
         };
         assert!(m.hit(&saw("running a.out(1) now")));
-        assert!(!m.hit(&saw("running axout 1 now")), "正規表現として読んでいる");
+        assert!(
+            !m.hit(&saw("running axout 1 now")),
+            "正規表現として読んでいる"
+        );
     }
 
     #[test]
@@ -1413,7 +1432,10 @@ mod tests {
             event: None,
         };
         assert!(any.hit(&ended(Some(0))));
-        assert!(any.hit(&ended(None)), "終了コードが取れなくても「終わった」");
+        assert!(
+            any.hit(&ended(None)),
+            "終了コードが取れなくても「終わった」"
+        );
         assert!(one.hit(&ended(Some(1))));
         assert!(!one.hit(&ended(Some(0))));
         // 終わっていないときは当たらない。

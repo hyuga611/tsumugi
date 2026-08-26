@@ -3081,11 +3081,7 @@ def
         let mut h = FileHarness::new("alpha bravo charlie delta echo\n");
         h.keys("dw");
         h.keys("3.");
-        assert_eq!(
-            h.file.text(),
-            "echo\n",
-            "`3.` が 3 回流れていない"
-        );
+        assert_eq!(h.file.text(), "echo\n", "`3.` が 3 回流れていない");
     }
 
     #[test]
@@ -3215,7 +3211,6 @@ mod space_keys {
         }
         assert!(clashes.is_empty(), "同じキーを名乗っている: {clashes:?}");
     }
-
 }
 
 /// その行の頭の空白（そのまま次の行へ引き継ぐ）。

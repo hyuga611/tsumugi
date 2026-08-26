@@ -1638,7 +1638,10 @@ impl App {
                         self.send_msg(&ClientMsg::PipeResult {
                             pane,
                             dir: tsg_mux::Dir::Horizontal,
-                            title: t!(format!("使われている場所 ({n})"), format!("used in {n} places")),
+                            title: t!(
+                                format!("使われている場所 ({n})"),
+                                format!("used in {n} places")
+                            ),
                             text,
                         });
                         got = true;
@@ -2467,8 +2470,12 @@ impl App {
         } else {
             // **黙って一部だけ当てない。** 他のファイルにも要ることを言う。
             t!(
-                format!("このファイルの {count} か所だけ書き換えました（他に {others} ファイル。開いて同じことをしてください）"),
-                format!("changed {count} places in this file only ({others} more files need the same)")
+                format!(
+                    "このファイルの {count} か所だけ書き換えました（他に {others} ファイル。開いて同じことをしてください）"
+                ),
+                format!(
+                    "changed {count} places in this file only ({others} more files need the same)"
+                )
             )
         };
     }
@@ -2737,7 +2744,13 @@ impl App {
                         .iter()
                         .any(|k| tsg_modal::parse_key(k) == Some(input))
                 });
-                if taken || self.cfg.keys.lookup(tsg_modal::KeyWhen::Normal, input).is_some() {
+                if taken
+                    || self
+                        .cfg
+                        .keys
+                        .lookup(tsg_modal::KeyWhen::Normal, input)
+                        .is_some()
+                {
                     refused.push(format!("{key}（もう使われています）"));
                     continue;
                 }
@@ -7610,10 +7623,7 @@ diff --git a/f.txt b/f.txt
     #[test]
     fn a_see_through_window_has_no_painted_bands() {
         let th = theme::builtin("yogiri").expect("既定のテーマが無い");
-        assert!(
-            band_bg(&th, 0.85).is_none(),
-            "透けているのに帯を塗っている"
-        );
+        assert!(band_bg(&th, 0.85).is_none(), "透けているのに帯を塗っている");
         assert!(
             band_bg(&th, 0.99).is_none(),
             "わずかでも透けていれば塗らない"

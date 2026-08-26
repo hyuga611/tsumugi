@@ -460,11 +460,7 @@ pub fn parse_hover(result: &Value) -> Option<String> {
     }
     let contents = result.get("contents")?;
     let text = match contents {
-        Value::Array(a) => a
-            .iter()
-            .filter_map(one)
-            .collect::<Vec<_>>()
-            .join("\n"),
+        Value::Array(a) => a.iter().filter_map(one).collect::<Vec<_>>().join("\n"),
         other => one(other)?,
     };
     let text = text.trim();
@@ -786,10 +782,7 @@ mod tests {
         assert_eq!(parse_hover(&marked).as_deref(), Some("fn main()"));
 
         let many = json!({ "contents": ["fn main()", { "value": "in crate x" }] });
-        assert_eq!(
-            parse_hover(&many).as_deref(),
-            Some("fn main()\nin crate x")
-        );
+        assert_eq!(parse_hover(&many).as_deref(), Some("fn main()\nin crate x"));
     }
 
     /// 「そこには何も無い」を、空文字ではなく `None` で返す。

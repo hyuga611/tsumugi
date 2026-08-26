@@ -154,7 +154,10 @@ mod tests {
     fn run(src: &str) -> Result<toml::Value, String> {
         let lua = Lua::new();
         put_facts(&lua).unwrap();
-        let v: Value = lua.load(src).eval().map_err(|e| trim_lua_error(&e.to_string()))?;
+        let v: Value = lua
+            .load(src)
+            .eval()
+            .map_err(|e| trim_lua_error(&e.to_string()))?;
         to_toml(&v)
     }
 
@@ -195,14 +198,12 @@ mod tests {
     /// 機械ごとに違うものを書ける、が Lua を入れた理由。
     #[test]
     fn the_config_can_look_at_the_machine() {
-        let got = run(
-            r#"
+        let got = run(r#"
             local t = { window = {} }
             if tsumugi.os == "nosuchos" then t.window.opacity = 0.1
             else t.window.opacity = 0.9 end
             return t
-        "#,
-        )
+        "#)
         .unwrap();
         assert_eq!(got["window"]["opacity"].as_float(), Some(0.9));
     }

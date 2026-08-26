@@ -451,7 +451,10 @@ impl Config {
                     }
                     Err(e) => (
                         Self::default(),
-                        Some(format!("{} の中身が設定の形ではありません: {e}", p.display())),
+                        Some(format!(
+                            "{} の中身が設定の形ではありません: {e}",
+                            p.display()
+                        )),
                     ),
                 },
                 Err(e) => (

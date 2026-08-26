@@ -437,7 +437,11 @@ impl State {
                     .map(|text| {
                         // プロンプト記号を落として、打たれた部分だけにする。
                         let col = b.command_col;
-                        text.chars().skip(col).collect::<String>().trim().to_string()
+                        text.chars()
+                            .skip(col)
+                            .collect::<String>()
+                            .trim()
+                            .to_string()
                     })
                     .unwrap_or_default();
                 PluginEvent::CommandEnd {
@@ -1340,14 +1344,8 @@ impl State {
 
             ClientMsg::ExtLog { limit } => {
                 let n = limit.unwrap_or(50).min(EXT_LOG_MAX);
-                let entries: Vec<ExtLogEntry> = self
-                    .ext_log
-                    .iter()
-                    .rev()
-                    .take(n)
-                    .rev()
-                    .cloned()
-                    .collect();
+                let entries: Vec<ExtLogEntry> =
+                    self.ext_log.iter().rev().take(n).rev().cloned().collect();
                 self.send_to(id, &ServerMsg::ExtLog { entries });
             }
 
@@ -1397,10 +1395,7 @@ impl State {
                 if !ExtCommand::id_is_valid(&command.id) {
                     self.refuse(
                         id,
-                        format!(
-                            "id は `ext.` で始まる英数字にしてください: {}",
-                            command.id
-                        ),
+                        format!("id は `ext.` で始まる英数字にしてください: {}", command.id),
                     );
                     return Ok(true);
                 }
@@ -1485,7 +1480,8 @@ impl State {
                 let new_pane = self.spawn_pane_in(cols, rows, here, None)?;
                 self.write_ext_pane(new_pane, &title, &text);
                 if let Some(tab) = self.tab_of(near) {
-                    tab.layout.split(near, new_pane, dir.unwrap_or(Dir::Horizontal));
+                    tab.layout
+                        .split(near, new_pane, dir.unwrap_or(Dir::Horizontal));
                     tab.active_pane = new_pane;
                 }
                 self.note(id, format!("{name} のペインを開きました"), false);
@@ -2063,7 +2059,12 @@ fn git(dir: &str, args: &[&str]) -> std::result::Result<String, String> {
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
         let msg = String::from_utf8_lossy(&out.stderr);
-        Err(msg.trim().lines().next().unwrap_or("git が断りました").to_string())
+        Err(msg
+            .trim()
+            .lines()
+            .next()
+            .unwrap_or("git が断りました")
+            .to_string())
     }
 }
 
@@ -2110,7 +2111,9 @@ fn finished_blocks(marks: &tsg_term::SemanticMarks) -> usize {
 /// `start` / `end` を実際の行数へ収める。**外から来る数を信じない。**
 fn clip_range(total: usize, start: Option<usize>, end: Option<usize>) -> (usize, usize) {
     let from = start.unwrap_or(0).min(total);
-    let to = end.map_or(total, |e| e.saturating_add(1)).clamp(from, total);
+    let to = end
+        .map_or(total, |e| e.saturating_add(1))
+        .clamp(from, total);
     (from, to)
 }
 
@@ -2573,7 +2576,10 @@ mod tests {
         });
 
         assert!(
-            asked.msgs().iter().any(|m| matches!(m, ServerMsg::Event { .. })),
+            asked
+                .msgs()
+                .iter()
+                .any(|m| matches!(m, ServerMsg::Event { .. })),
             "名乗った相手へ届いていない"
         );
         assert!(
@@ -2673,7 +2679,10 @@ mod tests {
             "登録した拡張へ返っていない"
         );
         assert!(
-            !window.msgs().iter().any(|m| matches!(m, ServerMsg::RunCommand { .. })),
+            !window
+                .msgs()
+                .iter()
+                .any(|m| matches!(m, ServerMsg::RunCommand { .. })),
             "窓は知らない id を受け取るべきではない"
         );
     }
@@ -2715,13 +2724,17 @@ mod tests {
         // OSC 133 が言ってきたことだけを数える。**画面から当てない。**
         let mut term = Terminal::new(20, 5, tsg_term::ambiguous());
         assert_eq!(finished_blocks(&term.state.marks), 0);
-        term.feed(b"]133;A$ ls
+        term.feed(
+            b"]133;A$ ls
 ]133;Ca.txt
-]133;D;0");
+]133;D;0",
+        );
         assert_eq!(finished_blocks(&term.state.marks), 1);
         // まだ終わっていない塊は数えない
-        term.feed(b"]133;A$ sleep
-]133;C");
+        term.feed(
+            b"]133;A$ sleep
+]133;C",
+        );
         assert_eq!(finished_blocks(&term.state.marks), 1);
         term.feed(b"]133;D;1");
         assert_eq!(finished_blocks(&term.state.marks), 2);
@@ -2886,10 +2899,16 @@ mod tests {
 
     #[test]
     fn newlines_and_tabs_survive_but_other_controls_do_not() {
-        let got = plain_text(b"a	b
-cd");
-        assert_eq!(got, "a	b
-cd", "改行とタブは残す。ベルと CR は落とす");
+        let got = plain_text(
+            b"a	b
+cd",
+        );
+        assert_eq!(
+            got,
+            "a	b
+cd",
+            "改行とタブは残す。ベルと CR は落とす"
+        );
     }
 
     /// 控えは頭から捨てる。**字の境目で切る**（途中で切ると落ちる）。
@@ -2947,9 +2966,14 @@ detached
     #[test]
     fn an_empty_worktree_list_is_empty_not_a_ghost() {
         assert!(parse_worktrees("").is_empty());
-        assert!(parse_worktrees("
+        assert!(
+            parse_worktrees(
+                "
 
-").is_empty());
+"
+            )
+            .is_empty()
+        );
     }
 
     #[test]

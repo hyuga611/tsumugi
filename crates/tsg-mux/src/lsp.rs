@@ -23,13 +23,24 @@ use tsg_lsp::{Incoming, Server, servers};
 /// 待っている問い合わせ。答えが来たときに誰の何だったかを引く。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pending {
-    Definition { pane: u32 },
-    Completion { pane: u32 },
-    Hover { pane: u32 },
-    References { pane: u32 },
+    Definition {
+        pane: u32,
+    },
+    Completion {
+        pane: u32,
+    },
+    Hover {
+        pane: u32,
+    },
+    References {
+        pane: u32,
+    },
     /// 名前を変える。**変える前の名前を覚えておく** — 断ったときに
     /// 「何を変えようとしたのか」を言えないと、押した人が困る。
-    Rename { pane: u32, from: String },
+    Rename {
+        pane: u32,
+        from: String,
+    },
 }
 
 impl Pending {
