@@ -2096,9 +2096,17 @@ impl App {
     }
 
     /// 🔴 マウスの所有者。`concept.md` の所有権モデル。判断は `tsg-term` にしか無い。
+    ///
+    /// **Shift を押している間だけは、こちらが取る。** 全画面アプリが
+    /// マウスを要求していると、なぞってもレポートが相手へ流れるだけで、
+    /// こちらには選択が残らない ── 画面に出た字を写せない。
+    /// 相手が要求している以上「渡す」が正しいので、渡さない合図を
+    /// 人が持てるようにする。どの端末も同じ逃げ道を Shift に置いている。
     fn mouse_goes_to_child(&self) -> bool {
-        self.active_view()
-            .is_some_and(|v| v.term.state.mouse_owner() == InputOwner::Child)
+        let shift = self.mods.shift_key();
+        self.active_view().is_some_and(|v| {
+            mouse_owner_with_shift(v.term.state.mouse_owner(), shift) == InputOwner::Child
+        })
     }
 
     /// 子プロセスへマウスレポートを流す。
@@ -3353,7 +3361,10 @@ impl App {
             );
         }
 
-        if self.mouse_goes_to_child() {
+        // なぞっていた最中なら、離すのもこちらの物。押した側だけ受け取って
+        // 離した側が相手へ行くと、相手は押しっぱなしのままになる。
+        let selecting = matches!(self.drag, Some(mouse::Drag::Select { .. }));
+        if !selecting && self.mouse_goes_to_child() {
             let b = match button {
                 MouseButton::Left => mouse::Button::Left,
                 MouseButton::Middle => mouse::Button::Middle,
@@ -3452,10 +3463,9 @@ impl App {
                 }
             }
             Some(mouse::Drag::Select { pane, grain }) => {
-                if self.mouse_goes_to_child() {
-                    self.forward_mouse(mouse::Button::Left, mouse::Phase::Drag, col, row);
-                    return;
-                }
+                // **掴んだ時点で行き先は決まっている。** ここで所有者を
+                // 引き直すと、なぞっている途中で Shift を離した瞬間に
+                // 選択が相手へ渡り、選んだところが消える。
                 let Some(to) = self.doc_pos(pane, col, row) else {
                     return;
                 };
@@ -3615,6 +3625,44 @@ impl App {
             || (self.mods.shift_key() && matches!(&key, Key::Named(NamedKey::Insert)));
         if paste_key {
             self.paste_clipboard();
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
+
+        // コピーも同じ扱い。`y` と同じ道（`op.yank`）へ落とすので、
+        // 覚え方が 2 つに割れない。**全画面アプリを見ている最中は打鍵が
+        // 相手のもの**なので、貼り付けと対になるキーがここに要る。
+        let copy_key = (self.mods.control_key()
+            && self.mods.shift_key()
+            && matches!(&key, Key::Character(s) if s.eq_ignore_ascii_case("c")))
+            || (self.mods.control_key() && matches!(&key, Key::Named(NamedKey::Insert)));
+        if copy_key {
+            // 選んでいなければ何もしない。`y` は本来オペレータなので、
+            // ここで素通しすると**動きの入力待ちのまま**固まる。
+            if self.engine.selection().is_some() {
+                self.invoke("op.yank", event_loop);
+                // **写したら打鍵を返す。** 相手が打鍵を持っている（全画面アプリ）
+                // ときだけ。`y` の後は読むモードに残るのが正しいが、それは
+                // 過去の出力を読んでいるときの話で、AI の CLI から 1 行写した
+                // だけの人には「コピーしたら字が打てなくなった」に見える。
+                let child_types = self
+                    .active_view()
+                    .is_some_and(|v| v.term.state.key_owner() == InputOwner::Child);
+                if child_types {
+                    self.dispatch(
+                        tsg_modal::Command::EnterInsert(tsg_modal::InsertAt::Here),
+                        event_loop,
+                    );
+                }
+            } else {
+                self.status_msg = t!(
+                    "選んでいるところがありません（Shift＋ドラッグで選べます）",
+                    "nothing is selected (drag with Shift to select)"
+                )
+                .into();
+            }
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
@@ -5316,7 +5364,12 @@ impl App {
             right.push_str("  ");
         }
         if owned_by_child {
-            right.push_str(t!("🖱 アプリ側  ", "🖱 app  "));
+            // **逃げ道をここに書く。** 「アプリ側」だけだと、なぞって
+            // 選べない理由は分かっても、写す手立てが分からない。
+            right.push_str(t!(
+                "🖱 アプリ側（Shift でなぞる）  ",
+                "🖱 app (Shift-drag to select)  "
+            ));
         }
         right.push_str(&where_);
         if visible.len() > 1 || tabs > 1 {
@@ -6172,6 +6225,16 @@ enum ClickIntent {
     ToNormal,
 }
 
+/// マウスの行き先。**Shift だけは、こちらが取り返す合図。**
+///
+/// 全画面アプリがマウスを要求していると、なぞってもレポートが相手へ
+/// 流れるだけで、こちらには何も残らない ── 画面に出た字を写せない。
+/// 相手が要求している以上「渡す」が既定として正しいので、
+/// **渡さない合図を人が持てるようにする**（どの端末も Shift に置いている）。
+fn mouse_owner_with_shift(owner: InputOwner, shift: bool) -> InputOwner {
+    if shift { InputOwner::Tsumugi } else { owner }
+}
+
 /// `mouse-parity.md` §4.1。
 ///
 /// **ファイルではモードを変えない。** エディタで文字を置きに行っただけで
@@ -6338,6 +6401,20 @@ fn help_lines() -> Vec<HelpLine> {
             t!(
                 "クリップボードから貼り付け（Ctrl＋Shift＋V でも）",
                 "paste from the clipboard (Ctrl+Shift+V too)"
+            ),
+        ),
+        (
+            t!("なぞる", "drag"),
+            t!(
+                "選んで y でコピー（Ctrl＋Shift＋C でも）",
+                "select, then y to copy (Ctrl+Shift+C too)"
+            ),
+        ),
+        (
+            t!("Shift＋なぞる", "Shift+drag"),
+            t!(
+                "全画面アプリ（AI の CLI など）の上でも選べる",
+                "select even while a full-screen app owns the mouse"
             ),
         ),
         (
@@ -7092,6 +7169,25 @@ mod tests {
         // いま居るペインが待っていなくても、後ろから拾う
         assert_eq!(App::next_waiting(&waiting, 4), Some(5));
         assert_eq!(App::next_waiting(&[], 1), None);
+    }
+
+    /// **Shift はどんなときも勝つ。** ここが崩れると、全画面アプリを
+    /// 見ている間だけ「なぞっても選べない」に戻る（実機で踏んだ）。
+    #[test]
+    fn shift_takes_the_mouse_back_from_a_full_screen_app() {
+        use InputOwner::{Child, Tsumugi};
+        assert_eq!(
+            mouse_owner_with_shift(Child, true),
+            Tsumugi,
+            "Shift で取り返す"
+        );
+        assert_eq!(
+            mouse_owner_with_shift(Child, false),
+            Child,
+            "既定は相手のもの"
+        );
+        assert_eq!(mouse_owner_with_shift(Tsumugi, false), Tsumugi);
+        assert_eq!(mouse_owner_with_shift(Tsumugi, true), Tsumugi);
     }
 
     #[test]

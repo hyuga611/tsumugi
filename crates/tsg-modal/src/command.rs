@@ -762,7 +762,7 @@ pub const REGISTRY: &[CommandSpec] = &[
         id: "op.yank",
         title: "ヤンク（コピー）",
         title_en: "Copy (yank)",
-        keys: &["y", "yy", "Y"],
+        keys: &["y", "yy", "Y", "Ctrl+Shift+C", "Ctrl+Insert"],
         mouse: MousePath::Menu("編集"),
         in_palette: true,
     },
