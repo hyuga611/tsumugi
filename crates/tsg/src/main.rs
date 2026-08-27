@@ -188,6 +188,14 @@ struct App {
     /// 前に見たエージェントの状態。**変わった瞬間**にだけ知らせるために持つ。
     /// 状態そのものはサーバが持っているので、ここは通知のための控え。
     agent_seen: BTreeMap<u32, AgentState>,
+    /// 自分で打って応えたペイン。**古いサーバに繋がっているとき用の控え。**
+    ///
+    /// 応えたかどうかを持つのは本来サーバ（`PaneInfo::agent_acked`）だが、
+    /// `tsg update` は**窓だけ**を入れ替えるので、直したあとも走り続けている
+    /// のは古いサーバのまま。そこが `agent_acked` を送ってこないと、
+    /// 直した窓でも印が下りない — 直しが**いちばん困っている人に届かない**。
+    /// 打ったのはこちらなので、こちらでも覚えておく。
+    agent_answered: BTreeMap<u32, AgentState>,
     /// ウィンドウが前に居るか。裏に居るときだけタスクバーを光らせる。
     focused: bool,
     session: Session,
@@ -285,6 +293,7 @@ impl App {
             hints: Vec::new(),
             hint_typed: String::new(),
             agent_seen: BTreeMap::new(),
+            agent_answered: BTreeMap::new(),
             focused: true,
             session: Session::default(),
             engine: Engine::new(),
@@ -1440,6 +1449,13 @@ impl App {
 
     fn send_input(&mut self, bytes: &[u8]) {
         let pane = self.session.active;
+        // **打った＝応えた。** 新しいサーバは同じことを見て `agent_acked` を
+        // 返してくるが、古いサーバに繋がっている窓のために控えておく。
+        if let Some(state) = self.agent_state(pane)
+            && state.wants_you()
+        {
+            self.agent_answered.insert(pane, state);
+        }
         self.send_msg(&ClientMsg::Input {
             pane,
             data: tsg_mux::encode_bytes(bytes),
@@ -2606,6 +2622,7 @@ impl App {
             .map(|i| i.panes.iter().map(|p| p.id).collect())
             .unwrap_or_default();
         self.agent_seen.retain(|id, _| live.contains(id));
+        self.agent_answered.retain(|id, _| live.contains(id));
 
         if call
             && !self.focused
@@ -2769,11 +2786,22 @@ impl App {
     /// 応えたかどうかを持っているのは**サーバ**（そのペインへ入力が流れたのを
     /// 見ている）。窓を開き直しても印が戻らないのは、これがサーバ側だから。
     fn agent_acked(&self, pane: u32) -> bool {
-        self.session
+        if self
+            .session
             .info
             .as_ref()
             .and_then(|i| i.panes.iter().find(|p| p.id == pane))
             .is_some_and(|p| p.agent_acked)
+        {
+            return true;
+        }
+        // 古いサーバに繋がっているとき用。**そのとき応えた状態のまま**なら
+        // 下ろしたままにする。エージェントが別の状態を名乗れば当たらなくなる
+        // ので、そこで印はまた点く。
+        match (self.agent_answered.get(&pane), self.agent_state(pane)) {
+            (Some(answered), Some(now)) => *answered == now,
+            _ => false,
+        }
     }
 
     /// 人の番になっているペイン。タブの印・ジャンプ・通知が全部これを見る。
