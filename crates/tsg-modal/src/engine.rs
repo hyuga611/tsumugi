@@ -12,7 +12,8 @@ use tsg_buffer::{
 };
 
 use crate::command::{
-    Command, FileAction, FocusDir, HistoryAction, InsertAt, Mode, MuxRequest, SplitDir, VisualKind,
+    Command, ExplorerOp, FileAction, FocusDir, HistoryAction, InsertAt, Mode, MuxRequest, SplitDir,
+    VisualKind,
 };
 use crate::format;
 use crate::motion::{self, Motion, MotionKind, View};
@@ -938,6 +939,8 @@ impl Engine {
             'f' => MuxRequest::PaneFiles,
             'a' => MuxRequest::NextAgent,
             't' => MuxRequest::Hints,
+            // 作業台。**配置モードの語彙**（分割の親戚なので同じ場所に置く）。
+            'w' => MuxRequest::Workspace,
             // 配置モードから直接エディタを開く（`modal-spec.md` §9）
             'e' => return Some(Command::Palette("e ")),
             _ => return Some(Command::EnterNormal),
@@ -993,6 +996,12 @@ impl Engine {
             "layout.equalize" => Command::Mux(MuxRequest::Equalize),
             "layout.sessions" => Command::Mux(MuxRequest::Sessions),
             "agent.next" => Command::Mux(MuxRequest::NextAgent),
+            "workspace.open" => Command::Mux(MuxRequest::Workspace),
+            "explorer.activate" => Command::Mux(MuxRequest::Explorer(ExplorerOp::Activate)),
+            "explorer.new_file" => Command::Mux(MuxRequest::Explorer(ExplorerOp::NewFile)),
+            "explorer.new_dir" => Command::Mux(MuxRequest::Explorer(ExplorerOp::NewDir)),
+            "explorer.rename" => Command::Mux(MuxRequest::Explorer(ExplorerOp::Rename)),
+            "explorer.refresh" => Command::Mux(MuxRequest::Explorer(ExplorerOp::Refresh)),
             "search.open" => {
                 self.search_regex = false;
                 Command::OpenSearch { back: false }

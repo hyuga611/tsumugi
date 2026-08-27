@@ -819,6 +819,39 @@ pub fn open_tab_here(session: &str, cwd: Option<String>, command: Option<Vec<Str
     true
 }
 
+/// 作業台を組む（シェルで `go` と打ったときの受け口）。
+///
+/// **どのペインから打たれたかを env で受ける。** シェルは自分が
+/// どのペインで走っているかを `TSUMUGI_PANE` で知っているので、
+/// こちらで当てにいく必要が無い（当てにいくと、繋ぎ直したときにずれる）。
+pub fn workspace(
+    session: &str,
+    pane: Option<u32>,
+    cwd: Option<String>,
+    agent: Option<Vec<String>>,
+) -> Result<()> {
+    let (mut client, info) = attach(session)?;
+    let pane = pane
+        .or_else(|| {
+            std::env::var("TSUMUGI_PANE")
+                .ok()
+                .and_then(|v| v.parse().ok())
+        })
+        .or_else(|| {
+            info.tabs
+                .iter()
+                .find(|t| t.id == info.active_tab)
+                .map(|t| t.active_pane)
+        });
+    let Some(pane) = pane else {
+        bail!("どのペインで組めばいいのか分かりません");
+    };
+    client.send(&ClientMsg::Workspace { pane, cwd, agent })?;
+    std::thread::sleep(Duration::from_millis(200));
+    let _ = client.send(&ClientMsg::Detach);
+    Ok(())
+}
+
 /// 見えているペイン全部へ同じ文を投げる。
 ///
 /// **同じ問いを別のエージェントへ同時に投げる**ための口。返事の速さも

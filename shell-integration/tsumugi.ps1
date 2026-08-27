@@ -60,3 +60,29 @@ if (Get-Module -Name PSReadLine) {
         [Console]::Write("$([char]27)]133;C$([char]7)")
     }
 }
+
+# ---------------------------------------------------------------------------
+# `go` - lay out a workspace.
+#
+# After cd-ing somewhere, type `go`: the current pane becomes the middle one,
+# a directory tree opens on the left, an AI agent on the right, and the tab is
+# renamed after the directory.
+#
+# The name collides with the Go toolchain, so anything with arguments is
+# forwarded to the real go.exe, and so is a bare `go` outside tsumugi.
+# Set TSUMUGI_NO_GO=1 before sourcing this to keep the name for Go.
+if (-not $env:TSUMUGI_NO_GO) {
+    function Global:go {
+        if ($args.Count -eq 0 -and $env:TSUMUGI_SESSION) {
+            tsg --workspace (Get-Location).Path
+            return
+        }
+        $real = Get-Command go.exe -CommandType Application -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($real) {
+            & $real.Source @args
+        } else {
+            Write-Error "go: command not found"
+        }
+    }
+}

@@ -66,6 +66,17 @@ pub struct Config {
     /// **既定は消さず、上に重ねる。** 書かなかった拡張子は今までどおり
     /// （`tsg_lsp::servers` の表）。
     pub lsp: std::collections::BTreeMap<String, tsg_lsp::servers::Spec>,
+    /// 裏に回っているときに、画面の隅へ知らせを出すか。
+    ///
+    /// **既定で出す。** エージェントが返事を待っていることに気づくのが
+    /// この端末の目的で、最小化しているときこそ気づけないと意味が無い。
+    pub popup: bool,
+    /// 作業台（`go`）の右で起こすもの。空なら素のシェル。
+    ///
+    /// **既定を決め打ちしない。** `claude` を既定にすると、入れていない人の
+    /// 画面では右のペインが「そんなコマンドはありません」で始まる。
+    /// 何を使うかは人によって違うので、書いてもらう。
+    pub agent: Option<Vec<String>>,
     /// 差し替えたキー。**既定は消さず、上に重ねる**（`keymap.rs`）。
     pub keys: tsg_modal::Keymap,
 }
@@ -87,6 +98,8 @@ impl Default for Config {
             line_numbers: true,
             domains: Vec::new(),
             lsp: std::collections::BTreeMap::new(),
+            popup: true,
+            agent: None,
             keys: tsg_modal::Keymap::default(),
         }
     }
@@ -129,6 +142,45 @@ struct File {
     /// `[keys]` は読むモード、`[keys.insert]` は入力モード。
     #[serde(default)]
     keys: KeysFile,
+    /// `[workspace]` — `go` で組む作業台。
+    #[serde(default)]
+    workspace: WorkspaceFile,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct WorkspaceFile {
+    /// 右のペインで起こすもの。`"claude"` でも `["claude", "--continue"]` でも。
+    agent: Option<toml::Value>,
+}
+
+/// `agent` を読む。文字列も配列も通す。
+///
+/// **知らない形は黙って捨てない。** 書いたのに素のシェルが開くと、
+/// 設定が効いていないことに気づく手がかりがどこにも無い。
+fn parse_agent(v: Option<&toml::Value>) -> Result<Option<Vec<String>>, String> {
+    let Some(v) = v else {
+        return Ok(None);
+    };
+    match v {
+        toml::Value::String(s) => {
+            // 空白で割る。`"claude --continue"` と書かれるのが自然なので。
+            let parts: Vec<String> = s.split_whitespace().map(str::to_string).collect();
+            Ok((!parts.is_empty()).then_some(parts))
+        }
+        toml::Value::Array(items) => {
+            let mut out = Vec::new();
+            for it in items {
+                match it.as_str() {
+                    Some(s) if !s.trim().is_empty() => out.push(s.to_string()),
+                    _ => return Err(format!("agent = {v} を読めません（文字列の配列）")),
+                }
+            }
+            Ok((!out.is_empty()).then_some(out))
+        }
+        other => Err(format!(
+            "agent = {other} を読めません（\"claude\" か [\"claude\", \"--continue\"]）"
+        )),
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -189,6 +241,8 @@ struct Ui {
     guides: Option<bool>,
     /// ファイルを開いたときに行番号を出すか。
     line_numbers: Option<bool>,
+    /// 裏に回っているときに画面の隅へ知らせを出すか。
+    popup: Option<bool>,
 }
 
 /// `ambiguous_width` を読む。`"narrow"` / `"wide"` と `1` / `2` の両方を通す。
@@ -291,6 +345,17 @@ pub fn template() -> String {
 # guides = {guides}
 # ファイルを開いたとき、左に行番号を出す（端末の画面には出ません）。
 # line_numbers = {nums}
+# 窓が裏に居るとき、画面の隅にも知らせる（最小化していても届きます）。
+# どのタブが返事を待っているかまで出ます。
+# popup = {popup}
+
+[workspace]
+# `go`（シェル統合）と `Space w` で組む作業台。
+# 左にディレクトリの木・真ん中にいまのペイン・右にここへ書いたもの。
+# **書かなければ素のシェル**です（何を使うかは人によって違うので、
+# 既定を決め打ちしていません）。
+# agent = "claude"
+# agent = ["codex", "-m", "gpt-5.4"]
 
 [scrollback]
 # さかのぼって読める行数。
@@ -344,6 +409,7 @@ pub fn template() -> String {
         lig = d.ligatures,
         guides = d.guides,
         nums = d.line_numbers,
+        popup = d.popup,
         sb = d.scrollback,
         theme = d.theme_name,
         themes = theme::names().join(" / "),
@@ -539,6 +605,7 @@ impl Config {
             lang: f.ui.lang.as_deref().and_then(Lang::parse).unwrap_or(d.lang),
             guides: f.ui.guides.unwrap_or(d.guides),
             line_numbers: f.ui.line_numbers.unwrap_or(d.line_numbers),
+            popup: f.ui.popup.unwrap_or(d.popup),
             lsp: f
                 .lsp
                 .iter()
@@ -565,6 +632,13 @@ impl Config {
                     ssh: v.ssh.clone().unwrap_or_else(|| "ssh".into()),
                 })
                 .collect(),
+            agent: match parse_agent(f.workspace.agent.as_ref()) {
+                Ok(v) => v,
+                Err(w) => {
+                    bad.push(w);
+                    None
+                }
+            },
             theme_name: name,
             theme,
             keys,
@@ -613,6 +687,35 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `agent` は文字列でも配列でも書ける。**書き方を 1 つに強いない。**
+    #[test]
+    fn the_workspace_agent_can_be_written_either_way() {
+        assert_eq!(
+            parsed("[workspace]\nagent = \"claude --continue\"").agent,
+            Some(vec!["claude".into(), "--continue".into()])
+        );
+        assert_eq!(
+            parsed("[workspace]\nagent = [\"codex\", \"-m\", \"gpt\"]").agent,
+            Some(vec!["codex".into(), "-m".into(), "gpt".into()])
+        );
+        // 書かなければ素のシェル。**既定を決め打ちしない。**
+        assert_eq!(parsed("").agent, None);
+    }
+
+    /// 読めない書き方は**黙って捨てず**、理由を出す。
+    #[test]
+    fn an_agent_written_the_wrong_way_says_so() {
+        let w = warning("[workspace]\nagent = 3").expect("警告が出ていない");
+        assert!(w.contains("agent"), "{w}");
+    }
+
+    /// 隅の知らせは既定で出す。切りたい人だけ切る。
+    #[test]
+    fn the_popup_is_on_unless_it_is_turned_off() {
+        assert!(parsed("").popup);
+        assert!(!parsed("[ui]\npopup = false").popup);
+    }
 
     fn parsed(s: &str) -> Config {
         Config::from_file(&toml::from_str::<File>(s).expect("読めない")).0

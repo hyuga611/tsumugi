@@ -206,6 +206,12 @@ struct App {
     picker: overlay::Picker,
     /// タブバーで掴んでいるタブ（並べ替え）。
     tab_drag: Option<u32>,
+    /// 木の中で掴んでいるもの（ドラッグ＆ドロップで動かす）。
+    ///
+    /// **掴んだ時点では動かさない。** 離した場所がディレクトリだったときに
+    /// 初めて動かす。押しただけで動いてしまうと、選ぶつもりの指で
+    /// ファイルが別の場所へ行く。
+    dir_drag: Option<std::path::PathBuf>,
     /// ポインタの下にある対象（パス・URL・ハッシュ・語）。下線を引く。
     hover: Option<(u32, Range)>,
     /// 右ドラッグの起点。離した場所で「メニュー」か「プロンプトへ落とす」に分かれる。
@@ -295,6 +301,7 @@ impl App {
             menu: overlay::Menu::default(),
             picker: overlay::Picker::default(),
             tab_drag: None,
+            dir_drag: None,
             focus_new_pane: false,
             hover: None,
             right_from: None,
@@ -640,6 +647,14 @@ impl App {
                 .into();
                 None
             }
+            MuxRequest::Workspace => {
+                self.build_workspace(None);
+                None
+            }
+            MuxRequest::Explorer(op) => {
+                self.explorer_op(op);
+                None
+            }
             MuxRequest::ToggleFold => {
                 self.toggle_fold_here();
                 None
@@ -772,6 +787,11 @@ impl App {
             // オペレータ 1 回で取り消し 1 段
             file.begin_group(at);
             file.replace(range, text);
+            return;
+        }
+        // 木は読むだけ。**下の端末のグリッドを書き換えない**
+        // （見えていないものが黙って変わるのが一番読めない）。
+        if view.dir.is_some() {
             return;
         }
 
@@ -984,12 +1004,17 @@ impl App {
     /// パスはここで解決して絶対パスにする。サーバは常駐で、
     /// クライアントがどこから起動されたかを知らないため。
     fn open_file(&mut self, path: &str) {
+        let pane = self.session.active;
+        self.open_file_at(pane, path);
+    }
+
+    /// 決まったペインで開く。木から開くときは**右隣**が相手になる。
+    fn open_file_at(&mut self, pane: u32, path: &str) {
         let full = self
             .cwd
             .as_ref()
             .map(|c| std::path::Path::new(c).join(path))
             .unwrap_or_else(|| std::path::PathBuf::from(path));
-        let pane = self.session.active;
         self.send_msg(&ClientMsg::OpenFile {
             pane,
             path: full.display().to_string(),
@@ -1085,6 +1110,18 @@ impl App {
     /// エディタを閉じて端末へ戻る。下のシェルは走ったままなのですぐ続けられる。
     fn close_file(&mut self, force: bool) {
         let pane = self.session.active;
+        // 木も `:q` で閉じる。**戻る道を 2 つ覚えさせない。**
+        // 下のシェルは走ったままなので、閉じればふつうのペインに戻る。
+        if self
+            .session
+            .panes
+            .get(&pane)
+            .is_some_and(PaneView::exploring)
+        {
+            self.send_msg(&ClientMsg::DirClose { pane });
+            self.status_msg = t!("木を閉じました", "closed the tree").into();
+            return;
+        }
         let dirty = self
             .session
             .panes
@@ -1139,6 +1176,12 @@ impl App {
             .and_then(|c| c.get_text().ok())
             .unwrap_or_default();
         if text.trim().is_empty() {
+            // 字が無ければ絵を見る。**貼り付けは 1 つの動詞**で、
+            // 何が入っているかで、いちばん近いものになる（`concept.md`）。
+            // スクリーンショットを撮ると、入っているのは絵だけになる。
+            if self.paste_image() {
+                return;
+            }
             self.status_msg = t!("貼り付けるものがありません", "nothing to paste").into();
             return;
         }
@@ -1160,6 +1203,94 @@ impl App {
                 format!("pasted {} characters", text.chars().count())
             )
         };
+    }
+
+    /// クリップボードの絵をサーバへ渡す。渡せたら真。
+    ///
+    /// **ここでは打ち込まない。** 置き場所を知っているのはサーバ（遠隔で
+    /// 開いていればファイルは向こうに要る）なので、置いてもらってから
+    /// 返ってきたパスを打つ（`ServerMsg::Pasted`）。
+    fn paste_image(&mut self) -> bool {
+        let Some(img) = self.clipboard.as_mut().and_then(|c| c.get_image().ok()) else {
+            return false;
+        };
+        let (w, h) = (img.width as u32, img.height as u32);
+        let Some(png) = tsg_term::graphics::encode_png(&img.bytes, w, h) else {
+            self.status_msg = t!("この絵は貼れません", "cannot paste this image").into();
+            return true;
+        };
+        // 上限。**1 枚で socket を詰まらせない**（画面 1 枚の PNG は
+        // ふつう数 MB で、ここに当たるのは異様に大きいものだけ）。
+        if png.len() > MAX_PASTE_IMAGE {
+            self.status_msg = t!(
+                format!("絵が大きすぎます（{} MB）", png.len() / 1_048_576),
+                format!("that image is too large ({} MB)", png.len() / 1_048_576)
+            );
+            return true;
+        }
+        let pane = self.session.active;
+        self.send_msg(&ClientMsg::PasteImage {
+            pane,
+            data: tsg_mux::encode_bytes(&png),
+        });
+        self.status_msg = t!(
+            format!("{w}x{h} の絵を置いています…"),
+            format!("saving a {w}x{h} image…")
+        );
+        true
+    }
+
+    /// 置かれたファイルのパスをプロンプトへ打ち込む。
+    ///
+    /// **走らせない。** 最後の Enter は人が押す（`gx` や右ドラッグと同じ作法）。
+    fn type_path(&mut self, path: &std::path::Path) {
+        let text = quote_path(&path.display().to_string());
+        self.snap_to_live_tail();
+        // 後ろに空白を 1 つ。**置いたあと、続けて用件を打つ**のがふつうで、
+        // 毎回 space を押させるのは、頼んだことに一手足している。
+        self.send_input(format!("{text} ").as_bytes());
+        self.dispatch_insert();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| text.clone());
+        self.status_msg = t!(
+            format!("{name} をプロンプトへ置きました（Enter は押していません）"),
+            format!("put {name} on the prompt (not sent)")
+        );
+    }
+
+    /// 窓へ落とされたファイル。
+    ///
+    /// **遠隔のセッションでは、こちらのパスは向こうに無い。** 絵なら
+    /// 中身を送って向こうへ置き直し、それ以外は正直に断る（届かない
+    /// パスを打ち込んで、相手に「そんなファイルは無い」と言わせない）。
+    fn drop_file(&mut self, path: &std::path::Path) {
+        if self.domain.is_none() {
+            self.type_path(path);
+            return;
+        }
+        let Ok(bytes) = std::fs::read(path) else {
+            self.status_msg = t!(
+                format!("{} を読めません", path.display()),
+                format!("cannot read {}", path.display())
+            );
+            return;
+        };
+        let is_png = bytes.starts_with(b"\x89PNG\r\n\x1a\n");
+        if !is_png || bytes.len() > MAX_PASTE_IMAGE {
+            self.status_msg = t!(
+                "遠隔のセッションへ置けるのは PNG だけです",
+                "only a PNG can be handed to a remote session"
+            )
+            .into();
+            return;
+        }
+        let pane = self.session.active;
+        self.send_msg(&ClientMsg::PasteImage {
+            pane,
+            data: tsg_mux::encode_bytes(&bytes),
+        });
     }
 
     /// いま見ているペインの相手が、貼り付けを囲って受け取りたいか（`?2004h`）。
@@ -1221,6 +1352,15 @@ impl App {
         if view.editing() {
             return;
         }
+        // 木は端末の続きではない。**端末のカーソルへ飛ばすと、木へ移った
+        // 瞬間に一番下の行を指す。** 見ていた行に留まり、外を指していたら
+        // 中へ戻すだけにする。
+        if let Some(d) = &view.dir {
+            let buf = view.buffer();
+            let at = tsg_buffer::clamp(&buf, Pos::new(d.cursor_line, 0));
+            self.engine.set_cursor(at, &buf);
+            return;
+        }
         let pos = Pos::new(
             view.term.state.grid.cursor_absolute(),
             view.term.state.grid.cursor.col,
@@ -1266,7 +1406,13 @@ impl App {
 
     fn update_view(&mut self) {
         let active = self.session.active;
+        let line = self.engine.cursor().line;
         if let Some(view) = self.session.panes.get_mut(&active) {
+            // 木に居るあいだ、選んでいる行を控えておく。**別のペインへ
+            // 移って戻ったときに、同じ行から続けられる。**
+            if let Some(d) = view.dir.as_mut() {
+                d.cursor_line = line;
+            }
             let height = view.rect.h.max(1);
             if view.follow_tail {
                 view.top = view.doc_len().saturating_sub(height);
@@ -1501,6 +1647,59 @@ impl App {
                     self.menu.set_ext(self.ext_commands.clone());
                     self.rebuild_ext_keys();
                 }
+                ServerMsg::Pasted { pane, path } => {
+                    // 置いたのは頼んだペイン。**そこへ打ち込む**（打っている
+                    // あいだに別のペインへ移っていても、行き先は変わらない）。
+                    if pane != self.session.active {
+                        self.session.active = pane;
+                    }
+                    self.type_path(std::path::Path::new(&path));
+                }
+                ServerMsg::DirListing { pane, root, rows } => {
+                    let entries: Vec<tsg_modal::DirEntry> = rows
+                        .into_iter()
+                        .map(|r| tsg_modal::DirEntry {
+                            path: std::path::PathBuf::from(r.path),
+                            name: r.name,
+                            is_dir: r.is_dir,
+                            depth: r.depth,
+                        })
+                        .collect();
+                    let root = std::path::PathBuf::from(root);
+                    if let Some(view) = self.session.panes.get_mut(&pane) {
+                        match view.dir.as_mut() {
+                            Some(d) if d.root == root => d.set_entries(entries),
+                            _ => {
+                                let mut d = tsg_modal::DirBuffer::new(root, tsg_term::ambiguous());
+                                d.set_entries(entries);
+                                view.dir = Some(d);
+                                view.top = 0;
+                                view.follow_tail = false;
+                            }
+                        }
+                    }
+                    // 木の行数は端末の行数と関係ないので、カーソルを
+                    // 入れ直す。並べ直しで行が減ったとき、外を指したままにしない。
+                    if pane == self.session.active {
+                        self.clamp_cursor();
+                    }
+                }
+                ServerMsg::DirChanged { pane, root } => {
+                    // 中身は載ってこない。**どの枝を開いているかを知っている
+                    // のはこちら**なので、開いてある枝を添えて頼み直す。
+                    let expanded = self
+                        .session
+                        .panes
+                        .get(&pane)
+                        .and_then(|v| v.dir.as_ref())
+                        .map(tsg_modal::DirBuffer::expanded_paths)
+                        .unwrap_or_else(|| vec![root.clone()]);
+                    self.send_msg(&ClientMsg::DirList {
+                        pane,
+                        root: Some(root),
+                        expanded,
+                    });
+                }
                 ServerMsg::NeedFullFile { pane } => {
                     // 差分がずれた。黙って進まず、全文で立て直す。
                     self.resend_file(pane);
@@ -1701,6 +1900,9 @@ impl App {
             self.send_msg(&ClientMsg::Resize { pane, cols, rows });
         }
         self.sync_previews();
+        // 木も同じ扱い。**繋ぎ直したときに左半分だけ消えない**ように、
+        // 配置を合わせるどの道からも通る場所に置く。
+        self.sync_dirs();
     }
 
     // ---- マウス -----------------------------------------------------------
@@ -1835,7 +2037,15 @@ impl App {
                 Some(AgentState::Working) => "◍ ",
                 _ => "",
             };
-            let label = format!(" {} {}{} ", n + 1, mark, truncate_width(&title, 18));
+            // 末尾に閉じるボタン。**押せる場所を必ず持たせる**
+            // （`Space X` を知らない人が、タブを閉じる唯一の手段）。
+            let label = format!(
+                " {} {}{} {} ",
+                n + 1,
+                mark,
+                truncate_width(&title, 18),
+                TAB_CLOSE
+            );
             let w = display_width(&label);
             if x + w > self.cols {
                 break;
@@ -1844,6 +2054,44 @@ impl App {
             x += w;
         }
         out
+    }
+
+    /// タブを 1 枚閉じる。**中のペインを全部閉じる**（タブそのものを
+    /// 閉じる口はプロトコルに無く、要らない — `MuxRequest::CloseTab` と同じ道）。
+    fn close_tab(&mut self, tab: u32) {
+        let panes = self
+            .session
+            .info
+            .as_ref()
+            .and_then(|i| i.tabs.iter().find(|t| t.id == tab))
+            .map(|t| t.layout.panes())
+            .unwrap_or_default();
+        if panes.is_empty() {
+            return;
+        }
+        // 未保存があれば 1 度止める。**閉じるボタンは押しやすい**ので、
+        // キーで閉じるときより取り返しがつかない。
+        let unsaved: Vec<String> = panes
+            .iter()
+            .filter_map(|id| self.session.panes.get(id))
+            .filter(|v| v.file.as_ref().is_some_and(|f| f.dirty))
+            .filter_map(PaneView::label)
+            .collect();
+        if !unsaved.is_empty() && !self.quit_warned {
+            self.quit_warned = true;
+            self.status_msg = t!(
+                format!(
+                    "保存していません: {}（もう一度押すと閉じます）",
+                    unsaved.join(" / ")
+                ),
+                format!("unsaved: {} (press again to close)", unsaved.join(" / "))
+            );
+            return;
+        }
+        self.quit_warned = false;
+        for id in panes {
+            self.send_msg(&ClientMsg::ClosePane { pane: id });
+        }
     }
 
     /// Markdown を「読む形」と「素のまま」で行き来する。
@@ -1910,6 +2158,365 @@ impl App {
         }
     }
 
+    /// サーバが「このペインは木だ」と言っている通りに合わせる。
+    ///
+    /// **preview と同じ扱い。** どのペインが木かを決めるのはサーバで、
+    /// 窓を閉じて開き直しても左半分が消えないのはそのため。中身
+    /// （どのファイルが在るか）は、こちらから頼んで貰う。
+    fn sync_dirs(&mut self) {
+        let want: Vec<(u32, Option<String>)> = self
+            .session
+            .info
+            .as_ref()
+            .map(|i| i.panes.iter().map(|p| (p.id, p.dir.clone())).collect())
+            .unwrap_or_default();
+        let mut ask: Vec<(u32, String)> = Vec::new();
+        for (id, root) in want {
+            let Some(view) = self.session.panes.get_mut(&id) else {
+                continue;
+            };
+            match root {
+                None => {
+                    if view.dir.take().is_some() {
+                        view.top = 0;
+                        // 端末へ戻る。**また末尾に貼り付く**のが端末の既定。
+                        view.follow_tail = true;
+                    }
+                }
+                Some(root) => {
+                    let path = std::path::PathBuf::from(&root);
+                    if view.dir.as_ref().is_some_and(|d| d.root == path) {
+                        continue;
+                    }
+                    view.dir = Some(tsg_modal::DirBuffer::new(path, tsg_term::ambiguous()));
+                    view.top = 0;
+                    // 木は末尾に貼り付かない。**一覧の頭から読む**もので、
+                    // 端末のように増えた先を追いかける相手ではない。
+                    view.follow_tail = false;
+                    ask.push((id, root));
+                }
+            }
+        }
+        for (pane, root) in ask {
+            self.send_msg(&ClientMsg::DirList {
+                pane,
+                expanded: vec![root.clone()],
+                root: Some(root),
+            });
+        }
+    }
+
+    /// カーソルがバッファの外を指していたら中へ戻す。
+    fn clamp_cursor(&mut self) {
+        let at = self.engine.cursor();
+        let Some(view) = self.session.panes.get(&self.session.active) else {
+            return;
+        };
+        let buf = view.buffer();
+        let inside = tsg_buffer::clamp(&buf, at);
+        if inside != at {
+            self.engine.set_cursor(inside, &buf);
+        }
+    }
+
+    // ---- 作業台と木 --------------------------------------------------
+    //
+    // `go` と打つと、いま居るペインを真ん中にして左に木・右にエージェントが
+    // 並ぶ。組むのは 1 通（`ClientMsg::Workspace`）で、割り付けもタブの名前も
+    // サーバが決める。ここに在るのは**その後の使い勝手**だけ。
+
+    /// 作業台を組む。`cwd` を書かなければ、いま居るペインの場所。
+    fn build_workspace(&mut self, cwd: Option<String>) {
+        let pane = self.session.active;
+        // すでに木が並んでいるタブでもう一度組むと、木が 2 本になる。
+        // **同じタブで 2 度目は組まない**（場所を変えたいなら根を移す）。
+        if self.tab_has_tree() {
+            self.status_msg = t!(
+                "このタブはもう作業台です（別のタブで go を打ってください）",
+                "this tab is already a workspace (run go in another tab)"
+            )
+            .into();
+            return;
+        }
+        self.send_msg(&ClientMsg::Workspace {
+            pane,
+            cwd,
+            agent: self.cfg.agent.clone(),
+        });
+        self.status_msg = t!(
+            "作業台を組みました（左が木・右がエージェント）",
+            "workspace ready (tree on the left, agent on the right)"
+        )
+        .into();
+    }
+
+    /// このタブに木がもう在るか。
+    fn tab_has_tree(&self) -> bool {
+        self.session
+            .active_layout()
+            .map(tsg_mux::Layout::panes)
+            .unwrap_or_default()
+            .into_iter()
+            .any(|id| self.session.panes.get(&id).is_some_and(PaneView::exploring))
+    }
+
+    /// いま操作の相手になる木のペイン。**選ばれているペインだけ**。
+    ///
+    /// 別のペインに居るのに木が動くと、どこを触っているのか分からなくなる。
+    fn explorer_pane(&self) -> Option<u32> {
+        let id = self.session.active;
+        self.session
+            .panes
+            .get(&id)
+            .is_some_and(PaneView::exploring)
+            .then_some(id)
+    }
+
+    /// 木から開いたファイルを出す先。**木の右隣**。
+    ///
+    /// 無ければ木のペイン自身（1 枚しか無いときに開けないより、
+    /// そこで開くほうがまし。`:q` で木へ戻れる）。
+    fn explorer_target(&self, tree: u32) -> u32 {
+        self.session
+            .neighbor(tree, tsg_modal::command::FocusDir::Right)
+            .unwrap_or(tree)
+    }
+
+    /// 木を並べ直してもらう。開いてある枝を添える。
+    fn explorer_relist(&mut self, pane: u32) {
+        let Some(d) = self.session.panes.get(&pane).and_then(|v| v.dir.as_ref()) else {
+            return;
+        };
+        let root = d.root.display().to_string();
+        let expanded = d.expanded_paths();
+        self.send_msg(&ClientMsg::DirList {
+            pane,
+            root: Some(root),
+            expanded,
+        });
+    }
+
+    /// いま選んでいる行が指しているもの。
+    fn explorer_selection(&self) -> Option<(u32, tsg_modal::DirEntry)> {
+        let pane = self.explorer_pane()?;
+        let line = self.engine.cursor().line;
+        let e = self
+            .session
+            .panes
+            .get(&pane)?
+            .dir
+            .as_ref()?
+            .entry(line)?
+            .clone();
+        Some((pane, e))
+    }
+
+    fn not_in_tree(&mut self) {
+        self.status_msg = t!(
+            "左の木の中で使ってください",
+            "use this inside the tree on the left"
+        )
+        .into();
+    }
+
+    fn explorer_op(&mut self, op: tsg_modal::ExplorerOp) {
+        use tsg_modal::ExplorerOp as Op;
+        let Some(pane) = self.explorer_pane() else {
+            self.not_in_tree();
+            return;
+        };
+        match op {
+            Op::Refresh => {
+                self.explorer_relist(pane);
+                self.status_msg = t!("読み直しました", "reloaded").into();
+            }
+            Op::NewFile => self.palette_with("new "),
+            Op::NewDir => self.palette_with("newdir "),
+            Op::Rename => match self.explorer_selection() {
+                Some((_, e)) => self.palette_with(&format!("mv {}", e.name)),
+                None => self.not_in_tree(),
+            },
+            Op::Activate | Op::Expand | Op::Collapse => {
+                let Some((_, e)) = self.explorer_selection() else {
+                    return;
+                };
+                if !e.is_dir {
+                    // 枝を畳もうとしてファイルに居るなら、親へ戻る。
+                    if op == Op::Collapse {
+                        self.explorer_goto(pane, e.path.parent());
+                        return;
+                    }
+                    let target = self.explorer_target(pane);
+                    self.open_file_at(target, &e.path.display().to_string());
+                    self.session.active = target;
+                    self.status_msg = t!(
+                        format!("{} を開きます", e.name),
+                        format!("opening {}", e.name)
+                    );
+                    return;
+                }
+                let open = self
+                    .session
+                    .panes
+                    .get(&pane)
+                    .and_then(|v| v.dir.as_ref())
+                    .is_some_and(|d| d.is_expanded(&e.path));
+                // 開いている枝で `l`、畳んである枝で `h` は空振り。
+                // **何も起きないのが正しい**（vim の作法と同じ）。
+                if (op == Op::Expand && open) || (op == Op::Collapse && !open) {
+                    return;
+                }
+                let changed = self
+                    .session
+                    .panes
+                    .get_mut(&pane)
+                    .and_then(|v| v.dir.as_mut())
+                    .is_some_and(|d| d.toggle(&e.path));
+                if changed {
+                    self.explorer_relist(pane);
+                }
+            }
+        }
+    }
+
+    /// パスをいま居る場所から解く。相対でも絶対でも受ける。
+    fn resolve_here(&self, path: &str) -> String {
+        let p = std::path::Path::new(path);
+        if p.is_absolute() {
+            return p.display().to_string();
+        }
+        let here = self
+            .active_view()
+            .and_then(|v| v.term.state.cwd.clone())
+            .and_then(|u| file_url_to_path(&u))
+            .or_else(|| self.cwd.clone());
+        match here {
+            Some(h) => std::path::Path::new(&h).join(p).display().to_string(),
+            None => p.display().to_string(),
+        }
+    }
+
+    /// 木の中で作る。**選んでいる行のディレクトリの中**へ。
+    ///
+    /// 名前に `/` が入っていれば途中のフォルダごと作る（`src/api/x.rs`）。
+    /// 1 つずつ作らせるのは、やることが分かっているのに手数を増やすだけ。
+    fn explorer_create(&mut self, name: &str, dir: bool) {
+        let name = name.trim();
+        if name.is_empty() {
+            self.status_msg = t!("名前が空です", "the name is empty").into();
+            return;
+        }
+        let Some(pane) = self.explorer_pane() else {
+            self.not_in_tree();
+            return;
+        };
+        let line = self.engine.cursor().line;
+        let Some(base) = self
+            .session
+            .panes
+            .get(&pane)
+            .and_then(|v| v.dir.as_ref())
+            .map(|d| d.dir_at(line))
+        else {
+            return;
+        };
+        let path = base.join(name);
+        // 作った先が見えるように、入れ物の枝を開けておく。
+        if let Some(d) = self
+            .session
+            .panes
+            .get_mut(&pane)
+            .and_then(|v| v.dir.as_mut())
+        {
+            d.expand(&base);
+        }
+        self.send_msg(&ClientMsg::DirNew {
+            pane,
+            path: path.display().to_string(),
+            dir,
+        });
+        self.status_msg = if dir {
+            t!(format!("{name}/ を作ります"), format!("creating {name}/"))
+        } else {
+            t!(format!("{name} を作ります"), format!("creating {name}"))
+        };
+    }
+
+    /// 選んでいるものの名前を変える。
+    fn explorer_rename_to(&mut self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() {
+            self.status_msg = t!("名前が空です", "the name is empty").into();
+            return;
+        }
+        let Some((pane, e)) = self.explorer_selection() else {
+            self.not_in_tree();
+            return;
+        };
+        let Some(parent) = e.path.parent() else {
+            self.status_msg = t!("根の名前は変えられません", "cannot rename the root").into();
+            return;
+        };
+        let to = parent.join(name);
+        if to == e.path {
+            return;
+        }
+        self.send_msg(&ClientMsg::DirRename {
+            pane,
+            from: e.path.display().to_string(),
+            to: to.display().to_string(),
+        });
+        self.status_msg = t!(
+            format!("{} を {name} にします", e.name),
+            format!("renaming {} to {name}", e.name)
+        );
+    }
+
+    /// 木の中で、そのパスの行へカーソルを置く。
+    fn explorer_goto(&mut self, pane: u32, path: Option<&std::path::Path>) {
+        let Some(path) = path else {
+            return;
+        };
+        let Some(line) = self
+            .session
+            .panes
+            .get(&pane)
+            .and_then(|v| v.dir.as_ref())
+            .and_then(|d| d.line_of(path))
+        else {
+            return;
+        };
+        let Some(view) = self.session.panes.get(&pane) else {
+            return;
+        };
+        let buf = view.buffer();
+        self.engine.set_cursor(Pos::new(line, 0), &buf);
+    }
+
+    /// 木の中のものを、別のディレクトリへ動かす（ドラッグ＆ドロップ）。
+    fn explorer_move(&mut self, pane: u32, from: &std::path::Path, to_dir: &std::path::Path) {
+        if from.parent() == Some(to_dir) {
+            return; // もう そこに在る
+        }
+        self.send_msg(&ClientMsg::DirMove {
+            pane,
+            from: from.display().to_string(),
+            to_dir: to_dir.display().to_string(),
+        });
+        let name = from
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let into = to_dir
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| to_dir.display().to_string());
+        self.status_msg = t!(
+            format!("{name} を {into}/ へ動かしました"),
+            format!("moved {name} into {into}/")
+        );
+    }
+
     /// このペインに出てきたファイルパスを集めて一覧にする。
     ///
     /// エージェントは「どのファイルを読んで、どこを直したか」を字で言う。
@@ -1971,6 +2578,9 @@ impl App {
             .map(|p| (p.id, self.agent_state(p.id)))
             .collect();
         let mut call = false;
+        // **どのタブが呼んでいるか**まで言う。3 本並べているとき、
+        // 「誰かが待っている」だけでは結局こちらから探しにいくことになる。
+        let mut who: Vec<String> = Vec::new();
         for (id, state) in now {
             let Some(state) = state else {
                 self.agent_seen.remove(&id);
@@ -1979,8 +2589,10 @@ impl App {
             let before = self.agent_seen.insert(id, state);
             if before != Some(state) && state.wants_you() {
                 call = true;
+                who.push(self.tab_label_of_pane(id));
             }
         }
+        who.dedup();
         // 開いているペインが消えたぶんを落とす
         let live: Vec<u32> = self
             .session
@@ -1995,7 +2607,43 @@ impl App {
             && let Some(w) = &self.window
         {
             platform::attention(w.as_ref());
+            // 点滅だけでは、最小化している人には届かない。
+            if self.cfg.popup {
+                let body = if who.is_empty() {
+                    t!("返事を待っています", "waiting for you").to_string()
+                } else {
+                    t!(
+                        format!("{} が返事を待っています", who.join(" / ")),
+                        format!("{} is waiting for you", who.join(" / "))
+                    )
+                };
+                platform::popup(w.as_ref(), "tsumugi", &body);
+            }
         }
+    }
+
+    /// そのペインが居るタブの見出し。知らせに載せる名前。
+    fn tab_label_of_pane(&self, pane: u32) -> String {
+        let Some(info) = self.session.info.as_ref() else {
+            return String::new();
+        };
+        let Some(tab) = info.tabs.iter().find(|t| t.layout.panes().contains(&pane)) else {
+            return String::new();
+        };
+        tab.name
+            .clone()
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                self.session
+                    .panes
+                    .get(&pane)
+                    .map(|v| v.term.state.title.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
+            .unwrap_or_else(|| {
+                let n = info.tabs.iter().position(|t| t.id == tab.id).unwrap_or(0) + 1;
+                t!(format!("タブ{n}"), format!("tab {n}"))
+            })
     }
 
     /// 次の「人の番」のエージェントへ飛ぶ。別のタブに居れば、そのタブごと。
@@ -2215,6 +2863,31 @@ impl App {
         {
             self.palette.hide();
             self.grep_project(what);
+            return true;
+        }
+        // 作業台を組む。`go` だけならいま居る場所、`go <パス>` ならそこ。
+        if q == "go" || q.starts_with("go ") {
+            self.palette.hide();
+            let arg = q.strip_prefix("go").map(str::trim).unwrap_or("");
+            let cwd = (!arg.is_empty()).then(|| self.resolve_here(arg));
+            self.build_workspace(cwd);
+            return true;
+        }
+        // 木の中で作る・名前を変える。**順番に見る**（`newdir` が `new ` に
+        // 食われないよう、長いほうを先に）。
+        if let Some(name) = q.strip_prefix("newdir").map(str::trim) {
+            self.palette.hide();
+            self.explorer_create(name, true);
+            return true;
+        }
+        if let Some(name) = q.strip_prefix("new").map(str::trim) {
+            self.palette.hide();
+            self.explorer_create(name, false);
+            return true;
+        }
+        if let Some(name) = q.strip_prefix("mv").map(str::trim) {
+            self.palette.hide();
+            self.explorer_rename_to(name);
             return true;
         }
         // タブに名前を付ける。中の題名では区別が付かないときに要る。
@@ -2872,11 +3545,16 @@ impl App {
 
         // タブバー（`mouse-parity.md` §4.5「タブバーをクリック」「タブをドラッグ」）
         if row < self.tab_rows() {
-            if let Some((_, _, tab, ..)) = self
+            if let Some((x, w, tab, ..)) = self
                 .tab_spans()
                 .into_iter()
                 .find(|(x, w, ..)| col >= *x && col < *x + *w)
             {
+                // 末尾の ✕ を押したら閉じる。選ぶより先に見る。
+                if button == MouseButton::Left && on_tab_close(col, x, w) {
+                    self.close_tab(tab);
+                    return;
+                }
                 self.send_msg(&ClientMsg::SelectTab { tab });
                 // 離した場所が別のタブなら並べ替え。掴んだ時点では動かさない。
                 if button == MouseButton::Left {
@@ -2954,7 +3632,13 @@ impl App {
         }
 
         // 左ガター（§4.2「左ガターは、ターミナル固有モーションのマウス版そのもの」）
-        if button == MouseButton::Left && self.on_gutter(id, col) {
+        //
+        // **木にはガターが無い。** 一覧の左端 2 桁を押して何も起きないと、
+        // 細い木では「押せない帯」がずっと居座ることになる。
+        if button == MouseButton::Left
+            && self.on_gutter(id, col)
+            && !self.session.panes.get(&id).is_some_and(PaneView::exploring)
+        {
             self.on_gutter_click(id, col, row, event_loop);
             return;
         }
@@ -3155,6 +3839,34 @@ impl App {
             return;
         }
 
+        // 木の行。1 回目は選ぶ（＋掴む）、2 回目で開く。
+        if self.session.panes.get(&id).is_some_and(PaneView::exploring) {
+            let buf_pos = {
+                let Some(view) = self.session.panes.get(&id) else {
+                    return;
+                };
+                tsg_buffer::clamp(&view.buffer(), pos)
+            };
+            self.dispatch(tsg_modal::Command::SetCursor(buf_pos), event_loop);
+            if clicks >= 2 {
+                self.dir_drag = None;
+                self.drag = None;
+                self.explorer_op(tsg_modal::ExplorerOp::Activate);
+                return;
+            }
+            // 掴んだだけでは動かさない。離した先で決める。
+            self.dir_drag = self
+                .session
+                .panes
+                .get(&id)
+                .and_then(|v| v.dir.as_ref())
+                .and_then(|d| d.entry(buf_pos.line))
+                .map(|e| e.path.clone());
+            // 木の上でなぞって範囲を作る意味は無い（行を選ぶのが仕事）。
+            self.drag = None;
+            return;
+        }
+
         if clicks == 1 {
             let view = self.session.panes.get(&id);
             let editing = view.is_some_and(PaneView::editing);
@@ -3337,6 +4049,30 @@ impl App {
                 self.menu.show((col, row), has_selection);
             } else {
                 self.drop_on_prompt(id, from);
+            }
+            return;
+        }
+
+        // 木から掴んだものを、別のところで離した（ドラッグ＆ドロップ）。
+        if let Some(from) = self.dir_drag.take()
+            && let Some(pane) = self.session.pane_at(col, row)
+            && self
+                .session
+                .panes
+                .get(&pane)
+                .is_some_and(PaneView::exploring)
+            && let Some(pos) = self.doc_pos(pane, col, row)
+        {
+            let to_dir = self
+                .session
+                .panes
+                .get(&pane)
+                .and_then(|v| v.dir.as_ref())
+                .map(|d| d.dir_at(pos.line));
+            if let Some(to_dir) = to_dir
+                && to_dir != from
+            {
+                self.explorer_move(pane, &from, &to_dir);
             }
             return;
         }
@@ -3716,6 +4452,22 @@ impl App {
             return;
         }
 
+        // 木の中だけの語彙。**エンジンより先に見る。**
+        //
+        // ここを既定のキーマップへ入れると、`a` や `r` が端末でも
+        // 木の意味になってしまう。木は「いま見ているものに応じて
+        // 同じ字がいちばん近いものを指す」の一例で、場所で決まる。
+        if self.engine.mode() == Mode::Normal
+            && self.active_view().is_some_and(PaneView::exploring)
+            && let Some(op) = explorer_key(&key, text.as_deref())
+        {
+            self.explorer_op(op);
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            return;
+        }
+
         // `[e` `]e` が見る行を、いまのペインに合わせる。**打つ直前に
         // 揃える**ので、ペインを切り替える道が何本あっても取りこぼさない。
         //
@@ -3738,6 +4490,16 @@ impl App {
                 self.snap_after_leaving_insert(was_insert);
             }
             KeyOutcome::PassThrough => {
+                // 木の一覧は書けない。**下のシェルへも流さない。**
+                // 見えていないプロセスへ字が入るのが一番たちが悪い。
+                if self.active_view().is_some_and(PaneView::exploring) {
+                    self.status_msg = t!(
+                        "木の中では書けません（Enter で開く・a 新規・r 名前変更）",
+                        "the tree is a listing (Enter opens, a new, r rename)"
+                    )
+                    .into();
+                    return;
+                }
                 // エディタとして開いていれば、打鍵はファイルへ入る。
                 // 下のシェルには 1 バイトも行かない。
                 // 読む形のあいだは書き換えない。**写しを編集しても
@@ -6016,6 +6778,62 @@ struct Hint {
     label: String,
 }
 
+/// 木の中だけで意味を持つキー。
+///
+/// **既定のキーマップには入れない。** `a` や `r` を全体で奪うと、端末でも
+/// ファイルでも意味が変わってしまう。木の中でだけ、いちばん近いものを指す。
+/// 字は netrw / oil.nvim に合わせてあるので、vim を使う人は覚え直さない。
+fn explorer_key(key: &Key, text: Option<&str>) -> Option<tsg_modal::ExplorerOp> {
+    use tsg_modal::ExplorerOp as Op;
+    if matches!(key, Key::Named(NamedKey::Enter)) {
+        return Some(Op::Activate);
+    }
+    let c = text.and_then(|t| t.chars().next()).or_else(|| match key {
+        Key::Character(s) => s.chars().next(),
+        _ => None,
+    })?;
+    Some(match c {
+        'o' => Op::Activate,
+        'l' => Op::Expand,
+        'h' => Op::Collapse,
+        'r' => Op::Rename,
+        'a' => Op::NewFile,
+        'A' => Op::NewDir,
+        'R' => Op::Refresh,
+        _ => return None,
+    })
+}
+
+/// 空白を含むパスは囲う。**囲わないと、相手は 2 つの引数として読む。**
+///
+/// もう囲ってあるものは触らない（`"C:\\a b"` を二重に囲わない）。
+fn quote_path(path: &str) -> String {
+    if !path.contains(char::is_whitespace) || (path.starts_with('"') && path.ends_with('"')) {
+        return path.to_string();
+    }
+    format!("\"{path}\"")
+}
+
+/// 1 枚で送る絵の上限。
+///
+/// 画面 1 枚の PNG はふつう数 MB で、ここに当たるのは異様に大きいものだけ。
+/// **socket は 1 行 1 通**なので、際限なく大きい行を流すと受け側が
+/// そのぶん一度に抱える。
+const MAX_PASTE_IMAGE: usize = 16 * 1024 * 1024;
+
+/// タブの末尾に出す閉じるボタン。
+const TAB_CLOSE: &str = "✕";
+/// 閉じるボタンの当たり判定の幅（`✕` と右の余白）。
+///
+/// **見えている字より 1 桁広く取る。** 端の 1 桁は指が滑る場所で、
+/// そこを外すと「押したのに閉じない」になる。
+const TAB_CLOSE_HIT: usize = 2;
+
+/// タブの閉じるボタンの上か。**描くときと当てるときで同じ数え方**を通す。
+fn on_tab_close(col: usize, x: usize, w: usize) -> bool {
+    col + TAB_CLOSE_HIT >= x + w && col >= x
+}
+
 /// 「開く」対象の種別。ホバーの下線と Ctrl＋クリックで同じ判定を使う。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OpenKind {
@@ -6480,6 +7298,44 @@ fn help_lines() -> Vec<HelpLine> {
         v.push(Pair(a, b));
     }
     v.push(Blank);
+    v.push(Title(t!(
+        "■ 作業台を組むなら（go）",
+        "■ Laying out a workspace (go)"
+    )));
+    for (a, b) in [
+        (
+            t!("cd してから go", "cd, then type go"),
+            t!(
+                "左に木・真ん中にコード・右にエージェント（Space w でも）",
+                "tree left, code middle, agent right (or Space w)"
+            ),
+        ),
+        (
+            t!("木の中で Enter", "Enter in the tree"),
+            t!(
+                "ディレクトリなら開閉、ファイルなら真ん中で開く",
+                "fold a directory, or open a file in the middle"
+            ),
+        ),
+        (
+            t!("木の中で a / A / r", "a / A / r in the tree"),
+            t!(
+                "新しいファイル / フォルダ / 名前を変える",
+                "new file / new folder / rename"
+            ),
+        ),
+        (
+            t!("木の中でドラッグ", "drag in the tree"),
+            t!("別のディレクトリへ動かす", "move it into another directory"),
+        ),
+        (
+            t!("タブの ✕", "the ✕ on a tab"),
+            t!("そのタブを閉じる", "close that tab"),
+        ),
+    ] {
+        v.push(Pair(a, b));
+    }
+    v.push(Blank);
     v.push(Title(t!("■ ファイルを開いたら", "■ Once a file is open")));
     for (a, b) in [
         (
@@ -6509,6 +7365,17 @@ fn help_lines() -> Vec<HelpLine> {
         "■ Running AI agents side by side"
     )));
     for (a, b) in [
+        (
+            t!("Ctrl＋Shift＋V", "Ctrl+Shift+V"),
+            t!(
+                "スクショを貼る（ファイルにして、パスをプロンプトへ）",
+                "paste a screenshot (saved to a file, path on the prompt)"
+            ),
+        ),
+        (
+            t!("画像を窓へ落とす", "drop an image on the window"),
+            t!("同じところへ着く", "the same thing, with the mouse"),
+        ),
         (
             t!("下の ● 返事待ち", "the ● waiting count"),
             t!(
@@ -6829,6 +7696,20 @@ impl ApplicationHandler for App {
             WindowEvent::Focused(on) => {
                 self.focused = on;
                 if on && let Some(w) = &self.window {
+                    // 見に来たなら用は済んだ。通知領域に居座らせない。
+                    platform::hide_popup(w.as_ref());
+                    w.request_redraw();
+                }
+            }
+
+            // ファイルマネージャから落とされた。**プロンプトへ置くだけ。**
+            //
+            // スクリーンショットを渡す道は 2 つあってよい。クリップボードから
+            // 貼るのと、ファイルを掴んで落とすのと、指の動きが違うだけで
+            // 頼んでいることは同じ。
+            WindowEvent::DroppedFile(path) => {
+                self.drop_file(&path);
+                if let Some(w) = &self.window {
                     w.request_redraw();
                 }
             }
@@ -6990,7 +7871,10 @@ fn report_install(r: Result<install::Report>) -> Result<()> {
     for line in &r.notes {
         println!("  · {line}");
     }
-    if r.done.is_empty() {
+    // **説明を出したなら、それで答えになっている。** 断った理由を
+    // 並べたあとに「何も変えるものがありませんでした」と付けると、
+    // 読んだ人はもう一度上へ目を戻すことになる。
+    if r.done.is_empty() && r.notes.is_empty() {
         println!("  何も変えるものがありませんでした");
     }
     Ok(())
@@ -7047,6 +7931,17 @@ fn main() -> Result<()> {
         cli::Mode::ExtLog(limit) => return rpc::ext_log(&cli.session, *limit),
         cli::Mode::LayoutExport => return rpc::layout_export(&cli.session),
         cli::Mode::LayoutApply(path) => return rpc::layout_apply(&cli.session, path),
+        cli::Mode::Workspace { cwd } => {
+            let dir = cwd.clone().or_else(|| {
+                std::env::current_dir()
+                    .ok()
+                    .map(|p| p.display().to_string())
+            });
+            // 何を右で起こすかは設定に書いてある。**打った側が読む**
+            // （サーバは設定ファイルを知らない）。
+            let (cfg, _) = Config::load();
+            return rpc::workspace(&cli.session, cli.pane, dir, cfg.agent);
+        }
         cli::Mode::Notify { text, level } => {
             return rpc::notify(&cli.session, text, *level);
         }
@@ -7061,6 +7956,7 @@ fn main() -> Result<()> {
         cli::Mode::Capture(pane) => return rpc::capture(&cli.session, *pane),
         cli::Mode::Rpc => return rpc::raw(&cli.session, cli.spawn),
         cli::Mode::Install => return report_install(install::install()),
+        cli::Mode::Update => return report_install(install::update(cli.force)),
         cli::Mode::Uninstall => return report_install(install::uninstall()),
         cli::Mode::ShellIntegration(name) => return print_shell_integration(name.as_deref()),
         cli::Mode::InstallShellIntegration(name) => {
@@ -7152,6 +8048,54 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ch(c: &str) -> Key {
+        Key::Character(c.into())
+    }
+
+    /// 空白のあるパスは囲う。**AI へ渡すのは 1 つの引数**で、
+    /// 途中で切れると「そんなファイルは無い」と言われる。
+    #[test]
+    fn a_path_with_a_space_in_it_is_handed_over_as_one_thing() {
+        assert_eq!(quote_path(r"C:\tmp\paste-1.png"), r"C:\tmp\paste-1.png");
+        assert_eq!(quote_path(r"C:\my pics\a.png"), "\"C:\\my pics\\a.png\"");
+        // すでに囲ってあるものは二重に囲わない
+        assert_eq!(quote_path("\"C:\\a b\""), "\"C:\\a b\"");
+    }
+
+    /// タブの ✕。**端の 1 桁は指が滑る場所**なので、字より 1 桁広く取る。
+    #[test]
+    fn the_close_button_sits_at_the_end_of_the_tab() {
+        // ` 1 wsdemo ✕ ` を x=0, w=13 とする
+        assert!(!on_tab_close(0, 0, 13), "頭は名前");
+        assert!(!on_tab_close(9, 0, 13), "名前の終わりはまだ名前");
+        assert!(on_tab_close(11, 0, 13), "✕ の桁");
+        assert!(on_tab_close(12, 0, 13), "右の余白も閉じる");
+        // 2 枚目のタブでも、同じ数え方でそのタブの末尾を指す
+        assert!(!on_tab_close(13, 13, 10));
+        assert!(on_tab_close(22, 13, 10));
+    }
+
+    /// 木の中の字。**端末では別のことをする字**なので、
+    /// ここで拾えるかどうかが「場所で意味が変わる」の実体になる。
+    #[test]
+    fn the_tree_gives_a_few_letters_a_meaning_of_their_own() {
+        use tsg_modal::ExplorerOp as Op;
+        assert_eq!(
+            explorer_key(&Key::Named(NamedKey::Enter), None),
+            Some(Op::Activate)
+        );
+        assert_eq!(explorer_key(&ch("o"), Some("o")), Some(Op::Activate));
+        assert_eq!(explorer_key(&ch("l"), Some("l")), Some(Op::Expand));
+        assert_eq!(explorer_key(&ch("h"), Some("h")), Some(Op::Collapse));
+        assert_eq!(explorer_key(&ch("r"), Some("r")), Some(Op::Rename));
+        assert_eq!(explorer_key(&ch("a"), Some("a")), Some(Op::NewFile));
+        assert_eq!(explorer_key(&ch("A"), Some("A")), Some(Op::NewDir));
+        assert_eq!(explorer_key(&ch("R"), Some("R")), Some(Op::Refresh));
+        // 拾わない字は、そのままエンジンへ。`j` `k` `gg` は今までどおり効く。
+        assert_eq!(explorer_key(&ch("j"), Some("j")), None);
+        assert_eq!(explorer_key(&ch("/"), Some("/")), None);
+    }
 
     fn range(a: (usize, usize), b: (usize, usize), kind: RangeKind) -> Range {
         Range::new(Pos::new(a.0, a.1), Pos::new(b.0, b.1), kind)

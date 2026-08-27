@@ -57,6 +57,20 @@ the VC++ redistributable**. Set `$env:TSUMUGI_DIR = 'D:	ools'` beforehand for a
 different location, `$env:TSUMUGI_NO_REGISTER = '1'` to skip the shortcuts, or
 `$env:TSUMUGI_VERSION = 'v0.1.0'` to pin a version.
 
+After that, the copy you installed can do it itself:
+
+```powershell
+tsg update            # fetch the latest release and swap it in
+tsg update --force    # reinstall even if it is the same version
+```
+
+**It downloads nothing when you are already on the latest** (it says
+`Already on v0.3.0.` and stops). Underneath it runs the same `install.ps1`, so
+there is only ever one way to install. A running executable cannot delete
+itself, so the old one stays as `tsg.exe.old-…` and the next `tsg update`
+removes it. A binary you built with `cargo build` is **never overwritten** —
+it says so and tells you what to do instead.
+
 Building it yourself:
 
 ```
@@ -97,6 +111,45 @@ Open it and press **F1**. The help starts with what the mouse alone can do.
 | `Ctrl`+click | open that path or URL |
 | right-click | everything you can do here |
 | `≡` at the bottom | every command, searchable |
+
+## Workspaces (`go`)
+
+`cd` to where you want to work and type **`go`**.
+
+```
+cd ~/dev/tsumugi
+go
+```
+
+The pane you are in becomes the middle one, a **directory tree opens on the
+left and an AI agent on the right**, and **the tab is renamed after the
+directory**. One tab per repository, and the tab names tell you which is which.
+
+| | |
+|---|---|
+| `j` `k` `/` in the tree | the usual reading mode - **the tree is a buffer**, so nothing new to learn |
+| `Enter` / double-click | folds a directory, or opens a file **in the middle pane** |
+| `l` / `h` | open / fold a branch |
+| `a` / `A` | new file / new folder (the name is asked for at the bottom) |
+| `r` | rename |
+| drag and drop | move it into another directory |
+| `R` | reload (after a `git checkout` outside, say) |
+| `:q` | close the tree; the pane goes back to being a shell |
+| the `✕` on a tab | close that tab (it stops once if something is unsaved) |
+
+`go` is a function the shell integration installs
+(`tsg --install-shell-integration`). **It coexists with the Go toolchain** —
+anything with arguments is forwarded to the real `go`, so `go build` still
+works, and so does a bare `go` outside tsumugi. Set `TSUMUGI_NO_GO=1` before
+sourcing the integration to keep the name for Go. From the keyboard it is
+`Space w`; from the palette, `:go` (`:go <path>` opens that one).
+
+**There is no delete.** An operation you cannot undo does not belong on a list
+your finger slides across. Delete things from the shell in the middle pane.
+
+The listing is read **on the server side**, so a session opened over
+`[domains]` shows the files on the far machine. Only branches you have opened
+are walked, so a directory with `node_modules` or `target` in it stays fast.
 
 ## What it does
 
@@ -175,6 +228,8 @@ The agent then reports its own state, and tsumugi shows it:
 | `● waiting N` at the bottom | click to jump there |
 | `Space a` | jump to the next one waiting |
 | taskbar flash | only when the window is in the background, only on change |
+| paste a screenshot | `Ctrl+Shift+V` writes the image to a file and **puts its path on the prompt** (it does not press Enter). Dropping an image on the window does the same |
+| a notification | reaches you even when minimised, and names **the tab** that is waiting (`[ui] popup = false` turns it off) |
 
 Scriptable, and it answers with exit codes so you can put it in an `if`:
 
@@ -197,6 +252,7 @@ template with every setting and its default.
 ```toml
 [ui]
 lang = "auto"                 # "ja" / "en" / "auto"
+popup = true                  # also notify from the corner of the screen while in the background
 
 [window]
 opacity = 0.85
@@ -210,6 +266,10 @@ ambiguous_width = "narrow"    # "wide" for the older CJK convention
 
 [theme]
 name = "yogiri"               # yogiri / sumi / hakuji
+
+[workspace]
+agent = "claude"              # what `go` starts on the right; ["codex", "-m", "gpt"] also works
+                              # leave it out for a plain shell (no default is assumed for you)
 
 [keys]
 "ctrl+k" = "search.open"      # any command id — `tsg --commands` lists them
@@ -249,6 +309,7 @@ tsg --open README.md --render  # open a file in the running window
 tsg --search "TODO"            # search from outside; n / N still work
 tsg --run <command-id>         # any command in the UI (--commands lists them)
 tsg --notify "build finished"  # tell the running window
+tsg --workspace [path]         # lay out a workspace (what the shell's `go` calls)
 tsg --wait --until exit:1      # wait for a command to fail
 tsg --layout-export            # write the current layout out as a shape (JSON)
 tsg --worktrees                # list the git worktrees

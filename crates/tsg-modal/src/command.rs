@@ -126,6 +126,28 @@ pub enum FocusDir {
     Down,
 }
 
+/// 木（左のディレクトリ）への操作。
+///
+/// **開く・畳む・作る・名前を変えるだけ。** 消す道はここに無い。
+/// 取り消せない操作を、指が滑る場所（一覧の上）へ置かない。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExplorerOp {
+    /// Enter — ディレクトリなら開閉、ファイルなら真ん中のペインで開く。
+    Activate,
+    /// `l` — 枝を開く。
+    Expand,
+    /// `h` — 枝を畳む。
+    Collapse,
+    /// `r` — 名前を変える。**新しい名前は窓が訊く。**
+    Rename,
+    /// `a` — ファイルを作る。
+    NewFile,
+    /// `A` — フォルダを作る。
+    NewDir,
+    /// `R` — 読み直す。外で `git checkout` した後などに使う。
+    Refresh,
+}
+
 /// mux（別プロセス）へ投げる要求。ホストが `tsg-mux` のメッセージへ翻訳する。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MuxRequest {
@@ -190,6 +212,13 @@ pub enum MuxRequest {
     /// エージェントは触ったファイルを字で言う。**その字はもう画面に在る**ので、
     /// 集めて並べるだけで「何を触られたか」の一覧になる。
     PaneFiles,
+    /// 作業台を組む（`Space w` / シェルで `go`）。
+    ///
+    /// 左に木、真ん中にいま居るペイン、右にエージェント。**1 つの要求**に
+    /// してあるのは、途中の形が画面へ配られて跳ねるのを避けるため。
+    Workspace,
+    /// 左の木への操作。
+    Explorer(ExplorerOp),
     /// 次の「人の番」のエージェントへ飛ぶ（`Space a`）。
     ///
     /// AI エージェントを何本も並べて放っておくと、**どれが止まって返事を
@@ -852,6 +881,54 @@ pub const REGISTRY: &[CommandSpec] = &[
         title_en: "Resize the split",
         keys: &["Space <", "Space >", "Space +", "Space -"],
         mouse: MousePath::Direct("ペイン境界をドラッグ"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "workspace.open",
+        title: "作業台を組む（左に木・右にエージェント）",
+        title_en: "Lay out a workspace (tree left, agent right)",
+        keys: &["Space w", ":go"],
+        mouse: MousePath::Menu("配置"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "explorer.activate",
+        title: "木: 開く / 畳む（木の中では Enter）",
+        title_en: "Tree: open or fold (Enter inside the tree)",
+        keys: &[],
+        mouse: MousePath::Direct("木の行をダブルクリック"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "explorer.new_file",
+        title: "木: 新しいファイル（木の中では a）",
+        title_en: "Tree: new file (a inside the tree)",
+        keys: &[],
+        mouse: MousePath::Menu("ファイル"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "explorer.new_dir",
+        title: "木: 新しいフォルダ（木の中では A）",
+        title_en: "Tree: new folder (A inside the tree)",
+        keys: &[],
+        mouse: MousePath::Menu("ファイル"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "explorer.rename",
+        title: "木: 名前を変える（木の中では r）",
+        title_en: "Tree: rename (r inside the tree)",
+        keys: &[],
+        mouse: MousePath::Menu("ファイル"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "explorer.refresh",
+        title: "木: 読み直す（木の中では R）",
+        title_en: "Tree: reload (R inside the tree)",
+        keys: &[],
+        mouse: MousePath::Menu("ファイル"),
         in_palette: true,
     },
     CommandSpec {

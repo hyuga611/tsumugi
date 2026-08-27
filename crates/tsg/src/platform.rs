@@ -69,6 +69,69 @@ mod imp {
         unsafe { FlashWindowEx(&info) };
     }
 
+    /// 通知領域のアイコンの番号。**1 つしか出さない**ので固定。
+    const TRAY_ID: u32 = 1;
+
+    /// 画面の隅に知らせを出す（最小化していても届く）。
+    ///
+    /// **タスクバーの点滅では足りない。** 窓を最小化していると、点滅は
+    /// 気づける人にしか気づけないし、何が起きたのかは分からない。
+    /// エージェントが返事を待っているのは「見に行く理由」なので、
+    /// どのタブが待っているかまで言う。
+    ///
+    /// WinRT のトーストではなく通知領域のバルーンを使う。Windows 10 以降は
+    /// OS がこれをトーストとして出すので見た目は同じで、**AppUserModelID を
+    /// 登録したショートカットが要らない**（入れ方が 1 行で済む）。
+    /// アイコンは`hide_popup` で消すので、常駐しているように見えない。
+    pub fn popup<W: HasWindowHandle>(window: &W, title: &str, body: &str) {
+        use windows_sys::Win32::UI::Shell::{
+            NIF_INFO, NIIF_INFO, NIM_ADD, NIM_MODIFY, NOTIFYICONDATAW, Shell_NotifyIconW,
+        };
+        let Some(hwnd) = hwnd_of(window) else {
+            return;
+        };
+        let mut data: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
+        data.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
+        data.hWnd = hwnd;
+        data.uID = TRAY_ID;
+        data.uFlags = NIF_INFO;
+        data.dwInfoFlags = NIIF_INFO;
+        put(&mut data.szInfoTitle, title);
+        put(&mut data.szInfo, body);
+        // 既に出ていれば MODIFY、無ければ ADD。**どちらが先か分からない**
+        // ので、両方試して通ったほうを使う（順番に依存させない）。
+        let added = unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) };
+        if added == 0 {
+            unsafe { Shell_NotifyIconW(NIM_ADD, &data) };
+        }
+    }
+
+    /// 知らせのアイコンを片付ける。**窓が前に出たら消す。**
+    ///
+    /// 出しっぱなしにすると、用が済んだあとも通知領域に居座る。
+    pub fn hide_popup<W: HasWindowHandle>(window: &W) {
+        use windows_sys::Win32::UI::Shell::{NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW};
+        let Some(hwnd) = hwnd_of(window) else {
+            return;
+        };
+        let mut data: NOTIFYICONDATAW = unsafe { std::mem::zeroed() };
+        data.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
+        data.hWnd = hwnd;
+        data.uID = TRAY_ID;
+        unsafe { Shell_NotifyIconW(NIM_DELETE, &data) };
+    }
+
+    /// UTF-16 の固定長へ入れる。**末尾の 0 を必ず残す。**
+    fn put(dst: &mut [u16], text: &str) {
+        let room = dst.len().saturating_sub(1);
+        let mut n = 0;
+        for u in text.encode_utf16().take(room) {
+            dst[n] = u;
+            n += 1;
+        }
+        dst[n] = 0;
+    }
+
     /// ウィンドウの見た目を OS 側で整える。効かない環境では黙って何も起きない。
     pub fn decorate<W: HasWindowHandle>(window: &W, blur: bool) {
         let Some(hwnd) = hwnd_of(window) else {
@@ -125,6 +188,16 @@ mod imp {
 
     /// 注意を引く。winit の `request_user_attention` が担うので、ここは空。
     pub fn attention<W: HasWindowHandle>(_window: &W) {}
+
+    /// 隅に出す知らせ。**まだ書いていない。**
+    ///
+    /// macOS は `UNUserNotificationCenter`（署名済みバンドルが要る）、
+    /// Linux は `org.freedesktop.Notifications`（D-Bus）で、Windows と
+    /// 同じ 1 本の道にならない。書くまでは黙って何もしないほうが、
+    /// 中途半端に片方だけ動くより読める。
+    pub fn popup<W: HasWindowHandle>(_window: &W, _title: &str, _body: &str) {}
+
+    pub fn hide_popup<W: HasWindowHandle>(_window: &W) {}
 }
 
-pub use imp::{attach_parent_console, attention, decorate, ui_language};
+pub use imp::{attach_parent_console, attention, decorate, hide_popup, popup, ui_language};

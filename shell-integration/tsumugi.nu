@@ -24,3 +24,18 @@ $env.config = ($env.config | upsert hooks {
 $env.PROMPT_COMMAND_RIGHT = {||
     $"(ansi -e ']133;B')(char bel)"
 }
+
+# ---------------------------------------------------------------------------
+# `go` — 作業台を組む
+#
+# cd してから `go` と打つと、いまのペインを真ん中にして左にディレクトリの木、
+# 右に AI エージェントが並び、タブの名前がそのディレクトリになる。
+#
+# Go 言語の `go` と名前がぶつかるので、引数があれば本物（`^go`）へ渡す。
+export def --wrapped go [...args] {
+    if ($args | is-empty) and ($env.TSUMUGI_SESSION? | is-not-empty) {
+        tsg --workspace $env.PWD
+    } else {
+        ^go ...$args
+    }
+}

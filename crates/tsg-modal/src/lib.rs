@@ -18,8 +18,8 @@ pub mod text;
 pub mod textobj;
 
 pub use command::{
-    Command, CommandSpec, FileAction, HistoryAction, InsertAt, Mode, MousePath, REGISTRY,
-    VisualKind,
+    Command, CommandSpec, ExplorerOp, FileAction, HistoryAction, InsertAt, Mode, MousePath,
+    MuxRequest, REGISTRY, VisualKind,
 };
 pub use engine::{
     Arrow, Effect, Engine, KeyInput, KeyOutcome, Macros, Marks, RegisterValue, Registers,
@@ -32,6 +32,7 @@ pub use textobj::{TextObject, range_of as textobj_range_of};
 
 pub use tsg_buffer::markdown;
 pub use tsg_buffer::{
-    Buffer, BufferKind, FileBuffer, Lang as SyntaxLang, OperatorId, Pos, Range, RangeKind, Splice,
-    SyntaxState, TermBuffer, Token, clamp_insert, extract, highlight, highlight_from, line_text,
+    Buffer, BufferKind, DirBuffer, DirEntry, FileBuffer, Lang as SyntaxLang, OperatorId, Pos,
+    Range, RangeKind, Splice, SyntaxState, TermBuffer, Token, clamp_insert, extract, highlight,
+    highlight_from, line_text,
 };

@@ -40,3 +40,26 @@ if not functions -q __tsg_orig_fish_prompt
         printf '\033]133;B\007'
     end
 end
+
+# ---------------------------------------------------------------------------
+# `go` — 作業台を組む
+#
+# cd してから `go` と打つと、いまのペインを真ん中にして左にディレクトリの木、
+# 右に AI エージェントが並び、タブの名前がそのディレクトリになる。
+#
+# Go 言語の `go` と名前がぶつかるので、引数があれば本物へ渡す。
+# 名前を取られたくなければ TSUMUGI_NO_GO=1 を置く。
+if not set -q TSUMUGI_NO_GO
+    function go
+        if test (count $argv) -eq 0; and set -q TSUMUGI_SESSION
+            tsg --workspace $PWD
+            return
+        end
+        if command -q go
+            command go $argv
+        else
+            echo "go: command not found" >&2
+            return 127
+        end
+    end
+end

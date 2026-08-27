@@ -10,7 +10,7 @@
 //! - **何を変えたかを必ず言う。** 黙って環境を書き換えない。
 //! - **`--uninstall` で全部戻る。** 戻せない変更はしない。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
@@ -39,6 +39,32 @@ pub fn uninstall() -> Result<Report> {
     imp::uninstall()
 }
 
+/// 最新版を取ってきて入れ替える（`tsg update`）。
+///
+/// **入れ方は 1 つに保つ。** ここで独自に GitHub を叩いて置き直すと、
+/// README に載っている `install.ps1` と道が 2 本になり、片方だけ直した日に
+/// 「入れ直したのに直らない」が起きる。だから**同じ台本を走らせる**
+/// （しかも取ってくるのは常に最新の台本なので、古い exe でも新しい入れ方に従える）。
+pub fn update(force: bool) -> Result<Report> {
+    let exe = std::env::current_exe().context("自分の場所が分かりません")?;
+    imp::update(&exe, force)
+}
+
+/// この exe は、ソースの木から `cargo build` したものか。
+///
+/// **そこへ配布版を上書きしない。** ビルドの成果物が黙って別物に
+/// 置き換わると、次の `cargo build` まで何が動いているのか分からなくなる。
+fn is_build_artifact(exe: &Path) -> bool {
+    let mut parts = exe.components().rev().skip(1); // ファイル名の 1 つ上から
+    let profile = parts.next();
+    let target = parts.next();
+    let named = |c: Option<std::path::Component<'_>>, want: &str| {
+        c.and_then(|c| c.as_os_str().to_str().map(|s| s.eq_ignore_ascii_case(want)))
+            .unwrap_or(false)
+    };
+    (named(profile, "debug") || named(profile, "release")) && named(target, "target")
+}
+
 /// アイコンを置く場所。ショートカットから参照するので、消えない場所に置く。
 fn icon_path() -> Option<PathBuf> {
     crate::config::path().and_then(|p| p.parent().map(|d| d.join("tsumugi.ico")))
@@ -59,7 +85,8 @@ fn write_icon() -> Option<PathBuf> {
 #[cfg(windows)]
 mod imp {
     use super::{Report, Result, icon_path, write_icon};
-    use std::path::Path;
+    use anyhow::Context as _;
+    use std::path::{Path, PathBuf};
 
     /// PowerShell に 1 本流す。COM（ショートカット）とレジストリのために使う。
     ///
@@ -167,6 +194,114 @@ mod imp {
         Ok(r)
     }
 
+    /// 入れ替える。**走っている自分は消せないので、先に名前を変える。**
+    ///
+    /// Windows は「走っている exe を上書き」はできないが、
+    /// 「走っている exe の名前を変える」はできる。避けてから置いてもらう。
+    pub fn update(exe: &Path, force: bool) -> Result<Report> {
+        let mut r = Report::new();
+        if super::is_build_artifact(exe) {
+            r.notes.push(format!(
+                "{} は cargo build で作ったものです。ここへ配布版を上書きしません",
+                exe.display()
+            ));
+            r.notes
+                .push("ソースを更新するなら: git pull; cargo build --release".into());
+            r.notes.push(
+                "配布版を別に入れるなら: $env:TSUMUGI_DIR = \"$env:USERPROFILE\\bin\"; \
+                 irm https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.ps1 | iex"
+                    .into(),
+            );
+            return Ok(r);
+        }
+        let dir = match std::env::var_os("TSUMUGI_DIR") {
+            Some(d) if !d.is_empty() => PathBuf::from(d),
+            _ => exe
+                .parent()
+                .map(Path::to_path_buf)
+                .context("自分の置き場所が分かりません")?,
+        };
+
+        // 前回の入れ替えで残った古い exe。**掴んでいる者が居なくなってから**
+        // でないと消せないので、次の入れ替えのここで片付ける。
+        sweep_old(&dir);
+
+        // これから置かれる場所が自分自身なら、避けておく。
+        let target = dir.join("tsg.exe");
+        let mut moved = None;
+        if same_file(exe, &target) {
+            let old = dir.join(format!("tsg.exe.old-{}", std::process::id()));
+            std::fs::rename(exe, &old)
+                .with_context(|| format!("{} を避けられません", exe.display()))?;
+            moved = Some(old);
+        }
+
+        let script = "$ErrorActionPreference='Stop'; \
+             irm https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.ps1 | iex";
+        let mut cmd = std::process::Command::new("powershell");
+        cmd.args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .env("TSUMUGI_DIR", &dir)
+            // いまの版を教える。**同じなら 19 MB を取り直さない。**
+            .env("TSUMUGI_HAVE", env!("CARGO_PKG_VERSION"));
+        if force {
+            cmd.env("TSUMUGI_FORCE", "1");
+        }
+        let status = cmd.status().context("powershell を起こせません")?;
+
+        if !status.success() {
+            // 置けなかったのに自分を避けたままだと、tsg が消えたことになる。
+            if let Some(old) = &moved {
+                let _ = std::fs::rename(old, exe);
+            }
+            anyhow::bail!("入れ替えに失敗しました（上の出力を見てください）");
+        }
+
+        r.done
+            .push(format!("{} を最新版にしました", target.display()));
+        if let Some(old) = moved {
+            // **いまは消せない。** 走っているのは自分自身で、OS が実行
+            // イメージを掴んでいる。抜けるのを別プロセスに見張らせる形も
+            // 試したが、こちらの機械では動かなかった（見えない後始末を
+            // 当てにするより、次の入れ替えで確実に消すほうを採る）。
+            r.notes.push(format!(
+                "古い版は {} に残ります（次の tsg update で消します）",
+                old.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            ));
+        }
+        r.notes.push(
+            "走っている多重化サーバは古いままです。\
+             繋がらなくなったら tsg -s <名前> --kill で一度止めてください"
+                .into(),
+        );
+        Ok(r)
+    }
+
+    /// 同じファイルを指しているか。**字面で比べない**（`~1` の短い名前や
+    /// 大文字小文字の違いで、避けるべきものを避けそこねる）。
+    fn same_file(a: &Path, b: &Path) -> bool {
+        match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+            (Ok(a), Ok(b)) => a == b,
+            // 相手がまだ無い（初めて置く）なら、名前で見るしかない。
+            _ => a == b,
+        }
+    }
+
+    /// 残っている古い exe を消す。**自分が付けた名前のものだけ。**
+    fn sweep_old(dir: &Path) {
+        let Ok(read) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in read.flatten() {
+            let name = e.file_name();
+            let Some(name) = name.to_str() else { continue };
+            if name.starts_with("tsg.exe.old-") {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
+
     pub fn uninstall() -> Result<Report> {
         let mut r = Report::new();
 
@@ -228,6 +363,8 @@ mod imp {
 #[cfg(not(windows))]
 mod imp {
     use super::{Report, Result, write_icon};
+    use std::path::Path;
+
     use std::path::{Path, PathBuf};
 
     fn home() -> Option<PathBuf> {
@@ -285,6 +422,19 @@ mod imp {
         Ok(r)
     }
 
+    /// 入れ替える。**Unix にはまだ配布物が無い。**
+    ///
+    /// Windows 向けの exe しかリリースしていないので、ここで
+    /// 「入れ替えました」と言うわけにいかない。作り方を出すだけにする。
+    pub fn update(_exe: &Path, _force: bool) -> Result<Report> {
+        let mut r = Report::new();
+        r.notes
+            .push("この OS 向けの配布物はまだありません（Windows だけ）".into());
+        r.notes
+            .push("ソースから: git pull; cargo build --release".into());
+        Ok(r)
+    }
+
     pub fn uninstall() -> Result<Report> {
         let mut r = Report::new();
         let Some(home) = home() else {
@@ -307,6 +457,24 @@ mod imp {
 
 #[cfg(test)]
 mod tests {
+    use super::{Path, is_build_artifact};
+
+    /// `cargo build` の成果物へ、配布版を上書きしない。
+    ///
+    /// **作者の機械ではこれが既定**（PATH がソースの木の `target\release` を
+    /// 指している）。黙って置き換えると、次の `cargo build` まで何が
+    /// 動いているのか分からなくなる。
+    #[test]
+    fn a_binary_built_from_source_is_left_alone() {
+        let art = |p: &str| is_build_artifact(Path::new(p));
+        assert!(art(r"C:\dev\tsumugi\target\release\tsg.exe"));
+        assert!(art("/home/x/tsumugi/target/debug/tsg"));
+        // 入れた先はふつうのフォルダ。ここは入れ替えてよい。
+        assert!(!art(r"C:\Users\x\bin\tsg.exe"));
+        assert!(!art(r"D:\tools\tsg.exe"));
+        // `target` の下でも、profile の名前でなければ違う
+        assert!(!art(r"C:\x\target\other\tsg.exe"));
+    }
     /// アイコンは埋め込む。別ファイルを探しに行く形にすると、
     /// exe を 1 つ置いただけの環境で「入れる」が成立しない。
     #[test]

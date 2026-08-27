@@ -9,6 +9,7 @@
 //! ターミナルでは全角が 2 セルを占めるため、バイトや文字数で数えると
 //! 画面上の位置と一致しなくなる。
 
+pub mod dir;
 pub mod file;
 pub mod markdown;
 pub mod syntax;
@@ -16,6 +17,7 @@ pub mod tree;
 
 use tsg_term::{Cell, Grid, SemanticMarks};
 
+pub use dir::{DirBuffer, DirEntry};
 pub use file::{FileBuffer, Splice};
 pub use syntax::{Lang, State as SyntaxState, Token, highlight, highlight_from};
 pub use tree::{Grammar, Syntax, TreeObject};

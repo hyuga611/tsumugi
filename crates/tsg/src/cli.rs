@@ -28,6 +28,11 @@ pub enum Mode {
         text: String,
         level: tsg_mux::Level,
     },
+    /// いま居るペインを真ん中にして作業台を組む（シェルの `go`）
+    Workspace {
+        /// 根。書かなければペインが居る場所。
+        cwd: Option<String>,
+    },
     /// git の作業ツリーを並べる
     Worktrees,
     /// その作業ツリーで新しいタブを開く
@@ -96,6 +101,8 @@ pub enum Mode {
     UninstallAgentHooks(Option<String>),
     /// スタートメニュー・PATH・右クリックメニューへ登録する
     Install,
+    /// 最新版を取ってきて入れ替える（`tsg update`）
+    Update,
     /// それを全部外す
     Uninstall,
     Help,
@@ -123,6 +130,8 @@ pub struct Cli {
     pub new_window: bool,
     /// 相手のペイン。書かなければ「いま選ばれているペイン」。
     pub pane: Option<u32>,
+    /// 押し切る（`tsg update --force` は、同じ版でも入れ直す）。
+    pub force: bool,
     /// 起動と同時に組む配置。いまは `agents` だけ。
     pub layout: Option<String>,
     /// 前回の形から組み直すか。`--no-restore` で切る。
@@ -162,6 +171,7 @@ impl Default for Cli {
             session_given: false,
             new_window: false,
             pane: None,
+            force: false,
             layout: None,
             restore: true,
             domain: None,
@@ -197,6 +207,7 @@ tsumugi (tsg) — ターミナルの画面を vim で編集できるドキュメ
       --uninstall          それを全部外す
       --shell-integration [シェル]
                            シェル統合（OSC 133）のスクリプトを出す
+      update               最新版を取ってきて入れ替える（--force で同じ版でも）
       --install-shell-integration [シェル]
                            それを置いて、シェルの設定ファイルに 1 行足す
       --diagnose           フォントと CJK 幅の実測値を出して終了
@@ -210,6 +221,7 @@ tsumugi (tsg) — ターミナルの画面を vim で編集できるドキュメ
       --ext-log [本数]     拡張が何をしたかの記録（断った理由もここ。既定は 50 本）
       --notify <文> [--warn|--error]
                            走っている窓へ知らせる（台本の「終わったよ」）
+      --workspace [パス]   いまのペインを真ん中に作業台を組む（左に木・右にエージェント）
       --worktrees          git の作業ツリーを並べる
       --worktree-add <パス> [--branch <名前>]
                            作業ツリーを足して、そこで新しいタブを開く
@@ -353,9 +365,18 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Cli {
                 cli.mode = Mode::InstallShellIntegration(next_value(&args, &mut i));
             }
             "--install" => cli.mode = Mode::Install,
+            // **裸の `update` も受ける。** 打つ側が覚えているのは
+            // 「tsg update」で、`--` が要るかどうかではない。
+            "update" | "--update" | "--upgrade" => cli.mode = Mode::Update,
+            "--force" => cli.force = true,
             "--uninstall" => cli.mode = Mode::Uninstall,
             "--diagnose" => cli.mode = Mode::Diagnose,
             "--tap" => cli.mode = Mode::Tap,
+            // シェル統合の `go` が呼ぶ口。
+            "--workspace" => {
+                let dir = next_value(&args, &mut i);
+                cli.mode = Mode::Workspace { cwd: dir };
+            }
             "--notify" => {
                 if let Some(t) = next_value(&args, &mut i) {
                     cli.mode = Mode::Notify {
@@ -537,6 +558,19 @@ mod tests {
 
     fn cli(s: &[&str]) -> Cli {
         parse(s.iter().map(|x| (*x).to_string()))
+    }
+
+    /// **裸の `update` も受ける。** 打つ側が覚えているのは「tsg update」で、
+    /// `--` が要るかどうかではない。
+    #[test]
+    fn update_is_spelled_the_way_people_type_it() {
+        assert_eq!(cli(&["update"]).mode, Mode::Update);
+        assert_eq!(cli(&["--update"]).mode, Mode::Update);
+        assert_eq!(cli(&["--upgrade"]).mode, Mode::Update);
+        assert!(!cli(&["update"]).force);
+        assert!(cli(&["update", "--force"]).force);
+        // ふつうの起動は今までどおり
+        assert_eq!(cli(&[]).mode, Mode::Run);
     }
 
     #[test]

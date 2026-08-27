@@ -126,6 +126,13 @@ JSON Lines（1 行 1 メッセージ、UTF-8）。判別は `"t"` フィール�
 | `save_file` | `pane`, `path?` | 保存する |
 | `close_file` | `pane` | 端末へ戻す |
 | `pipe_result` | `pane`, `dir`, `title`, `text` | 結果を新しいペインで開く |
+| `workspace` | `pane`, `cwd?`, `agent?` | そのペインを真ん中に作業台を組む（左に木・右にエージェント。タブの名前は根の名前） |
+| `dir_list` | `pane`, `root?`, `expanded?` | 木を並べ直す。**開いてある枝は毎回渡す**（覚えるのはクライアント） |
+| `dir_close` | `pane` | 木を閉じて、ふつうのペインへ戻す |
+| `dir_new` | `pane`, `path`, `dir` | 作る。**在れば断る**（黙って上書きしない） |
+| `dir_rename` | `pane`, `from`, `to` | 名前を変える |
+| `dir_move` | `pane`, `from`, `to_dir` | 動かす。自分の中へは入れられない |
+| `paste_image` | `pane`, `data`(base64 PNG) | 絵をファイルにして置く。答えは `pasted`。**書くのはサーバ**（遠隔ならファイルは向こうに要る） |
 | `new_tab` | — | タブを足す |
 | `select_tab` | `tab` | タブを選ぶ |
 | `ext_hello` | `name` | 名乗る（記録を読める形にするためだけ） |
@@ -176,6 +183,9 @@ JSON Lines（1 行 1 メッセージ、UTF-8）。判別は `"t"` フィール�
 | `notify` | `text`, `level` | 画面へ出す知らせ |
 | `waited` | `matched`, `pane?` | `wait` の返事。**1 通だけ** |
 | `layout_spec` | `spec` | `layout_export` の返事 |
+| `dir_listing` | `pane`, `root`, `rows` | 木の中身。**総取り替え** |
+| `dir_changed` | `pane`, `root` | ディスクが変わった。**中身は載らない**ので `dir_list` で頼み直す |
+| `pasted` | `pane`, `path` | `paste_image` の返事。置いた場所。**頼んだクライアントにだけ**返る |
 | `worktrees` | `items` | `worktree_list` の返事 |
 | `pong` | — | `ping` の返事 |
 | `error` | `message` | 断った理由 |

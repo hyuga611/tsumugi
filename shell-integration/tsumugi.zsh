@@ -48,3 +48,41 @@ fi
 autoload -Uz add-zsh-hook
 add-zsh-hook precmd __tsg_precmd
 add-zsh-hook preexec __tsg_preexec
+
+# ---------------------------------------------------------------------------
+# `go` — 作業台を組む
+#
+# cd してから `go` と打つと、いまのペインを真ん中にして左にディレクトリの木、
+# 右に AI エージェントが並び、タブの名前がそのディレクトリになる。
+#
+# Go 言語の `go` と名前がぶつかるので、**引数があれば本物へ渡す**
+# （`go build` はそのまま通る）。tsumugi の外でも本物へ渡す。
+# 名前を取られたくなければ、これを読む前に TSUMUGI_NO_GO=1 を置く。
+__tsg_real_go() {
+    _tsg_ifs=$IFS
+    IFS=:
+    for _tsg_d in $PATH; do
+        if [ -x "$_tsg_d/go" ]; then
+            IFS=$_tsg_ifs
+            printf '%s\n' "$_tsg_d/go"
+            return 0
+        fi
+    done
+    IFS=$_tsg_ifs
+    return 1
+}
+
+if [ -z "${TSUMUGI_NO_GO:-}" ]; then
+    go() {
+        if [ "$#" -eq 0 ] && [ -n "${TSUMUGI_SESSION:-}" ]; then
+            tsg --workspace "$PWD"
+            return
+        fi
+        if _tsg_go=$(__tsg_real_go); then
+            "$_tsg_go" "$@"
+        else
+            printf 'go: %s\n' "${1:-}" >&2
+            return 127
+        fi
+    }
+fi

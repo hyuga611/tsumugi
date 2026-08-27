@@ -228,6 +228,37 @@ impl ApcSplitter {
     }
 }
 
+/// RGBA8 を PNG にする。
+///
+/// **読む側（`png::Decoder`）と同じところに置く。** 絵を扱う場所が
+/// 2 つに分かれると、色の並びや寸法の決まりを 2 回書くことになる。
+///
+/// 使うのは「クリップボードの絵をファイルにしてプロンプトへ渡す」道
+/// （`tsg` の貼り付け）。PNG にするのは、AI の CLI が読める形の中で
+/// **どこでも同じに読める**唯一のものだから。
+pub fn encode_png(rgba: &[u8], width: u32, height: u32) -> Option<Vec<u8>> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    // 画素数は掛け算で溢れる。読む側（`MAX_PIXELS`）と同じ上限で断る。
+    let pixels = u64::from(width).checked_mul(u64::from(height))?;
+    if pixels > u64::from(MAX_PIXELS) {
+        return None;
+    }
+    if rgba.len() as u64 != pixels.checked_mul(4)? {
+        return None;
+    }
+    let mut out = Vec::new();
+    {
+        let mut enc = png::Encoder::new(std::io::Cursor::new(&mut out), width, height);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut writer = enc.write_header().ok()?;
+        writer.write_image_data(rgba).ok()?;
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -310,6 +341,26 @@ mod tests {
         let mut pending = None;
         let body = format!("f=32,s=65536,v=65536;{}", BASE64_STANDARD.encode([0u8; 16]));
         assert!(feed_apc(&mut pending, body.as_bytes()).is_none());
+    }
+
+    /// 書いたものを、同じところの読み手が読めること。
+    /// **片方だけ直したときにここで落ちる**のが、同居させている理由。
+    #[test]
+    fn a_png_we_wrote_is_one_we_can_read_back() {
+        let rgba: Vec<u8> = (0..2 * 3 * 4).map(|i| i as u8).collect();
+        let png = encode_png(&rgba, 2, 3).expect("書けない");
+        let mut pending = None;
+        let body = format!("f=100,s=2,v=3;{}", BASE64_STANDARD.encode(&png));
+        let (back, w, h, _, _) = feed_apc(&mut pending, body.as_bytes()).expect("読めない");
+        assert_eq!((w, h), (2, 3));
+        assert_eq!(back, rgba);
+    }
+
+    #[test]
+    fn a_picture_with_no_pixels_is_not_a_picture() {
+        assert!(encode_png(&[], 0, 0).is_none());
+        // 寸法と中身が食い違うものは書かない（黙って壊れた PNG を作らない）
+        assert!(encode_png(&[0u8; 4], 2, 2).is_none());
     }
 
     #[test]

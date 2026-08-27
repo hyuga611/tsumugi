@@ -11,7 +11,7 @@
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 
-pub const PROTOCOL_VERSION: u32 = 20;
+pub const PROTOCOL_VERSION: u32 = 22;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -117,6 +117,69 @@ impl Layout {
                 children.iter_mut().any(|c| c.split(target, new_pane, dir))
             }
         }
+    }
+
+    /// `split` の左右逆。`new_pane` を `target` の**手前**へ置く。
+    ///
+    /// 作業台（`go`）で木を左に出すためだけに要る。`split` してから
+    /// 入れ替えると、途中の一瞬だけ木が右に出た配置がクライアントへ
+    /// 配られる（画面が跳ねる）。1 通で正しい形にする。
+    pub fn split_before(&mut self, target: u32, new_pane: u32, dir: Dir) -> bool {
+        match self {
+            Layout::Leaf { pane } if *pane == target => {
+                *self = Layout::Split {
+                    dir,
+                    children: vec![Layout::leaf(new_pane), Layout::leaf(target)],
+                    weights: vec![WEIGHT_UNIT; 2],
+                };
+                true
+            }
+            Layout::Leaf { .. } => false,
+            Layout::Split {
+                dir: my_dir,
+                children,
+                weights,
+            } => {
+                if *my_dir == dir
+                    && let Some(i) = children
+                        .iter()
+                        .position(|c| matches!(c, Layout::Leaf { pane } if *pane == target))
+                {
+                    normalize(weights, children.len());
+                    let half = (weights[i] / 2).max(1);
+                    weights[i] = weights[i].saturating_sub(half).max(1);
+                    children.insert(i, Layout::leaf(new_pane));
+                    weights.insert(i, half);
+                    return true;
+                }
+                children
+                    .iter_mut()
+                    .any(|c| c.split_before(target, new_pane, dir))
+            }
+        }
+    }
+
+    /// その葉の取り分を決め打ちする。
+    ///
+    /// **兄弟の取り分は動かさない。** 比で割り付けているので、1 つだけ
+    /// 大きくすれば残りは相対的に細くなる。作業台の 20 / 50 / 30 は
+    /// これを 3 回呼んで作る。
+    pub fn set_weight(&mut self, pane: u32, weight: u16) -> bool {
+        let Layout::Split {
+            children, weights, ..
+        } = self
+        else {
+            return false;
+        };
+        normalize(weights, children.len());
+        if let Some(i) = children
+            .iter()
+            .position(|c| matches!(c, Layout::Leaf { pane: p } if *p == pane))
+        {
+            weights[i] = weight.max(1);
+            return true;
+        }
+        children.iter_mut().any(|c| c.set_weight(pane, weight))
     }
 
     /// 葉を取り除く。子が1つになった分割は畳む。
@@ -295,6 +358,12 @@ pub struct PaneInfo {
     /// 読んでいた場所も見え方も失う。開いていたファイルと同じ扱いにする。
     #[serde(default)]
     pub preview: bool,
+    /// このペインが木（explorer）として見せているディレクトリ。
+    ///
+    /// **サーバが持つ。** 開いているファイルと同じで、窓を閉じて開き直した
+    /// ときに木が消えると、作業台（`go`）の左半分だけが失われる。
+    #[serde(default)]
+    pub dir: Option<String>,
     /// エージェントが名乗った「いくら使ったか」。表示だけに使う。
     ///
     /// **こちらでは数えない。** トークンの数え方はモデルごとに違い、
@@ -918,6 +987,75 @@ pub enum ClientMsg {
         title: String,
         text: String,
     },
+    /// クリップボードの絵を、ファイルにして置いてほしい。
+    ///
+    /// **書くのはサーバ。** 中を読むのはペインで走っているプログラム
+    /// （AI の CLI）で、遠隔（`[domains]`）で開いていればそれは向こうに居る。
+    /// こちらのディスクへ書いても、向こうからはどこにも無いパスになる。
+    ///
+    /// 答えは `ServerMsg::Pasted`。打ち込むのはクライアントで、
+    /// **勝手に走らせない**（プロンプトへ置くところまで）。
+    PasteImage {
+        pane: u32,
+        /// PNG（base64）。
+        data: String,
+    },
+
+    // ---- 作業台（`go`） ----
+    //
+    // 左に木、真ん中にコード、右にエージェント。**1 通で組む。**
+    // 分割・木を開く・エージェントを起こす・タブに名前を付けるを別々の通で
+    // 送ると、途中の形がそのつどクライアントへ配られて画面が跳ねるうえ、
+    // 「いまできたペインの ID」を追いかける非同期の穴ができる
+    // （`PipeResult` を 1 通にしてあるのと同じ理由）。
+    /// このペインを中央にして、作業台を組む。
+    Workspace {
+        pane: u32,
+        /// 根。書かなければそのペインが居る場所。
+        #[serde(default)]
+        cwd: Option<String>,
+        /// 右で起こすもの。書かなければ素のシェル。
+        #[serde(default)]
+        agent: Option<Vec<String>>,
+    },
+
+    // ---- 木（explorer） ----
+    /// 木を並べ直す。答えは `ServerMsg::DirListing`。
+    ///
+    /// **開いてある枝を毎回渡す。** サーバに覚えさせると、同じセッションへ
+    /// 2 枚繋いだときに片方の開き閉じがもう片方へ飛ぶ。木の見え方は
+    /// フォーカスと同じでクライアントのもの。
+    DirList {
+        pane: u32,
+        /// 根。書かなければサーバが覚えている根。
+        #[serde(default)]
+        root: Option<String>,
+        #[serde(default)]
+        expanded: Vec<String>,
+    },
+    /// 木を閉じる（そのペインをふつうのペインへ戻す）。
+    DirClose {
+        pane: u32,
+    },
+    /// 作る。`dir` が真ならフォルダ。**既に在れば断る**（黙って上書きしない）。
+    DirNew {
+        pane: u32,
+        path: String,
+        dir: bool,
+    },
+    /// 名前を変える。`to` は新しいフルパス。
+    DirRename {
+        pane: u32,
+        from: String,
+        to: String,
+    },
+    /// 動かす（ドラッグ＆ドロップ）。`to_dir` の中へ入れる。
+    DirMove {
+        pane: u32,
+        from: String,
+        to_dir: String,
+    },
+
     /// 新しいタブ。`cwd` / `command` を書けばそこで開く。
     ///
     /// **tsumugi の中で `tsg` と打ったときの受け口**でもある。窓をもう 1 枚
@@ -1206,6 +1344,25 @@ pub enum ServerMsg {
         edits: Vec<tsg_lsp::TextEdit>,
         others: usize,
     },
+    /// ディスクの中身が変わった（作った・名前を変えた・動かした）。
+    ///
+    /// **中身は載せない。** どの枝を開いているかを知っているのは
+    /// クライアントなので、並べ直しはクライアントが `DirList` で頼み直す。
+    DirChanged {
+        pane: u32,
+        root: String,
+    },
+    /// 絵を置いた場所。クライアントはこれをプロンプトへ打ち込む。
+    Pasted {
+        pane: u32,
+        path: String,
+    },
+    /// 木の中身。**総取り替え**で配る（`DirBuffer::set_entries`）。
+    DirListing {
+        pane: u32,
+        root: String,
+        rows: Vec<DirRow>,
+    },
     /// 購読している出来事。
     Event {
         event: PluginEvent,
@@ -1264,6 +1421,18 @@ pub enum ServerMsg {
     },
 }
 
+/// 木の 1 行。**平らにして配る。**
+///
+/// 入れ子のまま配ると、受け取る側がもう一度平らにすることになり、
+/// 「サーバが並べた順」と「画面に出る順」が食い違う余地ができる。
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DirRow {
+    pub path: String,
+    pub name: String,
+    pub is_dir: bool,
+    pub depth: usize,
+}
+
 pub fn encode_bytes(bytes: &[u8]) -> String {
     BASE64_STANDARD.encode(bytes)
 }
@@ -1275,6 +1444,40 @@ pub fn decode_bytes(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 作業台の左は**木**。`split` は必ず後ろへ置くので、
+    /// 逆向きが無いと「割ってから入れ替える」ことになり、途中の形が配られる。
+    #[test]
+    fn the_tree_goes_to_the_left_of_the_pane_that_asked_for_it() {
+        let mut t = Layout::leaf(1);
+        assert!(t.split_before(1, 2, Dir::Horizontal));
+        assert_eq!(t.panes(), vec![2, 1]);
+        // 同じ向きの並びの中でも手前へ入る
+        assert!(t.split(1, 3, Dir::Horizontal));
+        assert_eq!(t.panes(), vec![2, 1, 3]);
+        assert!(t.split_before(1, 4, Dir::Horizontal));
+        assert_eq!(t.panes(), vec![2, 4, 1, 3]);
+    }
+
+    /// 20 / 50 / 30。**兄弟の取り分は動かさない。**
+    #[test]
+    fn a_workspace_can_be_given_its_own_proportions() {
+        let mut t = Layout::leaf(1);
+        assert!(t.split_before(1, 2, Dir::Horizontal));
+        assert!(t.split(1, 3, Dir::Horizontal));
+        assert!(t.set_weight(2, 20));
+        assert!(t.set_weight(1, 50));
+        assert!(t.set_weight(3, 30));
+        let Layout::Split {
+            children, weights, ..
+        } = &t
+        else {
+            panic!("分割になっていない");
+        };
+        assert_eq!(children.len(), 3);
+        assert_eq!(weights, &vec![20, 50, 30]);
+        assert!(!t.set_weight(99, 10), "居ないペインには効かない");
+    }
 
     fn saw(text: &str) -> MatchInput<'_> {
         MatchInput {

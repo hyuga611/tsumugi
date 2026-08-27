@@ -578,7 +578,7 @@ fn diff_span(before: &str, after: &str) -> Option<Splice> {
 /// 端末に出したときと違う位置に見える。
 const TAB: usize = 8;
 
-fn cells_of(s: &str, amb: AmbiguousWidth) -> Vec<Cell> {
+pub(crate) fn cells_of(s: &str, amb: AmbiguousWidth) -> Vec<Cell> {
     let mut out: Vec<Cell> = Vec::new();
     for c in s.chars() {
         // タブは**字として持つ**。落とすと、開いて保存しただけで

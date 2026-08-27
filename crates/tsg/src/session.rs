@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use tsg_modal::command::FocusDir;
-use tsg_modal::{Buffer, BufferKind, FileBuffer, TermBuffer};
+use tsg_modal::{Buffer, BufferKind, DirBuffer, FileBuffer, TermBuffer};
 use tsg_mux::protocol::{Dir, Layout, SessionInfo, weights_for};
 use tsg_term::{Cell, SemanticMarks, Terminal};
 
@@ -43,6 +43,8 @@ impl Rect {
 pub enum PaneBuffer<'a> {
     Term(TermBuffer<'a>),
     File(&'a FileBuffer),
+    /// ディレクトリの木（`go` の左）。**ファイルと同じ規則で動く。**
+    Dir(&'a DirBuffer),
 }
 
 impl Buffer for PaneBuffer<'_> {
@@ -50,6 +52,7 @@ impl Buffer for PaneBuffer<'_> {
         match self {
             PaneBuffer::Term(t) => t.kind(),
             PaneBuffer::File(f) => f.kind(),
+            PaneBuffer::Dir(d) => d.kind(),
         }
     }
 
@@ -57,6 +60,7 @@ impl Buffer for PaneBuffer<'_> {
         match self {
             PaneBuffer::Term(t) => t.line_count(),
             PaneBuffer::File(f) => f.line_count(),
+            PaneBuffer::Dir(d) => d.line_count(),
         }
     }
 
@@ -64,6 +68,7 @@ impl Buffer for PaneBuffer<'_> {
         match self {
             PaneBuffer::Term(t) => t.cells(line),
             PaneBuffer::File(f) => f.cells(line),
+            PaneBuffer::Dir(d) => d.cells(line),
         }
     }
 
@@ -71,6 +76,7 @@ impl Buffer for PaneBuffer<'_> {
         match self {
             PaneBuffer::Term(t) => t.marks(),
             PaneBuffer::File(f) => f.marks(),
+            PaneBuffer::Dir(d) => d.marks(),
         }
     }
 }
@@ -84,6 +90,11 @@ pub struct PaneView {
     pub term: Terminal,
     /// エディタとして開いているファイル（`arch.md` §9 の M4）
     pub file: Option<FileBuffer>,
+    /// 木として見せているディレクトリ（`go` の左）。
+    ///
+    /// `file` と同じ扱いで、**入っている間そのペインは木になる**。
+    /// 下のシェルは走ったままなので、`:q` で端末へ戻ってこられる。
+    pub dir: Option<DirBuffer>,
     /// 表示用の名前。`>` の結果のように保存先が無いこともあるので別に持つ。
     pub title: String,
     pub rect: Rect,
@@ -209,7 +220,7 @@ impl PaneView {
 
     /// 行番号に使う桁数（区切りの空白を含む）。出さないなら 0。
     fn number_width(&self) -> usize {
-        if !line_numbers() || self.file.is_none() || self.preview.is_some() {
+        if !line_numbers() || self.file.is_none() || self.preview.is_some() || self.dir.is_some() {
             return 0;
         }
         // 一番大きい番号が収まるだけ。3 桁のファイルに 5 桁ぶん空けない。
@@ -246,6 +257,7 @@ impl PaneView {
         Self {
             term: new_terminal(cols, rows),
             file: None,
+            dir: None,
             title: String::new(),
             rect: Rect::default(),
             top: 0,
@@ -326,6 +338,9 @@ impl PaneView {
 
     /// いま見せている文書。
     pub fn buffer(&self) -> PaneBuffer<'_> {
+        if let Some(d) = &self.dir {
+            return PaneBuffer::Dir(d);
+        }
         if let Some(p) = &self.preview {
             return PaneBuffer::Term(TermBuffer::new(&p.state.grid, &p.state.marks));
         }
@@ -356,8 +371,16 @@ impl PaneView {
         self.file.is_some()
     }
 
+    /// 木として見せているか。
+    pub fn exploring(&self) -> bool {
+        self.dir.is_some()
+    }
+
     /// 文書の行数（端末なら履歴込み）。
     pub fn doc_len(&self) -> usize {
+        if let Some(d) = &self.dir {
+            return d.line_count();
+        }
         if let Some(p) = &self.preview {
             return p.state.grid.document_len();
         }
@@ -369,6 +392,14 @@ impl PaneView {
 
     /// ステータス行に出す名前。
     pub fn label(&self) -> Option<String> {
+        if let Some(d) = &self.dir {
+            let name = d
+                .root
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| d.root.display().to_string());
+            return Some(format!("{name}/"));
+        }
         let f = self.file.as_ref()?;
         if self.preview.is_some() {
             let name = f

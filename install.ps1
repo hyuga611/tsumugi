@@ -10,6 +10,9 @@
 #   $env:TSUMUGI_DIR = 'D:\tools'    # where to put it (default: %USERPROFILE%\bin)
 #   $env:TSUMUGI_VERSION = 'v0.1.0'  # which release (default: latest)
 #   $env:TSUMUGI_NO_REGISTER = '1'   # just drop the exe, no shortcuts
+#   $env:TSUMUGI_FORCE = '1'         # reinstall even if already on that version
+#
+# Already installed? `tsg update` runs this same script for you.
 #
 # This file is ASCII on purpose, and carries no BOM. Both are load-bearing:
 #   - `irm | iex` chokes on a BOM (it reads it as a command name)
@@ -38,6 +41,16 @@ $api = if ($Version -eq 'latest') {
 
 Write-Host "Fetching tsumugi ($Version)..."
 $release = Invoke-RestMethod -Uri $api -Headers @{ 'User-Agent' = 'tsumugi-install' }
+
+# `tsg update` sets TSUMUGI_HAVE to the version it is running. If that is
+# already the release we found, downloading 19 MB again buys nothing.
+# A first install never sets it, so the plain `irm | iex` line is unaffected.
+if ($env:TSUMUGI_HAVE -and -not $env:TSUMUGI_FORCE -and
+    $release.tag_name -eq ('v' + $env:TSUMUGI_HAVE)) {
+    Write-Host "Already on $($release.tag_name)."
+    return
+}
+
 $asset = $release.assets | Where-Object { $_.name -eq 'tsg.exe' } | Select-Object -First 1
 if (-not $asset) {
     throw "That release has no tsg.exe: $($release.tag_name)"

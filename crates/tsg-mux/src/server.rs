@@ -153,6 +153,8 @@ struct Pane {
     /// 組み直したペインに「続きから」を**置くだけ**。走らせるのは人が決める。
     /// 頼まれていないコマンドを勝手に実行しない。
     pending_type: Option<String>,
+    /// 木（explorer）として見せている根。**開き直しても残る。**
+    dir: Option<String>,
     /// 起こしたときの場所。OSC 7 が来ていないときの控え。
     ///
     /// **シェル統合を入れていない人でも、開いた場所に戻ってきてほしい。**
@@ -281,6 +283,7 @@ impl State {
                     agent: p.agent,
                     preview: p.preview,
                     cost: p.cost.clone(),
+                    dir: p.dir.clone(),
                 })
                 .collect(),
         }
@@ -381,6 +384,7 @@ impl State {
                 command: command.clone(),
                 agent_kind: None,
                 pending_type: None,
+                dir: None,
                 spawn_cwd,
             },
         );
@@ -720,6 +724,70 @@ impl State {
             return p.spawn_cwd.clone();
         };
         parse_file_url(url)
+    }
+
+    /// 貼られた絵をファイルにする。返すのは置いた場所。
+    ///
+    /// **セッションごとの一時の場所**に置く。作業中のリポジトリへ置くと、
+    /// 貼るたびに `git status` が汚れる（頼まれていない副作用）。
+    fn write_pasted(&mut self, png: &[u8]) -> Result<String, String> {
+        let dir = pasted_dir(&self.session);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("置き場所を作れません: {e}"))?;
+        // 番号は**在るものを避けて**決める。サーバを起こし直しても
+        // 前に置いた絵を上書きしない（貼ったものが黙って消えるのが一番悪い）。
+        let mut n = 1u32;
+        let path = loop {
+            let p = dir.join(format!("{PASTE_PREFIX}{n}.png"));
+            if !p.exists() {
+                break p;
+            }
+            n += 1;
+            if n > 9999 {
+                return Err("置き場所がいっぱいです".into());
+            }
+        };
+        std::fs::write(&path, png).map_err(|e| format!("絵を書けません: {e}"))?;
+        prune_pasted(&dir);
+        Ok(path.display().to_string())
+    }
+
+    /// 木を並べて配る。**開いてある枝の中だけ**を掘る。
+    ///
+    /// 全部を再帰で読むと、`node_modules` や `target` が入っている場所で
+    /// 1 回の並べ直しに数秒かかる。人が開いた枝だけ読めば、深さに関わらず
+    /// 読む量は画面に出ている行数で頭打ちになる。
+    fn send_dir(&mut self, pane: u32, root: &str, expanded: &[String]) {
+        let open: std::collections::BTreeSet<&str> = expanded.iter().map(String::as_str).collect();
+        let root_path = std::path::Path::new(root);
+        let mut rows = vec![crate::protocol::DirRow {
+            path: root.to_string(),
+            name: root_path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| root.to_string()),
+            is_dir: true,
+            depth: 0,
+        }];
+        walk_dir(root_path, 1, &open, &mut rows);
+        self.broadcast(&ServerMsg::DirListing {
+            pane,
+            root: root.to_string(),
+            rows,
+        });
+    }
+
+    /// 作る・名前を変える・動かすのあと。**失敗は言う、成功は並べ直す。**
+    fn after_dir_change(&mut self, client: u64, pane: u32, r: Result<(), String>) {
+        if let Err(message) = r {
+            self.send_to(client, &ServerMsg::Error { message });
+            return;
+        }
+        // どの枝を開いているかを知っているのはクライアントなので、
+        // 並べ直しの中身はクライアントが頼み直す。ここは「変わった」だけ配る。
+        let root = self.panes.get(&pane).and_then(|p| p.dir.clone());
+        if let Some(root) = root {
+            self.broadcast(&ServerMsg::DirChanged { pane, root });
+        }
     }
 
     fn new_tab(&mut self, cols: u16, rows: u16) -> Result<u32> {
@@ -1612,6 +1680,177 @@ impl State {
                 self.shape_changed();
             }
 
+            ClientMsg::PasteImage { pane, data } => {
+                let Some(bytes) = crate::protocol::decode_bytes(&data) else {
+                    self.send_to(
+                        id,
+                        &ServerMsg::Error {
+                            message: "絵を読めません".into(),
+                        },
+                    );
+                    return Ok(true);
+                };
+                // **頼んだクライアントにだけ返す。** 配ってしまうと、
+                // 同じセッションへ 2 枚繋いでいるとき、両方がプロンプトへ
+                // 打ち込んで同じパスが 2 回入る。
+                match self.write_pasted(&bytes) {
+                    Ok(path) => self.send_to(id, &ServerMsg::Pasted { pane, path }),
+                    Err(message) => self.send_to(id, &ServerMsg::Error { message }),
+                }
+            }
+
+            // ---- 作業台（`go`） ------------------------------------------
+            //
+            // 左に木・真ん中にいまのペイン・右にエージェント。**1 通で組む。**
+            ClientMsg::Workspace { pane, cwd, agent } => {
+                let Some(root) = cwd.or_else(|| self.pane_cwd(pane)) else {
+                    self.send_to(
+                        id,
+                        &ServerMsg::Error {
+                            message: "どこで開けばいいのか分かりません（cd してから go）".into(),
+                        },
+                    );
+                    return Ok(true);
+                };
+                if !std::path::Path::new(&root).is_dir() {
+                    self.send_to(
+                        id,
+                        &ServerMsg::Error {
+                            message: format!("{root} はディレクトリではありません"),
+                        },
+                    );
+                    return Ok(true);
+                }
+                let Some(tab) = self.tab_of(pane) else {
+                    return Ok(true);
+                };
+                // このタブにもう木が在れば、組み直さない。**シェルの `go` は
+                // 窓を通らない**ので、断るのはここでないと効かない
+                // （作業台の真ん中でもう一度打つと、木が 2 本になる）。
+                let here: Vec<u32> = tab.layout.panes();
+                if here
+                    .iter()
+                    .any(|id| self.panes.get(id).is_some_and(|p| p.dir.is_some()))
+                {
+                    self.send_to(
+                        id,
+                        &ServerMsg::Error {
+                            message: "このタブはもう作業台です（別のタブで go を打ってください）"
+                                .into(),
+                        },
+                    );
+                    return Ok(true);
+                }
+                let (cols, rows) = (self.cols, self.rows);
+                // 左の木。**シェルは起こしたまま**にする。`:q` で木を閉じれば
+                // ふつうのペインとして使えるので、1 枚無駄にはならない。
+                let left = self.spawn_pane_in(cols, rows, Some(root.clone()), None)?;
+                let right = self.spawn_pane_in(cols, rows, Some(root.clone()), agent.clone())?;
+                if let Some(p) = self.panes.get_mut(&left) {
+                    p.dir = Some(root.clone());
+                }
+                let name = std::path::Path::new(&root)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| root.clone());
+                if let Some(tab) = self.tab_of(pane) {
+                    tab.layout.split_before(pane, left, Dir::Horizontal);
+                    tab.layout.split(pane, right, Dir::Horizontal);
+                    // 20 / 50 / 30。VS Code 系の見慣れた割り付けに寄せる。
+                    tab.layout.set_weight(left, 20);
+                    tab.layout.set_weight(pane, 50);
+                    tab.layout.set_weight(right, 30);
+                    // **タブの名前はディレクトリ。** 何本も並べたときに
+                    // 「どのリポジトリのタブか」が題名では分からない。
+                    tab.name = Some(name.chars().take(32).collect());
+                    tab.active_pane = pane;
+                }
+                let info = self.info();
+                self.broadcast(&ServerMsg::Layout(info));
+                self.shape_changed();
+                self.send_dir(left, &root, std::slice::from_ref(&root));
+            }
+
+            // ---- 木（explorer） ------------------------------------------
+            ClientMsg::DirList {
+                pane,
+                root,
+                expanded,
+            } => {
+                let root = root
+                    .or_else(|| self.panes.get(&pane).and_then(|p| p.dir.clone()))
+                    .or_else(|| self.pane_cwd(pane));
+                let Some(root) = root else {
+                    return Ok(true);
+                };
+                if let Some(p) = self.panes.get_mut(&pane) {
+                    let changed = p.dir.as_deref() != Some(root.as_str());
+                    p.dir = Some(root.clone());
+                    if changed {
+                        let info = self.info();
+                        self.broadcast(&ServerMsg::Layout(info));
+                    }
+                }
+                self.send_dir(pane, &root, &expanded);
+            }
+
+            ClientMsg::DirClose { pane } => {
+                if let Some(p) = self.panes.get_mut(&pane) {
+                    p.dir = None;
+                }
+                let info = self.info();
+                self.broadcast(&ServerMsg::Layout(info));
+            }
+
+            ClientMsg::DirNew { pane, path, dir } => {
+                let target = std::path::Path::new(&path);
+                // **黙って上書きしない。** 同じ名前を打ったときに中身が
+                // 消えるのは、取り返しがつかない唯一の事故。
+                let r = if target.exists() {
+                    Err(format!("{path} はもう在ります"))
+                } else if dir {
+                    std::fs::create_dir_all(target).map_err(|e| format!("作れません: {e}"))
+                } else {
+                    if let Some(parent) = target.parent() {
+                        let _ = std::fs::create_dir_all(parent);
+                    }
+                    std::fs::File::create(target)
+                        .map(|_| ())
+                        .map_err(|e| format!("作れません: {e}"))
+                };
+                self.after_dir_change(id, pane, r);
+            }
+
+            ClientMsg::DirRename { pane, from, to } => {
+                let r = if std::path::Path::new(&to).exists() {
+                    Err(format!("{to} はもう在ります"))
+                } else {
+                    std::fs::rename(&from, &to).map_err(|e| format!("名前を変えられません: {e}"))
+                };
+                self.after_dir_change(id, pane, r);
+            }
+
+            ClientMsg::DirMove { pane, from, to_dir } => {
+                let src = std::path::Path::new(&from).to_path_buf();
+                let r = match src.file_name().map(std::ffi::OsStr::to_os_string) {
+                    None => Err("動かせません（名前がありません）".to_string()),
+                    Some(name) => {
+                        let dest = std::path::Path::new(&to_dir).join(&name);
+                        if dest == src {
+                            Ok(())
+                        } else if dest.starts_with(&src) {
+                            // 自分の中へは入れられない。放っておくと木ごと消える。
+                            Err("自分の中へは動かせません".to_string())
+                        } else if dest.exists() {
+                            Err(format!("{} はもう在ります", dest.display()))
+                        } else {
+                            std::fs::rename(&src, &dest).map_err(|e| format!("動かせません: {e}"))
+                        }
+                    }
+                };
+                self.after_dir_change(id, pane, r);
+            }
+
             ClientMsg::Definition { pane, line, col } => {
                 if !self.lsp.definition(pane, line, col) {
                     self.send_to(
@@ -2461,9 +2700,177 @@ fn home_dir() -> Option<String> {
         .ok()
 }
 
+/// 貼った絵の名前の頭。**掃除するときの目印**でもあるので、
+/// ここに合うものだけを消す（同じ場所に人が置いたものは触らない）。
+const PASTE_PREFIX: &str = "paste-";
+/// 残しておく枚数。**古いものから捨てる。**
+///
+/// 溜め続けると、スクリーンショットを貼るたびに一時領域が太っていく。
+/// 消えて困るものは、貼った先で人が保存している。
+const PASTE_KEEP: usize = 32;
+
+/// 貼った絵の置き場所。セッションごとに分ける。
+fn pasted_dir(session: &str) -> std::path::PathBuf {
+    // 名前は人が付けるので、そのままパスにしない。
+    let safe: String = session
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    std::env::temp_dir().join("tsumugi").join(safe)
+}
+
+/// 古い絵を捨てる。**自分が付けた名前のものだけ。**
+fn prune_pasted(dir: &std::path::Path) {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut ours: Vec<(std::time::SystemTime, std::path::PathBuf)> = read
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            if !name.starts_with(PASTE_PREFIX) || !name.ends_with(".png") {
+                return None;
+            }
+            let at = e.metadata().ok()?.modified().ok()?;
+            Some((at, path))
+        })
+        .collect();
+    if ours.len() <= PASTE_KEEP {
+        return;
+    }
+    ours.sort_by_key(|(at, _)| *at);
+    for (_, path) in ours.iter().take(ours.len() - PASTE_KEEP) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// 木を 1 段掘る。`open` に入っているディレクトリだけ、さらに下へ。
+///
+/// **並べ方はディレクトリが先、あとは大文字小文字を無視した名前順。**
+/// OS のファイルシステムが返す順（NTFS なら名前順、ext4 ならハッシュ順）を
+/// そのまま出すと、同じリポジトリが機械ごとに違う並びで出る。
+fn walk_dir(
+    dir: &std::path::Path,
+    depth: usize,
+    open: &std::collections::BTreeSet<&str>,
+    out: &mut Vec<crate::protocol::DirRow>,
+) {
+    // 深すぎるものは掘らない。シンボリックリンクの輪に入ったときの止め。
+    if depth > 32 {
+        return;
+    }
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut items: Vec<(bool, String, std::path::PathBuf)> = read
+        .flatten()
+        .map(|e| {
+            let path = e.path();
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            let name = e.file_name().to_string_lossy().into_owned();
+            (is_dir, name, path)
+        })
+        .collect();
+    items.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+            .then_with(|| a.1.cmp(&b.1))
+    });
+    for (is_dir, name, path) in items {
+        let p = path.display().to_string();
+        out.push(crate::protocol::DirRow {
+            path: p.clone(),
+            name,
+            is_dir,
+            depth,
+        });
+        if is_dir && open.contains(p.as_str()) {
+            walk_dir(&path, depth + 1, open, out);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 貼った絵は**セッションごとの場所**へ。名前はそのままパスにしない。
+    #[test]
+    fn pasted_pictures_go_to_a_place_of_their_own() {
+        let a = pasted_dir("work");
+        let b = pasted_dir("work");
+        assert_eq!(a, b, "同じセッションなら同じ場所");
+        assert_ne!(a, pasted_dir("other"));
+        // 名前は人が付ける。パスの区切りをそのまま通さない。
+        let odd = pasted_dir("a/b\\c:d");
+        assert_eq!(
+            odd.file_name().map(|n| n.to_string_lossy().into_owned()),
+            Some("a_b_c_d".to_string())
+        );
+    }
+
+    /// 溜め続けない。**自分が付けた名前のものだけ**捨てる。
+    #[test]
+    fn old_pasted_pictures_are_dropped_but_nothing_else_is() {
+        let dir = std::env::temp_dir().join("tsg-prune-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("作れない");
+        for n in 0..(PASTE_KEEP + 5) {
+            std::fs::write(dir.join(format!("{PASTE_PREFIX}{n}.png")), [n as u8])
+                .expect("作れない");
+            // 更新時刻で古い順を決めるので、順番が付く程度には離す
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        std::fs::write(dir.join("notes.txt"), "人が置いたもの").expect("作れない");
+        prune_pasted(&dir);
+        let left: Vec<String> = std::fs::read_dir(&dir)
+            .expect("読めない")
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            left.iter().filter(|n| n.starts_with(PASTE_PREFIX)).count(),
+            PASTE_KEEP
+        );
+        assert!(left.contains(&"notes.txt".to_string()), "人の物まで消した");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 木は**開いた枝の中だけ**掘る。`node_modules` の在る場所で
+    /// 全部読むと、1 回の並べ直しに数秒かかる。
+    #[test]
+    fn the_tree_only_digs_into_branches_that_are_open() {
+        let root = std::env::temp_dir().join("tsg-walk-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("zzz/deep")).expect("作れない");
+        std::fs::create_dir_all(root.join("aaa")).expect("作れない");
+        std::fs::write(root.join("b.txt"), "").expect("作れない");
+        std::fs::write(root.join("zzz/inside.txt"), "").expect("作れない");
+
+        let closed = std::collections::BTreeSet::new();
+        let mut rows = Vec::new();
+        walk_dir(&root, 1, &closed, &mut rows);
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        // ディレクトリが先、その中では名前順。中身は掘らない。
+        assert_eq!(names, vec!["aaa", "zzz", "b.txt"]);
+
+        let zzz = root.join("zzz").display().to_string();
+        let open = std::collections::BTreeSet::from([zzz.as_str()]);
+        let mut rows = Vec::new();
+        walk_dir(&root, 1, &open, &mut rows);
+        let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+        assert_eq!(names, vec!["aaa", "zzz", "deep", "inside.txt", "b.txt"]);
+        assert_eq!(rows[2].depth, 2, "開いた枝の中は 1 段深い");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn leaf(id: u32) -> Layout {
         Layout::leaf(id)
