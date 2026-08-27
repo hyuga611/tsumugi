@@ -7863,6 +7863,37 @@ fn print_font_diagnostics(renderer: &Renderer) {
 }
 
 /// 入れた / 外した結果を出す。**何を変えたかを黙らない。**
+/// 入れ替えたあとの後始末。
+///
+/// **走っているサーバは古いままの実行ファイルで動いている。** プロトコルが
+/// 上がった版では、新しい exe から繋ぐと版違いで弾かれる。止めれば済むが、
+/// 止めるというのは**中のシェルとエージェントを終わらせること**なので、
+/// 頼まれていないのに勝手にやらない（`--stop-sessions` で頼める）。
+fn after_update(stop: bool) {
+    let live = tsg_mux::sessions::live();
+    if live.is_empty() {
+        return;
+    }
+    if !stop {
+        println!(
+            "  · 走っているセッション（古いままです）: {}",
+            live.join(" ")
+        );
+        println!("      開き直すだけで足りることもあります。繋がらなければ:");
+        for name in &live {
+            println!("        tsg -s {name} --kill     # 中のシェルも終わります");
+        }
+        println!("      まとめて止めるなら: tsg update --stop-sessions");
+        return;
+    }
+    for name in &live {
+        match rpc::kill(name) {
+            Ok(()) => println!("  ✓ セッション {name} を止めました"),
+            Err(e) => println!("  · セッション {name} を止められません: {e}"),
+        }
+    }
+}
+
 fn report_install(r: Result<install::Report>) -> Result<()> {
     let r = r?;
     for line in &r.done {
@@ -7956,7 +7987,15 @@ fn main() -> Result<()> {
         cli::Mode::Capture(pane) => return rpc::capture(&cli.session, *pane),
         cli::Mode::Rpc => return rpc::raw(&cli.session, cli.spawn),
         cli::Mode::Install => return report_install(install::install()),
-        cli::Mode::Update => return report_install(install::update(cli.force)),
+        cli::Mode::Update => {
+            let r = install::update(cli.force);
+            let replaced = matches!(&r, Ok(rep) if !rep.done.is_empty());
+            report_install(r)?;
+            if replaced {
+                after_update(cli.stop_sessions);
+            }
+            return Ok(());
+        }
         cli::Mode::Uninstall => return report_install(install::uninstall()),
         cli::Mode::ShellIntegration(name) => return print_shell_integration(name.as_deref()),
         cli::Mode::InstallShellIntegration(name) => {

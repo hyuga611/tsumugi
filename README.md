@@ -60,12 +60,18 @@ different location, `$env:TSUMUGI_NO_REGISTER = '1'` to skip the shortcuts, or
 After that, the copy you installed can do it itself:
 
 ```powershell
-tsg update            # fetch the latest release and swap it in
-tsg update --force    # reinstall even if it is the same version
+tsg update                    # fetch the latest release and swap it in
+tsg update --force            # reinstall even if it is the same version
+tsg update --stop-sessions    # also stop running sessions (their shells end too)
 ```
 
+A running multiplexer is still the old executable, so a release that moved the
+protocol cannot be reached from the new one. By default it does **not** stop
+them: it prints the names of the running sessions and how to stop each one,
+because stopping one means ending the shells and agents inside it.
+
 **It downloads nothing when you are already on the latest** (it says
-`Already on v0.3.1.` and stops). Underneath it runs the same `install.ps1`, so
+`Already on v0.3.2.` and stops). Underneath it runs the same `install.ps1`, so
 there is only ever one way to install. A running executable cannot delete
 itself, so the old one stays as `tsg.exe.old-…` and the next `tsg update`
 removes it. A binary you built with `cargo build` is **never overwritten** —

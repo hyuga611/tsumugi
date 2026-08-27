@@ -8,5 +8,5 @@ rust-version.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-tsg-pty = { version = "0.3.1", path = "../tsg-pty" }
-tsg-term = { version = "0.3.1", path = "../tsg-term" }
+tsg-pty = { version = "0.3.2", path = "../tsg-pty" }
+tsg-term = { version = "0.3.2", path = "../tsg-term" }

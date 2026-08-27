@@ -132,6 +132,10 @@ pub struct Cli {
     pub pane: Option<u32>,
     /// 押し切る（`tsg update --force` は、同じ版でも入れ直す）。
     pub force: bool,
+    /// 入れ替えたあと、走っているセッションも止める（`--stop-sessions`）。
+    ///
+    /// **既定では止めない。** 止めるというのは中のシェルを終わらせること。
+    pub stop_sessions: bool,
     /// 起動と同時に組む配置。いまは `agents` だけ。
     pub layout: Option<String>,
     /// 前回の形から組み直すか。`--no-restore` で切る。
@@ -172,6 +176,7 @@ impl Default for Cli {
             new_window: false,
             pane: None,
             force: false,
+            stop_sessions: false,
             layout: None,
             restore: true,
             domain: None,
@@ -208,6 +213,8 @@ tsumugi (tsg) — ターミナルの画面を vim で編集できるドキュメ
       --shell-integration [シェル]
                            シェル統合（OSC 133）のスクリプトを出す
       update               最新版を取ってきて入れ替える（--force で同じ版でも）
+                           --stop-sessions で、走っているセッションも止める
+                           （中のシェルも終わります）
       --install-shell-integration [シェル]
                            それを置いて、シェルの設定ファイルに 1 行足す
       --diagnose           フォントと CJK 幅の実測値を出して終了
@@ -369,6 +376,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Cli {
             // 「tsg update」で、`--` が要るかどうかではない。
             "update" | "--update" | "--upgrade" => cli.mode = Mode::Update,
             "--force" => cli.force = true,
+            "--stop-sessions" => cli.stop_sessions = true,
             "--uninstall" => cli.mode = Mode::Uninstall,
             "--diagnose" => cli.mode = Mode::Diagnose,
             "--tap" => cli.mode = Mode::Tap,
@@ -569,6 +577,9 @@ mod tests {
         assert_eq!(cli(&["--upgrade"]).mode, Mode::Update);
         assert!(!cli(&["update"]).force);
         assert!(cli(&["update", "--force"]).force);
+        // **止めるのは頼まれたときだけ。** 中のシェルが終わる操作を既定にしない。
+        assert!(!cli(&["update"]).stop_sessions);
+        assert!(cli(&["update", "--stop-sessions"]).stop_sessions);
         // ふつうの起動は今までどおり
         assert_eq!(cli(&[]).mode, Mode::Run);
     }

@@ -285,11 +285,6 @@ mod imp {
                     .unwrap_or_default()
             ));
         }
-        r.notes.push(
-            "走っている多重化サーバは古いままです。\
-             繋がらなくなったら tsg -s <名前> --kill で一度止めてください"
-                .into(),
-        );
         Ok(r)
     }
 
