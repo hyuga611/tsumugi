@@ -3,6 +3,19 @@
 形式は [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/)、
 版番号は [Semantic Versioning](https://semver.org/lang/ja/)。
 
+## [0.3.5] - 2026-08-27
+
+### 直した
+
+- **PowerShell が 2 つ入っている機械で、使っていないほうに書いていた。**
+  Windows PowerShell 5.1 と PowerShell 7 は別の profile を読む
+  （`Documents\WindowsPowerShell` と `Documents\PowerShell`。OneDrive を
+  使っていれば `ドキュメント` の下）。0.3.4 で「PowerShell 本人に訊く」
+  ようにしたが、**先に見つかったほう（7）にだけ**書いていたので、
+  打っているのが 5.1 の人には何も起きなかった（会社の PC がこれ）。
+  どちらを使うかは日によっても変わるので、**在るぶん全部**へ入れる。
+  外すときも全部から外す。何番目のファイルへ足したかは画面に出す。
+
 ## [0.3.4] - 2026-08-27
 
 0.3.3 を会社の PC で実際に走らせて出た 2 つ。どちらも**当てにいっていた**のが原因。

@@ -79,16 +79,27 @@ impl Shell {
     }
 
     /// 置き場所を書き足す先。見つからなければ「自分で足してください」と言う。
-    fn rc_path(self) -> Option<PathBuf> {
-        let home = home_dir()?;
-        Some(match self {
+    /// 書き足す先。**PowerShell だけは 1 つとは限らない。**
+    ///
+    /// Windows PowerShell 5.1 と PowerShell 7 は別の profile を読む
+    /// （`WindowsPowerShell` と `PowerShell`）。両方入っている機械で
+    /// 片方だけに書くと、**使っているほうでは何も起きない**（会社の PC で
+    /// 実際にそうなった: 7 の profile に書いて、打っていたのは 5.1）。
+    /// どちらを使うかは日によっても変わるので、**在るぶん全部**へ入れる。
+    fn rc_paths(self) -> Vec<PathBuf> {
+        if self == Shell::Pwsh {
+            return powershell_profiles();
+        }
+        let Some(home) = home_dir() else {
+            return Vec::new();
+        };
+        vec![match self {
             Shell::Bash => home.join(".bashrc"),
             Shell::Zsh => home.join(".zshrc"),
             Shell::Fish => home.join(".config").join("fish").join("config.fish"),
             Shell::Nu => home.join(".config").join("nushell").join("config.nu"),
-            // PowerShell の $PROFILE は版で場所が違うので、環境から取れなければ諦める
-            Shell::Pwsh => return powershell_profile(),
-        })
+            Shell::Pwsh => unreachable!("上で返している"),
+        }]
     }
 
     /// rc に書き足す 1 行。
@@ -123,44 +134,57 @@ pub fn install(shell: Shell) -> Result<String> {
     std::fs::write(&script, body).with_context(|| format!("{} を書けません", script.display()))?;
 
     let line = shell.source_line(&script);
-    let Some(rc) = shell.rc_path() else {
+    let rcs = shell.rc_paths();
+    if rcs.is_empty() {
         bail!(
             "{} を置きました。\n\
              設定ファイルの場所が分からないので、次の 1 行を自分で足してください:\n  {line}",
             script.display()
         );
-    };
+    }
 
-    let current = std::fs::read_to_string(&rc).unwrap_or_default();
-    if current.contains(shell.file_name()) {
+    let mut added: Vec<String> = Vec::new();
+    let mut already: Vec<String> = Vec::new();
+    for rc in &rcs {
+        let current = std::fs::read_to_string(rc).unwrap_or_default();
+        if current.contains(shell.file_name()) {
+            already.push(rc.display().to_string());
+            continue;
+        }
+        if let Some(parent) = rc.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let mut next = current;
+        if !next.is_empty() && !next.ends_with('\n') {
+            next.push('\n');
+        }
+        next.push('\n');
+        next.push_str(MARKER);
+        next.push('\n');
+        next.push_str(&line);
+        next.push('\n');
+        std::fs::write(rc, next).with_context(|| format!("{} を書けません", rc.display()))?;
+        added.push(rc.display().to_string());
+    }
+
+    if added.is_empty() {
         return Ok(format!(
             "{} を更新しました。{} はすでに読み込む設定になっています。",
             script.display(),
-            rc.display()
+            already.join(" / ")
         ));
     }
-
-    if let Some(parent) = rc.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let mut next = current;
-    if !next.is_empty() && !next.ends_with('\n') {
-        next.push('\n');
-    }
-    next.push('\n');
-    next.push_str(MARKER);
-    next.push('\n');
-    next.push_str(&line);
-    next.push('\n');
-    std::fs::write(&rc, next).with_context(|| format!("{} を書けません", rc.display()))?;
-
-    Ok(format!(
-        "{} 向けに {} を置き、{} に次の 1 行を足しました:\n  {line}\n\n\
-         新しいシェルを開くと、プロンプトの位置と終了コードが tsumugi に伝わります。",
+    let mut msg = format!(
+        "{} 向けに {} を置き、次の 1 行を足しました:\n  {line}\n  足した先: {}",
         shell.name(),
         script.display(),
-        rc.display()
-    ))
+        added.join("\n            ")
+    );
+    if !already.is_empty() {
+        msg.push_str(&format!("\n  すでに入っていた: {}", already.join(" / ")));
+    }
+    msg.push_str("\n\n新しいシェルを開くと、プロンプトの位置と終了コードが tsumugi に伝わります。");
+    Ok(msg)
 }
 
 /// rc から外して、置いた台本も消す。
@@ -181,9 +205,10 @@ pub fn uninstall(shell: Shell) -> Result<Option<String>> {
         changed.push(format!("{} を消しました", script.display()));
     }
 
-    if let Some(rc) = shell.rc_path()
-        && let Ok(current) = std::fs::read_to_string(&rc)
-    {
+    for rc in shell.rc_paths() {
+        let Ok(current) = std::fs::read_to_string(&rc) else {
+            continue;
+        };
         let next = without_our_lines(&current, shell.file_name());
         if next != current {
             std::fs::write(&rc, next).with_context(|| format!("{} を書けません", rc.display()))?;
@@ -252,9 +277,10 @@ fn home_dir() -> Option<PathBuf> {
 ///
 /// 訊いた答えが無ければ、これまでどおり当てにいく（PowerShell を起こせない
 /// 環境でも、入るところまでは入る）。
-fn powershell_profile() -> Option<PathBuf> {
+fn powershell_profiles() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
     for exe in ["pwsh", "powershell"] {
-        let Ok(out) = std::process::Command::new(exe)
+        let Ok(r) = std::process::Command::new(exe)
             .args([
                 "-NoProfile",
                 "-NonInteractive",
@@ -265,15 +291,24 @@ fn powershell_profile() -> Option<PathBuf> {
         else {
             continue;
         };
-        if !out.status.success() {
+        if !r.status.success() {
             continue;
         }
-        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
+        let path = String::from_utf8_lossy(&r.stdout).trim().to_string();
+        if path.is_empty() {
+            continue;
+        }
+        let path = PathBuf::from(path);
+        if !out.contains(&path) {
+            out.push(path);
         }
     }
-    guess_powershell_profile()
+    if out.is_empty()
+        && let Some(p) = guess_powershell_profile()
+    {
+        out.push(p);
+    }
+    out
 }
 
 /// 訊けなかったときの当て。**在る入れ物だけを見る。**
