@@ -3,6 +3,24 @@
 形式は [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/)、
 版番号は [Semantic Versioning](https://semver.org/lang/ja/)。
 
+## [0.3.8] - 2026-08-27
+
+### 追加
+
+- **macOS と Linux にも実行ファイルを配る。** タグを押すと 3 OS 分を組んで
+  Release に載せる（`tsg.exe` / `tsg-macos-arm64` / `tsg-linux-x86_64`）。
+  1 つ落ちても残りは配る — 未検証の OS の都合で Windows の配布を止めない。
+- **`install.sh`** — macOS / Linux 向けの 1 行。`~/.local/bin/tsg` へ置いて
+  `tsg --install` まで済ませる。同じ版なら取り直さない、置き換えは避けてから、
+  失敗したら戻す、起動確認まで — `install.ps1` と同じ作法。
+- **`tsg update` が macOS / Linux でも効く。** 中で走らせるのは同じ
+  `install.sh`（**入れ方を 2 通り持たない**）。
+
+> ⚠️ macOS と Linux は**未検証**です。組めることと試験が通ることは CI で
+> 見ていますが、窓（winit / wgpu）・IME・`--install` は Windows の API で
+> 書いた部分があり、まだ誰も動かしていません。配るのは試しやすくするためで、
+> 動く保証ではありません。
+
 ## [0.3.7] - 2026-08-27
 
 **tsumugi の中で `go` が効かなかった。** 原因は 2 つあり、どちらも

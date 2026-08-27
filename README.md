@@ -45,14 +45,22 @@ open and had not saved.
 
 ## Install
 
-One line in PowerShell. No admin rights needed.
+One line. No admin rights needed.
+
+**Windows** (PowerShell)
 
 ```powershell
 irm https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.ps1 | iex
 ```
 
-It downloads the latest `tsg.exe` into `%USERPROFILE%\bin` and runs `tsg --install`
-for you. **That one line leaves you with a working setup**: besides the Start Menu,
+**macOS / Linux** (experimental — see [Status](#status))
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.sh | sh
+```
+
+**On Windows** it downloads the latest `tsg.exe` into `%USERPROFILE%\bin` and runs
+`tsg --install` for you. **That one line leaves you with a working setup**: besides the Start Menu,
 PATH and context-menu entries, it installs the shell integration (without it the left
 gutter, `[[`, `ac` and `go` do nothing) and, when they are present, the Claude Code and
 Codex hooks. **Every change is printed, and `tsg --uninstall` takes all of it back out.** The executable links the CRT statically, so it runs on machines **without
@@ -99,16 +107,17 @@ them: it prints the names of the running sessions and how to stop each one,
 because stopping one means ending the shells and agents inside it.
 
 **It downloads nothing when you are already on the latest** (it says
-`Already on v0.3.7.` and stops). Underneath it runs the same `install.ps1`, so
+`Already on v0.3.8.` and stops). Underneath it runs the same `install.ps1`, so
 there is only ever one way to install. A running executable cannot delete
 itself, so the old one stays as `tsg.exe.old-…` and the next `tsg update`
 removes it. A binary you built with `cargo build` is **never overwritten** —
 it says so and tells you what to do instead.
 
-**macOS and Linux** have no binaries to download (`tsg update` says so too):
-build from source. `--install` symlinks `~/.local/bin/tsg` and installs the
-shell integration (bash / zsh / fish / nu). **None of it is verified yet** —
-please tell me either way ([Status](#status)).
+**The macOS / Linux line** puts `tsg` in `~/.local/bin` and runs
+`tsg --install` (shell integration for bash / zsh / fish / nu). Intel Macs and
+non-x86_64 Linux have no binary yet — build from source below. If macOS refuses
+to open it, that is Gatekeeper:
+`xattr -d com.apple.quarantine ~/.local/bin/tsg`.
 
 Building it yourself:
 

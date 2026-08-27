@@ -439,6 +439,7 @@ mod imp {
 #[cfg(not(windows))]
 mod imp {
     use super::{Report, Result, write_icon};
+    use anyhow::Context as _;
     use std::path::{Path, PathBuf};
 
     fn home() -> Option<PathBuf> {
@@ -496,16 +497,40 @@ mod imp {
         Ok(r)
     }
 
-    /// 入れ替える。**Unix にはまだ配布物が無い。**
+    /// 入れ替える。**入れ方は 1 つに保つ**ので、README と同じ `install.sh` を走らせる。
     ///
-    /// Windows 向けの exe しかリリースしていないので、ここで
-    /// 「入れ替えました」と言うわけにいかない。作り方を出すだけにする。
-    pub fn update(_exe: &Path, _force: bool) -> Result<Report> {
+    /// Windows 側と同じ理屈。ここで独自に取ってきて置き直すと道が 2 本になり、
+    /// 片方だけ直した日に「入れ直したのに直らない」が起きる。取ってくるのは
+    /// 常に最新の台本なので、古い実行ファイルでも新しい入れ方に従える。
+    pub fn update(exe: &Path, force: bool) -> Result<Report> {
         let mut r = Report::new();
-        r.notes
-            .push("この OS 向けの配布物はまだありません（Windows だけ）".into());
-        r.notes
-            .push("ソースから: git pull; cargo build --release".into());
+        let dir = match std::env::var_os("TSUMUGI_DIR") {
+            Some(d) if !d.is_empty() => PathBuf::from(d),
+            _ => exe
+                .parent()
+                .map(Path::to_path_buf)
+                .context("自分の置き場所が分かりません")?,
+        };
+
+        let script =
+            "curl -fsSL https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.sh | sh";
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", script])
+            .env("TSUMUGI_DIR", &dir)
+            // いまの版を教える。**同じ版なら取り直さない。**
+            .env("TSUMUGI_HAVE", env!("CARGO_PKG_VERSION"));
+        if force {
+            cmd.env("TSUMUGI_FORCE", "1");
+        }
+        let status = cmd.status().context(
+            "sh を起こせません（手で入れ直すなら: \
+             curl -fsSL https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.sh | sh）",
+        )?;
+        if !status.success() {
+            anyhow::bail!("入れ替えに失敗しました（上の出力を見てください）");
+        }
+        r.done
+            .push(format!("{} を最新版にしました", dir.join("tsg").display()));
         Ok(r)
     }
 

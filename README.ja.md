@@ -42,13 +42,21 @@ Rust 製。いまのところ **Windows**。macOS と Linux はビルドは通�
 
 ## 入れる
 
-PowerShell に 1 行。管理者権限は要りません。
+1 行。管理者権限は要りません。
+
+**Windows**（PowerShell）
 
 ```powershell
 irm https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.ps1 | iex
 ```
 
-最新版の `tsg.exe` を `%USERPROFILE%\bin` へ置いて `tsg --install` まで済ませます。
+**macOS / Linux**（実験。[いまの状態](#いまの状態)）
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.sh | sh
+```
+
+**Windows** は最新版の `tsg.exe` を `%USERPROFILE%\bin` へ置いて `tsg --install` まで済ませます。
 **この 1 行で使える状態になります。** スタートメニュー・PATH・右クリック登録に加えて、
 シェル統合（プロンプトの位置を tsumugi に伝えるもの。これが無いと左のふちも
 `[[` も `ac` も `go` も効きません）と、入っていれば Claude Code / Codex の
@@ -95,16 +103,17 @@ tsg update --stop-sessions    # 走っているセッションも止める（中
 セッションの名前と止め方を出す**だけにしてあります（止めるというのは、
 中のシェルとエージェントを終わらせることなので）。
 
-**同じ版なら何も取ってきません**（`Already on v0.3.7.` と言って終わります）。
+**同じ版なら何も取ってきません**（`Already on v0.3.8.` と言って終わります）。
 中でやっているのは上と同じ `install.ps1` で、**入れ方を 2 通り持たない**
 ようにしてあります。走っている自分は消せないので、古い exe は
 `tsg.exe.old-…` として残り、次の `tsg update` で消えます。
 `cargo build` で作った exe には**上書きしません**（断って、代わりの手を出します）。
 
-**macOS と Linux** には配布物がありません（`tsg update` もそう言います）。
-ソースから入れてください。`--install` は `~/.local/bin/tsg` に symlink を張り、
-シェル統合（bash / zsh / fish / nu）まで入れます。
-**ただし未検証です** — 動いたら / 動かなかったら教えてください（[いまの状態](#いまの状態)）。
+**macOS / Linux の 1 行**は `~/.local/bin/tsg` へ置いて `tsg --install`
+まで済ませます（シェル統合は bash / zsh / fish / nu）。Intel Mac と
+x86_64 以外の Linux には配布物が無いので、下のビルドをしてください。
+macOS で「開けません」と言われたら Gatekeeper です:
+`xattr -d com.apple.quarantine ~/.local/bin/tsg`。
 
 自分でビルドするなら:
 

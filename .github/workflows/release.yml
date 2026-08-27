@@ -1,7 +1,12 @@
 name: Release
 
-# 版のタグ（v0.1.0 など）を押したら、Windows の exe を作って Release に付ける。
-# install.ps1 はこの Release から取ってくるので、ここが配布の本体。
+# 版のタグ（v0.1.0 など）を押したら、実行ファイルを作って Release に付ける。
+# install.ps1 / install.sh はこの Release から取ってくるので、ここが配布の本体。
+#
+# Windows は実機で確かめている。**macOS と Linux は誰も動かしていない** ——
+# 組めることと試験が通ることは CI で見ているが、窓（winit / wgpu）・IME・
+# `--install` は Windows の API で書いた部分がある。配るのは「試しやすくする」
+# ためで、動く保証ではない。Release の本文にもそう書く。
 on:
   push:
     tags: ['v*']
@@ -11,26 +16,94 @@ permissions:
   contents: write
 
 jobs:
-  windows:
-    runs-on: windows-latest
+  build:
+    strategy:
+      # **1 つ落ちても残りは出す。** 3 つ揃わないと配れない形にすると、
+      # 未検証の OS の都合で Windows の配布まで止まる。
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            asset: tsg.exe
+            path: target/release/tsg.exe
+            # CRT を静的リンクする。**入れた PC に VC++ 再頒布可能パッケージが
+            # 無くても動く**ようにするため（会社の PC では入れられないことがある）。
+            flags: -C target-feature=+crt-static
+          - os: macos-latest
+            asset: tsg-macos-arm64
+            path: target/release/tsg
+            flags: ''
+          - os: ubuntu-latest
+            asset: tsg-linux-x86_64
+            path: target/release/tsg
+            flags: ''
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
 
-      # CRT を静的リンクする。**入れた PC に VC++ 再頒布可能パッケージが
-      # 無くても動く**ようにするため（会社の PC では入れられないことがある）。
+      # Linux の窓まわりは実行時に dlopen するものが多いが、組むだけでも
+      # X11 / Wayland の開発ファイルが要る。
+      - name: linux deps
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libx11-dev libxkbcommon-dev libwayland-dev pkg-config
+
       - name: build
         run: cargo build --release -p tsg
         env:
-          RUSTFLAGS: -C target-feature=+crt-static
+          RUSTFLAGS: ${{ matrix.flags }}
 
+      # 起動して版を名乗れるところまで見る。窓は開かない（CI に画面が無い）。
       - name: smoke test
+        run: ${{ matrix.path }} --version
+
+      - name: name the asset
+        shell: bash
         run: |
-          .\target\release\tsg.exe --version
-          .\target\release\tsg.exe --diagnose
+          mkdir -p dist
+          cp "${{ matrix.path }}" "dist/${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+
+  release:
+    needs: build
+    # 1 つ落ちても、出来たぶんは配る。
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
 
       - uses: softprops/action-gh-release@v3
         with:
-          files: target/release/tsg.exe
+          files: dist/*
           draft: false
           generate_release_notes: true
+          body: |
+            ## 入れる
+
+            **Windows**
+
+            ```powershell
+            irm https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.ps1 | iex
+            ```
+
+            **macOS / Linux（実験）**
+
+            ```sh
+            curl -fsSL https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.sh | sh
+            ```
+
+            2 回目からは、どの OS でも `tsg update` だけで最新になります。
+
+            > ⚠️ **macOS と Linux は未検証です。** 組めることと試験が通ることは
+            > CI で見ていますが、窓・IME・`--install` は Windows の API で書いた
+            > 部分があり、まだ誰も動かしていません。動いた / 動かなかったを
+            > [Issues](https://github.com/hyuga611/tsumugi/issues) で教えてください。
