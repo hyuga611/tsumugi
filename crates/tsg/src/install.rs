@@ -106,9 +106,50 @@ mod imp {
     ///
     /// 自前で `.lnk` を書くより、OS の口を叩くほうが壊れない。
     fn ps(script: &str) -> std::io::Result<std::process::Output> {
-        std::process::Command::new("powershell")
+        // 名前だけで引くと、PATH の具合や仕組みの都合で起こせないことがある
+        // （会社の PC で踏んだ）。絶対パスから順に試す。
+        let exe = working_powershell().unwrap_or_else(|_| std::path::PathBuf::from("powershell"));
+        std::process::Command::new(exe)
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
             .output()
+    }
+
+    /// 起こせる PowerShell を探す。**名前だけに頼らない。**
+    ///
+    /// 会社の PC で `powershell` を起こそうとして
+    /// 「アクセスが拒否されました（os error 5）」が出た。PATH の解決か、
+    /// 落としてきた exe から子を起こすことを止める仕組み（アプリケーション
+    /// 制御・ウイルス対策）か、こちらからは切り分けられない。**絶対パスと
+    /// 別の実装を順に試し、それでも駄目なら何を試したかを言う。**
+    fn powershell_candidates() -> Vec<std::path::PathBuf> {
+        let mut out: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(root) = std::env::var_os("SystemRoot") {
+            let root = std::path::PathBuf::from(root);
+            out.push(root.join(r"System32\WindowsPowerShell\v1.0\powershell.exe"));
+            out.push(root.join(r"SysWOW64\WindowsPowerShell\v1.0\powershell.exe"));
+        }
+        out.push(std::path::PathBuf::from("powershell"));
+        out.push(std::path::PathBuf::from("pwsh"));
+        out
+    }
+
+    /// 実際に起こせるものを 1 つ返す。**何も起こせなければ、試した先を添えて返す。**
+    ///
+    /// 避ける前にここを通す。起こせないと分かってから名前を戻すのでは、
+    /// 「戻し損ねたら tsg が消える」道を毎回通ることになる。
+    fn working_powershell() -> Result<std::path::PathBuf, String> {
+        let mut tried: Vec<String> = Vec::new();
+        for exe in powershell_candidates() {
+            match std::process::Command::new(&exe)
+                .args(["-NoProfile", "-NonInteractive", "-Command", "exit 0"])
+                .output()
+            {
+                Ok(o) if o.status.success() => return Ok(exe),
+                Ok(o) => tried.push(format!("{} -> 終了コード {}", exe.display(), o.status)),
+                Err(e) => tried.push(format!("{} -> {e}", exe.display())),
+            }
+        }
+        Err(tried.join("\n    "))
     }
 
     fn quote(p: &Path) -> String {
@@ -222,6 +263,17 @@ mod imp {
                 .context("自分の置き場所が分かりません")?,
         };
 
+        // **避ける前に、起こせるかどうかを見る。** 起こせないと分かってから
+        // 名前を戻すのでは、戻し損ねたら tsg が消える道を毎回通ることになる。
+        let ps = match working_powershell() {
+            Ok(p) => p,
+            Err(tried) => {
+                anyhow::bail!(
+                    "PowerShell を起こせません（何も変えていません）。試した先:\n    {tried}\n                       手で入れ直すなら:\n                         irm https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.ps1 | iex"
+                );
+            }
+        };
+
         // 前回の入れ替えで残った古い exe。**掴んでいる者が居なくなってから**
         // でないと消せないので、次の入れ替えのここで片付ける。
         sweep_old(&dir);
@@ -238,7 +290,7 @@ mod imp {
 
         let script = "$ErrorActionPreference='Stop'; \
              irm https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.ps1 | iex";
-        let mut cmd = std::process::Command::new("powershell");
+        let mut cmd = std::process::Command::new(&ps);
         cmd.args(["-NoProfile", "-NonInteractive", "-Command", script])
             .env("TSUMUGI_DIR", &dir)
             // いまの版を教える。**同じなら 19 MB を取り直さない。**
