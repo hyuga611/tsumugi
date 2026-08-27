@@ -246,14 +246,28 @@ mod imp {
         if force {
             cmd.env("TSUMUGI_FORCE", "1");
         }
-        let status = cmd.status().context("powershell を起こせません")?;
-
-        if !status.success() {
-            // 置けなかったのに自分を避けたままだと、tsg が消えたことになる。
-            if let Some(old) = &moved {
+        // **どの失敗の道でも、避けたものを戻す。** ここで早く返ると、
+        // tsg がどこにも無いまま終わる（`?` で抜けた先では誰も戻さない）。
+        let outcome = cmd.status();
+        let restore = |moved: &Option<PathBuf>| {
+            if let Some(old) = moved {
                 let _ = std::fs::rename(old, exe);
             }
-            anyhow::bail!("入れ替えに失敗しました（上の出力を見てください）");
+        };
+        let status = match outcome {
+            Ok(s) => s,
+            Err(e) => {
+                restore(&moved);
+                return Err(anyhow::anyhow!(e)).context(
+                    "powershell を起こせません（tsg.exe は元に戻しました。\n                         手で入れ直すなら: irm https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.ps1 | iex）",
+                );
+            }
+        };
+        if !status.success() {
+            restore(&moved);
+            anyhow::bail!(
+                "入れ替えに失敗しました（tsg.exe は元に戻しました。上の出力を見てください）"
+            );
         }
 
         // **置かれたか確かめる。** 台本は「もう最新です」と言って

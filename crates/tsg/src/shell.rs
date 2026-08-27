@@ -242,10 +242,45 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 /// PowerShell の `$PROFILE`。版によって場所が違うので、あるものを選ぶ。
+/// `$PROFILE` の場所。**当てにいかず、PowerShell 本人に訊く。**
+///
+/// 版（5.1 / 7）で `Documents\WindowsPowerShell` と `Documents\PowerShell` に
+/// 分かれ、OneDrive を使っていれば `Documents` の場所そのものが変わる。
+/// 当てにいくと 2 通りに外れる — **無いと諦める**（会社の PC でそうなった。
+/// まだ profile を 1 度も作っていない人は、どちらの入れ物も無い）か、
+/// **在るほうを選んでしまう**（両方あって、使っているのは別のほう）。
+///
+/// 訊いた答えが無ければ、これまでどおり当てにいく（PowerShell を起こせない
+/// 環境でも、入るところまでは入る）。
 fn powershell_profile() -> Option<PathBuf> {
+    for exe in ["pwsh", "powershell"] {
+        let Ok(out) = std::process::Command::new(exe)
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$PROFILE.CurrentUserCurrentHost",
+            ])
+            .output()
+        else {
+            continue;
+        };
+        if !out.status.success() {
+            continue;
+        }
+        let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !path.is_empty() {
+            return Some(PathBuf::from(path));
+        }
+    }
+    guess_powershell_profile()
+}
+
+/// 訊けなかったときの当て。**在る入れ物だけを見る。**
+fn guess_powershell_profile() -> Option<PathBuf> {
     let docs = std::env::var_os("USERPROFILE").map(PathBuf::from)?;
     for base in ["Documents", "OneDrive/Documents"] {
-        for dir in ["PowerShell", "WindowsPowerShell"] {
+        for dir in ["WindowsPowerShell", "PowerShell"] {
             let p = docs
                 .join(base.replace('/', std::path::MAIN_SEPARATOR_STR))
                 .join(dir);
