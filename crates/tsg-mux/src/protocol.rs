@@ -11,6 +11,16 @@
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 
+/// クライアントとサーバが話せる形の版。
+///
+/// **足すだけの変更では上げない。** 上げると、走っているサーバが
+/// 新しい窓を受け付けなくなり、中のシェルごと止めることになる
+/// （`--kill`）。足しただけなら古いサーバは新しい通を知らないだけで、
+/// それは「知らない通」への答え（`ClientMsg::Unknown`）で説明できる。
+///
+/// **上げるのは、既にある通の意味が変わったとき**だけ — 欄の意味を変えた、
+/// 単位を変えた、順序の約束を変えた。そこは黙って食い違うと画面が壊れるので、
+/// 繋がせない方が安い。
 pub const PROTOCOL_VERSION: u32 = 22;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -1226,6 +1236,14 @@ pub enum ClientMsg {
     /// サーバごと落とす。
     Shutdown,
     Ping,
+
+    /// このサーバが知らない通。
+    ///
+    /// **黙って捨てない。** 捨てると、新しい窓から `go` を打った人は
+    /// 「何も起きない」だけを見ることになり、原因（サーバが古い）に
+    /// 辿り着けない。受けた側は理由を返す。
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -1419,6 +1437,14 @@ pub enum ServerMsg {
     Error {
         message: String,
     },
+
+    /// この窓が知らない通。**新しいサーバに古い窓が繋いだとき。**
+    ///
+    /// こちらは黙って見送る — 知らせや診断の類が増えただけのことが多く、
+    /// 画面を止める理由にならない。頼んだことへの答えが来ないときは、
+    /// 頼んだ側が待たない作りにしてある。
+    #[serde(other)]
+    Unknown,
 }
 
 /// 木の 1 行。**平らにして配る。**

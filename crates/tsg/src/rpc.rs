@@ -697,6 +697,17 @@ pub fn set_agent_state(
         // 走っていないセッションへの報告は、黙って捨てる。
         return Ok(());
     };
+    // **どのペインの話かは、フックが自分で知っている。**
+    //
+    // 名乗らないと「いま選ばれているペイン」に付く。エージェントを 2 本
+    // 並べると、両方の報告が同じペインへ乗って、返事をしても「返事待ち」が
+    // 残る（実機で踏んだ）。ペインの中で走っているものには `TSUMUGI_PANE` が
+    // 入っているので、そこを見る。`--pane` を書けばそちらが勝つ。
+    let pane = pane.or_else(|| {
+        std::env::var("TSUMUGI_PANE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+    });
     client.send(&ClientMsg::SetAgentState {
         pane,
         state,

@@ -63,6 +63,9 @@ impl Arrow {
 /// エンジンが起こした変化。ホストがこれを見て実際の副作用を行う。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Effect {
+    /// 新しい実行ファイルで自分を開き直す。**中のシェルは残る**
+    /// （多重化は別プロセスなので、窓だけ入れ替わる）。
+    Restart,
     ModeChanged(Mode),
     CursorMoved(Pos),
     Yanked {
@@ -977,6 +980,7 @@ impl Engine {
         let selection = self.selection();
         let cmd = match id {
             "ui.help" => Command::ToggleHelp,
+            "app.restart" => Command::Restart,
             "ui.config" => Command::OpenConfig,
             "ui.opacity" => Command::Palette("opacity "),
             "ui.theme.yogiri" => Command::SetTheme("yogiri"),
@@ -1428,6 +1432,9 @@ impl Engine {
                 self.help_visible = !self.help_visible;
                 vec![Effect::HelpToggled(self.help_visible)]
             }
+            // 開き直すのはホストの仕事（実行ファイルの在り処を知っているのは
+            // あちらだけ。`arch.md` の不変条件 2「`tsg-modal` は純粋」）。
+            Command::Restart => vec![Effect::Restart],
             Command::Apply {
                 op,
                 range,

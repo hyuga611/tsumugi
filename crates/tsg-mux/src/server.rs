@@ -1167,7 +1167,9 @@ impl State {
                 agent,
             } => {
                 // ペインの指定が無ければ、いま選ばれているところ。
-                // hooks は自分がどのペインに居るか知らないので、これが既定。
+                // **ふつうは指定が来る** — フックは `TSUMUGI_PANE` で自分の
+                // 居場所を知っている（`rpc::set_agent_state`）。ここへ落ちるのは
+                // 台本から手で投げたときで、そのときは「いま見ているところ」が近い。
                 let target = pane.or_else(|| self.active_pane());
                 let mut named = false;
                 if let Some(p) = target.and_then(|id| self.panes.get_mut(&id)) {
@@ -2166,6 +2168,20 @@ impl State {
 
             ClientMsg::Shutdown => return Ok(false),
             ClientMsg::Ping => self.send_to(id, &ServerMsg::Pong),
+
+            // このサーバが知らない通。**黙って捨てない。**
+            //
+            // 捨てると、新しい窓から `go` を打った人は「何も起きない」だけを
+            // 見ることになり、原因（サーバが古い）に辿り着けない。
+            ClientMsg::Unknown => self.send_to(
+                id,
+                &ServerMsg::Error {
+                    message: format!(
+                        "この多重化サーバは古い実行ファイルで動いていて、いまの頼みごとを知りません。                         開き直すか、`tsg -s {} --kill` で一度止めてください（中のシェルも終わります）",
+                        self.session
+                    ),
+                },
+            ),
         }
         Ok(true)
     }

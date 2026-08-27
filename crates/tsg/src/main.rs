@@ -443,6 +443,7 @@ impl App {
                     self.push_file();
                     self.quit_warned = false;
                 }
+                Effect::Restart => self.restart(event_loop),
                 Effect::MarkSet { .. } | Effect::MacroRecording(_) => {}
                 Effect::MacroReplay(keys) => self.replay_macro(&keys, event_loop),
                 Effect::Palette(prefix) => self.palette_with(&prefix),
@@ -1640,6 +1641,10 @@ impl App {
                 | ServerMsg::ExtLog { .. }
                 | ServerMsg::Waited { .. }
                 | ServerMsg::LayoutSpec { .. }
+                // 新しいサーバに古い窓が繋いだとき。**黙って見送る** —
+                // 増えたのは知らせや診断の類のことが多く、画面を止める理由に
+                // ならない。答えを待つ側は、来なくても固まらない作りにしてある。
+                | ServerMsg::Unknown
                 | ServerMsg::Worktrees { .. } => {}
                 ServerMsg::ExtCommands { commands } => {
                     self.ext_commands = commands;
@@ -2618,6 +2623,58 @@ impl App {
                     )
                 };
                 platform::popup(w.as_ref(), "tsumugi", &body);
+            }
+        }
+    }
+
+    /// 新しい実行ファイルで自分を開き直す。
+    ///
+    /// **多重化は別プロセス**なので、窓だけ入れ替えればシェルもエージェントも
+    /// そのまま繋がり直せる（`concept.md` の「窓を閉じてもシェルは死なない」が
+    /// そのまま効く）。入れ替えたのに古い中身で動き続けるのを、人が覚えていて
+    /// 開き直すのに任せない。
+    ///
+    /// **名前で引き直す。** 自分の場所（`current_exe`）は、入れ替えのときに
+    /// 避けられて `tsg.old-…` になっていることがある。そこを起こすと古いまま。
+    fn restart(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(dir) = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+        else {
+            self.status_msg = t!(
+                "自分の場所が分からないので開き直せません",
+                "cannot find myself, so cannot reopen"
+            )
+            .into();
+            return;
+        };
+        let exe = dir.join(if cfg!(windows) { "tsg.exe" } else { "tsg" });
+        if !exe.exists() {
+            self.status_msg = t!(
+                format!("{} が見つかりません", exe.display()),
+                format!("{} is not there", exe.display())
+            );
+            return;
+        }
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg("--session").arg(&self.session_name);
+        if let Some(d) = &self.domain {
+            cmd.arg("--domain").arg(d);
+        }
+        // 親から切り離す。**こちらが抜けたときに道連れにしない。**
+        rpc::detach(&mut cmd);
+        match cmd.spawn() {
+            Ok(_) => {
+                // 多重化は生きたまま。**デタッチして抜ける**ので、
+                // 中のシェルもエージェントも触らない。
+                self.send_msg(&ClientMsg::Detach);
+                event_loop.exit();
+            }
+            Err(e) => {
+                self.status_msg = t!(
+                    format!("開き直せません: {e}"),
+                    format!("cannot reopen: {e}")
+                );
             }
         }
     }
@@ -7863,6 +7920,28 @@ fn print_font_diagnostics(renderer: &Renderer) {
 }
 
 /// 入れた / 外した結果を出す。**何を変えたかを黙らない。**
+/// 置き換えた実行ファイルが、走っているサーバと同じ版を話すか。
+///
+/// **こちらの版を基準に見る。** いま動いているこのプロセスは入れ替え前の
+/// 実行ファイルで、サーバへ繋げている以上、サーバの版はこちらと同じ。
+/// だから新しい実行ファイルに版を訊いて、同じなら窓を開き直せる。
+fn new_binary_speaks_the_same_protocol() -> bool {
+    let Ok(exe) = std::env::current_exe() else {
+        return false;
+    };
+    let Some(dir) = exe.parent() else {
+        return false;
+    };
+    let exe = dir.join(if cfg!(windows) { "tsg.exe" } else { "tsg" });
+    std::process::Command::new(exe)
+        .arg("--protocol")
+        .output()
+        .is_ok_and(|o| {
+            o.status.success()
+                && String::from_utf8_lossy(&o.stdout).trim() == PROTOCOL_VERSION.to_string()
+        })
+}
+
 /// 入れ替えたあとの後始末。
 ///
 /// **走っているサーバは古いままの実行ファイルで動いている。** プロトコルが
@@ -7874,6 +7953,25 @@ fn after_update(stop: bool) {
     if live.is_empty() {
         return;
     }
+
+    // 入れ替えた実行ファイルは、走っているサーバと話せるか。
+    //
+    // **話せるなら、窓を開き直すだけで済む** — 多重化は別プロセスなので、
+    // 中のシェルもエージェントも生きたまま繋がり直せる。話せないときだけ、
+    // 止める（＝中を終わらせる）話になる。
+    if !stop && new_binary_speaks_the_same_protocol() {
+        for name in &live {
+            match rpc::run_command(name, "app.restart", None) {
+                Ok(()) => println!("  ✓ セッション {name} の窓を新しい版で開き直しました"),
+                // 窓が開いていないセッションもある（デタッチ中）。それは普通。
+                Err(_) => {
+                    println!("  · セッション {name} に窓がありません（次に開けば新しい版です）")
+                }
+            }
+        }
+        return;
+    }
+
     if !stop {
         println!(
             "  · 走っているセッション（古いままです）: {}",
@@ -8049,6 +8147,10 @@ fn main() -> Result<()> {
         cli::Mode::Capture(pane) => return rpc::capture(&cli.session, *pane),
         cli::Mode::Rpc => return rpc::raw(&cli.session, cli.spawn),
         cli::Mode::Install => return report_install(install_everything()),
+        cli::Mode::Protocol => {
+            println!("{PROTOCOL_VERSION}");
+            return Ok(());
+        }
         cli::Mode::Update => {
             let r = install::update(cli.force);
             let replaced = matches!(&r, Ok(rep) if !rep.done.is_empty());

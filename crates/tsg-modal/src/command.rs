@@ -331,6 +331,14 @@ pub enum Command {
     /// 使い方の表示。起動しただけでは何をすればいいか分からない、を潰すための一級機能。
     ToggleHelp,
 
+    /// **新しい実行ファイルで自分を開き直す**（`tsg update` が使う）。
+    ///
+    /// 入れ替えても、走っている窓は古いままの中身で動き続ける。開き直すのは
+    /// 人の仕事だった — 覚えていられないし、忘れたぶんだけ「入れたのに
+    /// 変わらない」が続く。多重化は別プロセスなので、**窓だけ入れ替えれば
+    /// シェルもエージェントもそのまま**繋がり直せる。
+    Restart,
+
     /// 配色を変える。**名前はこの層にとって不透明**で、実際に色を知っているのは
     /// ホストだけ（`arch.md` の不変条件 2「`tsg-modal` は純粋」）。
     SetTheme(&'static str),
@@ -881,6 +889,14 @@ pub const REGISTRY: &[CommandSpec] = &[
         title_en: "Resize the split",
         keys: &["Space <", "Space >", "Space +", "Space -"],
         mouse: MousePath::Direct("ペイン境界をドラッグ"),
+        in_palette: true,
+    },
+    CommandSpec {
+        id: "app.restart",
+        title: "新しい版で開き直す（中のシェルは残る）",
+        title_en: "Reopen with the new version (the shells stay)",
+        keys: &[],
+        mouse: MousePath::Palette,
         in_palette: true,
     },
     CommandSpec {

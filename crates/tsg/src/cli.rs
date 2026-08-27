@@ -105,6 +105,11 @@ pub enum Mode {
     Install,
     /// 最新版を取ってきて入れ替える（`tsg update`）
     Update,
+    /// 話せるプロトコルの版を出して終わる。
+    ///
+    /// **入れ替えたあとに、窓を開き直してよいかを見るために要る。** 版が同じ
+    /// なら走っているサーバへそのまま繋げるので、シェルを終わらせずに済む。
+    Protocol,
     /// それを全部外す
     Uninstall,
     Help,
@@ -383,6 +388,7 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Cli {
             // **裸の `update` も受ける。** 打つ側が覚えているのは
             // 「tsg update」で、`--` が要るかどうかではない。
             "update" | "--update" | "--upgrade" => cli.mode = Mode::Update,
+            "--protocol" => cli.mode = Mode::Protocol,
             "--force" => cli.force = true,
             "--stop-sessions" => cli.stop_sessions = true,
             "--uninstall" => cli.mode = Mode::Uninstall,
