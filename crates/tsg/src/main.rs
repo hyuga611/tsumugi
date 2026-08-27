@@ -2764,14 +2764,31 @@ impl App {
         None
     }
 
+    /// そのペインの報告に、人がもう応えたか。
+    ///
+    /// 応えたかどうかを持っているのは**サーバ**（そのペインへ入力が流れたのを
+    /// 見ている）。窓を開き直しても印が戻らないのは、これがサーバ側だから。
+    fn agent_acked(&self, pane: u32) -> bool {
+        self.session
+            .info
+            .as_ref()
+            .and_then(|i| i.panes.iter().find(|p| p.id == pane))
+            .is_some_and(|p| p.agent_acked)
+    }
+
     /// 人の番になっているペイン。タブの印・ジャンプ・通知が全部これを見る。
+    ///
+    /// **応えたぶんは外す。** そのペインへ打ち込んだ時点で、こちらの番は
+    /// 終わっている。次にエージェントが名乗れば、また入ってくる。
     fn panes_wanting_you(&self) -> Vec<u32> {
         let Some(info) = self.session.info.as_ref() else {
             return Vec::new();
         };
         info.panes
             .iter()
-            .filter(|p| self.agent_state(p.id).is_some_and(AgentState::wants_you))
+            .filter(|p| {
+                self.agent_state(p.id).is_some_and(AgentState::wants_you) && !self.agent_acked(p.id)
+            })
             .map(|p| p.id)
             .collect()
     }
@@ -2786,6 +2803,10 @@ impl App {
             let Some(s) = self.agent_state(pane) else {
                 continue;
             };
+            // 応えたぶんは、タブの印からも下ろす（下の数と食い違わせない）。
+            if s.wants_you() && self.agent_acked(pane) {
+                continue;
+            }
             let rank = |a: AgentState| match a {
                 AgentState::Failed => 4,
                 AgentState::Blocked => 3,

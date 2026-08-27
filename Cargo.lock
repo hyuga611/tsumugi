@@ -2728,7 +2728,7 @@ dependencies = [
 
 [[package]]
 name = "tsg"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2752,7 +2752,7 @@ dependencies = [
 
 [[package]]
 name = "tsg-buffer"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "tree-sitter",
  "tree-sitter-c",
@@ -2766,7 +2766,7 @@ dependencies = [
 
 [[package]]
 name = "tsg-lsp"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "anyhow",
  "serde",
@@ -2775,7 +2775,7 @@ dependencies = [
 
 [[package]]
 name = "tsg-modal"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "regex",
  "tsg-buffer",
@@ -2784,7 +2784,7 @@ dependencies = [
 
 [[package]]
 name = "tsg-mux"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -2802,7 +2802,7 @@ dependencies = [
 
 [[package]]
 name = "tsg-probe"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "anyhow",
  "tsg-pty",
@@ -2811,7 +2811,7 @@ dependencies = [
 
 [[package]]
 name = "tsg-pty"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "anyhow",
  "portable-pty",
@@ -2819,7 +2819,7 @@ dependencies = [
 
 [[package]]
 name = "tsg-render"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -2834,7 +2834,7 @@ dependencies = [
 
 [[package]]
 name = "tsg-term"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "base64 0.22.1",
  "png",

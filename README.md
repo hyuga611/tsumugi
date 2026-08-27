@@ -284,6 +284,7 @@ The agent then reports its own state, and tsumugi shows it:
 | `✓` / `✕` | finished / failed |
 | `● waiting N` at the bottom | click to jump there |
 | `Space a` | jump to the next one waiting |
+| typing into the pane | takes its mark down — you answered. The state itself is untouched, so `--agents` still reports it, and the mark comes back the next time the agent says something |
 | taskbar flash | only when the window is in the background, only on change |
 | paste a screenshot | `Ctrl+Shift+V` writes the image to a file and **puts its path on the prompt** (it does not press Enter). Dropping an image on the window does the same |
 | a notification | reaches you even when minimised, and names **the tab** that is waiting (`[ui] popup = false` turns it off) |

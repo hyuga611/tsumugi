@@ -136,6 +136,10 @@ struct Pane {
     /// エージェントが名乗った状態。**サーバが持つ**ので、窓を閉じても
     /// 開き直せば「どれが返事待ちか」が残っている。
     agent: Option<AgentState>,
+    /// その報告に人がもう応えたか。**印を消すためだけ**に持つ。
+    ///
+    /// 状態は上書きしない — `--agents` も `--wait` も、名乗られたほうを見る。
+    agent_acked: bool,
     /// Markdown を読む形で見せているか。表示の状態だが、**開き直しても
     /// 戻らない**ようにサーバが預かる（開いているファイルと同じ扱い）。
     preview: bool,
@@ -284,6 +288,7 @@ impl State {
                     rows: p.rows,
                     alive: p.alive,
                     agent: p.agent,
+                    agent_acked: p.agent_acked,
                     preview: p.preview,
                     cost: p.cost.clone(),
                     dir: p.dir.clone(),
@@ -386,6 +391,7 @@ impl State {
                 alive: true,
                 file: None,
                 agent: None,
+                agent_acked: false,
                 preview: false,
                 cost: None,
                 command: command.clone(),
@@ -1175,8 +1181,13 @@ impl State {
                 let target = pane.or_else(|| self.active_pane());
                 let mut named = false;
                 if let Some(p) = target.and_then(|id| self.panes.get_mut(&id)) {
-                    let changed = p.agent != Some(state) || (cost.is_some() && p.cost != cost);
+                    // **名乗り直したら、印はまた点く。** 同じ状態をもう一度
+                    // 名乗ってきたときも含める（`blocked` → 応えた → また
+                    // `blocked` は、二度目も呼んでいる）。
+                    let changed =
+                        p.agent != Some(state) || p.agent_acked || (cost.is_some() && p.cost != cost);
                     p.agent = Some(state);
+                    p.agent_acked = false;
                     if cost.is_some() {
                         p.cost = cost;
                     }
@@ -1653,9 +1664,31 @@ impl State {
             }
 
             ClientMsg::Input { pane, data } => {
+                let mut answered = false;
                 if let (Some(bytes), Some(p)) = (decode_bytes(&data), self.panes.get_mut(&pane)) {
                     let _ = p.writer.write_all(&bytes);
                     let _ = p.writer.flush();
+                    // **返事待ちの印は、応えたら消える。**
+                    //
+                    // 消せるのはエージェントが次に名乗ったときだけ、という作りに
+                    // なっていた。ところが `Stop` は毎回 `done` を名乗るので
+                    // 印は既定で点いており、消すのは「次にプロンプトを送った」
+                    // フックだけ。**動いている最中に打ち込んだ言葉はそのフックを
+                    // 通らない**ので、長い 1 ターンの途中で点いた印はそのターンの
+                    // 間ずっと残る（実機でそうなった）。
+                    //
+                    // ここで見ているのは**エージェントの状態ではなく人の動き**で、
+                    // そのペインへ入力が流れたことは推測ではなく観測。だから
+                    // 「名乗らせる」の原則は崩していない — 状態は上書きせず、
+                    // 印だけを下ろす。
+                    if p.agent.is_some_and(AgentState::wants_you) && !p.agent_acked {
+                        p.agent_acked = true;
+                        answered = true;
+                    }
+                }
+                if answered {
+                    let info = self.info();
+                    self.broadcast(&ServerMsg::Layout(info));
                 }
             }
 
