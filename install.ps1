@@ -59,16 +59,32 @@ if (-not $asset) {
 New-Item -ItemType Directory -Force -Path $Dir | Out-Null
 $exe = Join-Path $Dir 'tsg.exe'
 
-# A running tsumugi holds the file open; say so instead of failing obscurely.
+# Leftovers from an earlier install, once nothing holds them open any more.
+Get-ChildItem -LiteralPath $Dir -Filter 'tsg.exe.old-*' -ErrorAction SilentlyContinue |
+    ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue }
+
+# A running tsumugi holds the file open, so it cannot be overwritten. It CAN be
+# renamed though: Windows follows the file, so the window you have open keeps
+# working. Telling people to kill their sessions first is a dead end - closing
+# tsumugi means closing the shells inside it.
+$moved = $null
 if (Test-Path $exe) {
     $running = Get-Process -Name tsg -ErrorAction SilentlyContinue |
         Where-Object { $_.Path -eq $exe }
     if ($running) {
-        throw 'tsumugi is running. Close it first (taskkill /IM tsg.exe /F).'
+        $moved = Join-Path $Dir ('tsg.exe.old-' + $PID)
+        Move-Item -LiteralPath $exe -Destination $moved -Force
+        Write-Host 'tsumugi is running: moved the old one aside.'
     }
 }
 
-Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $exe -UseBasicParsing
+try {
+    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $exe -UseBasicParsing
+} catch {
+    # Do not leave someone without a tsumugi because the download failed.
+    if ($moved) { Move-Item -LiteralPath $moved -Destination $exe -Force }
+    throw
+}
 Write-Host "Installed: $exe ($($release.tag_name))"
 
 # Check it actually starts. Application control and antivirus show up here.
@@ -84,6 +100,11 @@ try {
     $ok = $false
 }
 if (-not $ok) {
+    if ($moved) {
+        Remove-Item -LiteralPath $exe -Force -ErrorAction SilentlyContinue
+        Move-Item -LiteralPath $moved -Destination $exe -Force
+        Write-Host 'Put the old one back.'
+    }
     throw @"
 Could not start: $exe
 Application control (AppLocker / WDAC) or antivirus may be blocking it.
@@ -99,6 +120,11 @@ if (-not $NoRegister) {
 }
 
 Write-Host ''
+Write-Host ''
+if ($moved) {
+    Write-Host 'The tsumugi you had open is still the old one. Close and reopen it,'
+    Write-Host 'and stop the old multiplexer first:  tsg --list  then  tsg -s <name> --kill'
+}
 Write-Host 'Done. Open a new shell and type `tsg`, or use the Start Menu.'
 Write-Host 'Shell integration (prompt marks):  tsg --install-shell-integration'
 Write-Host 'AI agent status hooks:             tsg --install-agent-hooks'
