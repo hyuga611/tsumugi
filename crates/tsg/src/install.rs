@@ -47,6 +47,20 @@ pub fn uninstall() -> Result<Report> {
 /// （しかも取ってくるのは常に最新の台本なので、古い exe でも新しい入れ方に従える）。
 pub fn update(force: bool) -> Result<Report> {
     let exe = std::env::current_exe().context("自分の場所が分かりません")?;
+    // **どの OS でも同じ判断。** ビルドの成果物へ配布版を上書きしない。
+    if is_build_artifact(&exe) {
+        let mut r = Report::new();
+        r.notes.push(format!(
+            "{} は cargo build で作ったものです。ここへ配布版を上書きしません",
+            exe.display()
+        ));
+        r.notes
+            .push("ソースを更新するなら: git pull; cargo build --release".into());
+        r.notes.push(
+            "配布版を別に入れるなら README の「入れる」を見てください（置き場所を選べます）".into(),
+        );
+        return Ok(r);
+    }
     imp::update(&exe, force)
 }
 
@@ -200,20 +214,6 @@ mod imp {
     /// 「走っている exe の名前を変える」はできる。避けてから置いてもらう。
     pub fn update(exe: &Path, force: bool) -> Result<Report> {
         let mut r = Report::new();
-        if super::is_build_artifact(exe) {
-            r.notes.push(format!(
-                "{} は cargo build で作ったものです。ここへ配布版を上書きしません",
-                exe.display()
-            ));
-            r.notes
-                .push("ソースを更新するなら: git pull; cargo build --release".into());
-            r.notes.push(
-                "配布版を別に入れるなら: $env:TSUMUGI_DIR = \"$env:USERPROFILE\\bin\"; \
-                 irm https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.ps1 | iex"
-                    .into(),
-            );
-            return Ok(r);
-        }
         let dir = match std::env::var_os("TSUMUGI_DIR") {
             Some(d) if !d.is_empty() => PathBuf::from(d),
             _ => exe
@@ -363,8 +363,6 @@ mod imp {
 #[cfg(not(windows))]
 mod imp {
     use super::{Report, Result, write_icon};
-    use std::path::Path;
-
     use std::path::{Path, PathBuf};
 
     fn home() -> Option<PathBuf> {
