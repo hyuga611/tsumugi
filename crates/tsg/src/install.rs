@@ -39,17 +39,36 @@ pub fn uninstall() -> Result<Report> {
     imp::uninstall()
 }
 
+/// 配布物の名前。**リリースに載せている名前とここが唯一の対応表**
+/// （`.github/workflows/release.yml`）。
+fn asset_name() -> Option<&'static str> {
+    Some(match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("windows", _) => "tsg.exe",
+        ("macos", "aarch64") => "tsg-macos-arm64",
+        ("linux", "x86_64") => "tsg-linux-x86_64",
+        _ => return None,
+    })
+}
+
 /// 最新版を取ってきて入れ替える（`tsg update`）。
 ///
-/// **入れ方は 1 つに保つ。** ここで独自に GitHub を叩いて置き直すと、
-/// README に載っている `install.ps1` と道が 2 本になり、片方だけ直した日に
-/// 「入れ直したのに直らない」が起きる。だから**同じ台本を走らせる**
-/// （しかも取ってくるのは常に最新の台本なので、古い exe でも新しい入れ方に従える）。
+/// **自分で取ってくる。外の台本を起こさない。**
+///
+/// 前は `powershell -Command "irm <URL> | iex"` を起こしていた。入れ方を
+/// 1 通りに保つつもりだったが、**その形は「取ってきて、その場で実行する」
+/// マルウェアと見分けが付かない**。実機で Windows Defender に止められ
+/// （`ThreatID 2147840094`）、プロセスの起動が拒否されたうえに置いてあった
+/// exe まで消された。会社の PC ほど厳しいので、まさに要る場所で壊れる。
+///
+/// HTTPS で取ってきてファイルに置くのは、道具が自分を更新する普通の形。
+/// 最初に入れるときの `install.ps1` / `install.sh` はそのまま残す
+/// （tsg がまだ無いのだから、そこは外から始めるしかない）。
 pub fn update(force: bool) -> Result<Report> {
     let exe = std::env::current_exe().context("自分の場所が分かりません")?;
+    let mut r = Report::new();
+
     // **どの OS でも同じ判断。** ビルドの成果物へ配布版を上書きしない。
     if is_build_artifact(&exe) {
-        let mut r = Report::new();
         r.notes.push(format!(
             "{} は cargo build で作ったものです。ここへ配布版を上書きしません",
             exe.display()
@@ -61,7 +80,130 @@ pub fn update(force: bool) -> Result<Report> {
         );
         return Ok(r);
     }
-    imp::update(&exe, force)
+
+    let Some(asset) = asset_name() else {
+        r.notes.push(format!(
+            "{} / {} 向けの配布物はありません",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ));
+        r.notes
+            .push("ソースから: git pull; cargo build --release".into());
+        return Ok(r);
+    };
+
+    let (tag, url) = latest_release(asset)?;
+    if !force && tag == format!("v{}", env!("CARGO_PKG_VERSION")) {
+        r.notes.push(format!(
+            "すでに最新です（{tag}）。入れ直すなら tsg update --force"
+        ));
+        return Ok(r);
+    }
+
+    // 落としてくるのは隣へ。**途中で切れた物を tsg.exe にしない。**
+    let dir = exe.parent().context("自分の置き場所が分かりません")?;
+    sweep_old(dir);
+    let part = dir.join("tsg.download");
+    download(&url, &part).with_context(|| format!("{url} を取ってこられません"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&part, std::fs::Permissions::from_mode(0o755));
+    }
+
+    // 走っている自分は上書きできない。**名前は変えられる**ので避けてから置く
+    // （Windows はファイルを追うので、開いている窓はそのまま動き続ける）。
+    let old = dir.join(format!("tsg.old-{}", std::process::id()));
+    let moved = std::fs::rename(&exe, &old).is_ok();
+    if let Err(e) = std::fs::rename(&part, &exe) {
+        let _ = std::fs::remove_file(&part);
+        if moved {
+            let _ = std::fs::rename(&old, &exe);
+        }
+        return Err(anyhow::anyhow!(e)).context(format!("{} へ置けません", exe.display()));
+    }
+
+    // 起きるところまで見る。アプリケーション制御やウイルス対策はここに出る。
+    let starts = std::process::Command::new(&exe)
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !starts {
+        let _ = std::fs::remove_file(&exe);
+        if moved {
+            let _ = std::fs::rename(&old, &exe);
+            r.notes
+                .push("起動できなかったので、前の版へ戻しました".into());
+        }
+        anyhow::bail!(
+            "{} を起こせません。アプリケーション制御かウイルス対策が止めている可能性があります",
+            exe.display()
+        );
+    }
+
+    r.done
+        .push(format!("{} を {tag} にしました", exe.display()));
+    if moved {
+        // 自分がまだ掴んでいるので、いま消しても失敗する。次の入れ替えで消す。
+        r.notes.push(format!(
+            "前の版は {} に残ります（次の tsg update で消します）",
+            old.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        ));
+    }
+    Ok(r)
+}
+
+/// GitHub のリリースを 1 つ引いて、この機械向けの配布物の在り処を返す。
+fn latest_release(asset: &str) -> Result<(String, String)> {
+    let api = "https://api.github.com/repos/hyuga611/tsumugi/releases/latest";
+    let body = ureq::get(api)
+        .header("User-Agent", "tsumugi-update")
+        .header("Accept", "application/vnd.github+json")
+        .call()
+        .context("GitHub に繋がりません")?
+        .body_mut()
+        .read_to_string()
+        .context("リリースの一覧を読めません")?;
+    let v: serde_json::Value = serde_json::from_str(&body).context("リリースの形が読めません")?;
+    let tag = v["tag_name"]
+        .as_str()
+        .context("リリースに版の名前がありません")?
+        .to_string();
+    let url = v["assets"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|a| a["name"].as_str() == Some(asset))
+        .and_then(|a| a["browser_download_url"].as_str())
+        .with_context(|| format!("{tag} に {asset} がありません"))?
+        .to_string();
+    Ok((tag, url))
+}
+
+/// 取ってきてファイルへ。**丸ごと覚えない**（20 MB を抱えない）。
+fn download(url: &str, to: &std::path::Path) -> Result<()> {
+    let mut res = ureq::get(url)
+        .header("User-Agent", "tsumugi-update")
+        .call()?;
+    let mut file = std::fs::File::create(to)?;
+    std::io::copy(&mut res.body_mut().as_reader(), &mut file)?;
+    Ok(())
+}
+
+/// 残っている古い exe を消す。**自分が付けた名前のものだけ。**
+fn sweep_old(dir: &std::path::Path) {
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in read.flatten() {
+        let name = e.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with("tsg.old-") || name.starts_with("tsg.exe.old-") {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 /// この exe は、ソースの木から `cargo build` したものか。
@@ -99,8 +241,7 @@ fn write_icon() -> Option<PathBuf> {
 #[cfg(windows)]
 mod imp {
     use super::{Report, Result, icon_path, write_icon};
-    use anyhow::Context as _;
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     /// PowerShell に 1 本流す。COM（ショートカット）とレジストリのために使う。
     ///
@@ -249,142 +390,6 @@ mod imp {
         Ok(r)
     }
 
-    /// 入れ替える。**走っている自分は消せないので、先に名前を変える。**
-    ///
-    /// Windows は「走っている exe を上書き」はできないが、
-    /// 「走っている exe の名前を変える」はできる。避けてから置いてもらう。
-    pub fn update(exe: &Path, force: bool) -> Result<Report> {
-        let mut r = Report::new();
-        let dir = match std::env::var_os("TSUMUGI_DIR") {
-            Some(d) if !d.is_empty() => PathBuf::from(d),
-            _ => exe
-                .parent()
-                .map(Path::to_path_buf)
-                .context("自分の置き場所が分かりません")?,
-        };
-
-        // **避ける前に、起こせるかどうかを見る。** 起こせないと分かってから
-        // 名前を戻すのでは、戻し損ねたら tsg が消える道を毎回通ることになる。
-        let ps = match working_powershell() {
-            Ok(p) => p,
-            Err(tried) => {
-                anyhow::bail!(
-                    "PowerShell を起こせません（何も変えていません）。試した先:\n    {tried}\n                       手で入れ直すなら:\n                         irm https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.ps1 | iex"
-                );
-            }
-        };
-
-        // 前回の入れ替えで残った古い exe。**掴んでいる者が居なくなってから**
-        // でないと消せないので、次の入れ替えのここで片付ける。
-        sweep_old(&dir);
-
-        // これから置かれる場所が自分自身なら、避けておく。
-        let target = dir.join("tsg.exe");
-        let mut moved = None;
-        if same_file(exe, &target) {
-            let old = dir.join(format!("tsg.exe.old-{}", std::process::id()));
-            std::fs::rename(exe, &old)
-                .with_context(|| format!("{} を避けられません", exe.display()))?;
-            moved = Some(old);
-        }
-
-        let script = "$ErrorActionPreference='Stop'; \
-             irm https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.ps1 | iex";
-        let mut cmd = std::process::Command::new(&ps);
-        cmd.args(["-NoProfile", "-NonInteractive", "-Command", script])
-            .env("TSUMUGI_DIR", &dir)
-            // いまの版を教える。**同じなら 19 MB を取り直さない。**
-            .env("TSUMUGI_HAVE", env!("CARGO_PKG_VERSION"));
-        if force {
-            cmd.env("TSUMUGI_FORCE", "1");
-        }
-        // **どの失敗の道でも、避けたものを戻す。** ここで早く返ると、
-        // tsg がどこにも無いまま終わる（`?` で抜けた先では誰も戻さない）。
-        let outcome = cmd.status();
-        // **戻せたかどうかを見る。** 黙って「戻しました」と言って実は
-        // 戻っていないのが一番悪い。それを読んだ人は tsg を探しにいかない。
-        let restore = |moved: &Option<PathBuf>| -> String {
-            let Some(old) = moved else {
-                return String::new();
-            };
-            match std::fs::rename(old, exe) {
-                Ok(()) => "（tsg は元に戻しました）".to_string(),
-                Err(e) => format!(
-                    "（tsg を戻せませんでした: {e}。{} を tsg.exe へ名前だけ戻してください）",
-                    old.display()
-                ),
-            }
-        };
-        let status = match outcome {
-            Ok(s) => s,
-            Err(e) => {
-                let back = restore(&moved);
-                return Err(anyhow::anyhow!(e)).context(format!(
-                    "powershell を起こせません{back}。\n                         手で入れ直すなら: irm https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.ps1 | iex"
-                ));
-            }
-        };
-        if !status.success() {
-            let back = restore(&moved);
-            anyhow::bail!("入れ替えに失敗しました{back}。上の出力を見てください");
-        }
-
-        // **置かれたか確かめる。** 台本は「もう最新です」と言って
-        // 何もせずに戻ることがある（成功として戻る）。避けたままだと
-        // tsg がどこにも無くなる — 入れ替えのつもりで消したことになる。
-        if !target.exists() {
-            if let Some(old) = &moved {
-                std::fs::rename(old, &target)
-                    .with_context(|| format!("{} を戻せません", target.display()))?;
-            }
-            r.notes.push(format!(
-                "すでに最新です（v{}）。入れ直すなら tsg update --force",
-                env!("CARGO_PKG_VERSION")
-            ));
-            return Ok(r);
-        }
-
-        r.done
-            .push(format!("{} を最新版にしました", target.display()));
-        if let Some(old) = moved {
-            // **いまは消せない。** 走っているのは自分自身で、OS が実行
-            // イメージを掴んでいる。抜けるのを別プロセスに見張らせる形も
-            // 試したが、こちらの機械では動かなかった（見えない後始末を
-            // 当てにするより、次の入れ替えで確実に消すほうを採る）。
-            r.notes.push(format!(
-                "古い版は {} に残ります（次の tsg update で消します）",
-                old.file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            ));
-        }
-        Ok(r)
-    }
-
-    /// 同じファイルを指しているか。**字面で比べない**（`~1` の短い名前や
-    /// 大文字小文字の違いで、避けるべきものを避けそこねる）。
-    fn same_file(a: &Path, b: &Path) -> bool {
-        match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-            (Ok(a), Ok(b)) => a == b,
-            // 相手がまだ無い（初めて置く）なら、名前で見るしかない。
-            _ => a == b,
-        }
-    }
-
-    /// 残っている古い exe を消す。**自分が付けた名前のものだけ。**
-    fn sweep_old(dir: &Path) {
-        let Ok(read) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for e in read.flatten() {
-            let name = e.file_name();
-            let Some(name) = name.to_str() else { continue };
-            if name.starts_with("tsg.exe.old-") {
-                let _ = std::fs::remove_file(e.path());
-            }
-        }
-    }
-
     pub fn uninstall() -> Result<Report> {
         let mut r = Report::new();
 
@@ -501,43 +506,6 @@ mod imp {
             }
         }
         r.notes.push("元に戻すときは `tsg --uninstall`".into());
-        Ok(r)
-    }
-
-    /// 入れ替える。**入れ方は 1 つに保つ**ので、README と同じ `install.sh` を走らせる。
-    ///
-    /// Windows 側と同じ理屈。ここで独自に取ってきて置き直すと道が 2 本になり、
-    /// 片方だけ直した日に「入れ直したのに直らない」が起きる。取ってくるのは
-    /// 常に最新の台本なので、古い実行ファイルでも新しい入れ方に従える。
-    pub fn update(exe: &Path, force: bool) -> Result<Report> {
-        let mut r = Report::new();
-        let dir = match std::env::var_os("TSUMUGI_DIR") {
-            Some(d) if !d.is_empty() => PathBuf::from(d),
-            _ => exe
-                .parent()
-                .map(Path::to_path_buf)
-                .context("自分の置き場所が分かりません")?,
-        };
-
-        let script =
-            "curl -fsSL https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.sh | sh";
-        let mut cmd = std::process::Command::new("sh");
-        cmd.args(["-c", script])
-            .env("TSUMUGI_DIR", &dir)
-            // いまの版を教える。**同じ版なら取り直さない。**
-            .env("TSUMUGI_HAVE", env!("CARGO_PKG_VERSION"));
-        if force {
-            cmd.env("TSUMUGI_FORCE", "1");
-        }
-        let status = cmd.status().context(
-            "sh を起こせません（手で入れ直すなら: \
-             curl -fsSL https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.sh | sh）",
-        )?;
-        if !status.success() {
-            anyhow::bail!("入れ替えに失敗しました（上の出力を見てください）");
-        }
-        r.done
-            .push(format!("{} を最新版にしました", dir.join("tsg").display()));
         Ok(r)
     }
 

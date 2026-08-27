@@ -106,12 +106,19 @@ protocol cannot be reached from the new one. By default it does **not** stop
 them: it prints the names of the running sessions and how to stop each one,
 because stopping one means ending the shells and agents inside it.
 
-**It downloads nothing when you are already on the latest** (it says
-`Already on v0.3.9.` and stops). Underneath it runs the same `install.ps1`, so
-there is only ever one way to install. A running executable cannot delete
-itself, so the old one stays as `tsg.exe.old-…` and the next `tsg update`
-removes it. A binary you built with `cargo build` is **never overwritten** —
-it says so and tells you what to do instead.
+**It downloads nothing when you are already on the latest.**
+
+`tsg update` fetches the release **itself** — it starts no external process.
+It used to run `powershell -Command "irm <URL> | iex"`, but **that shape is
+indistinguishable from malware that downloads and runs code**, and Windows
+Defender on a corporate machine blocked it: the process was denied, and the
+installed binary was removed with it. The machines that need it most are the
+strictest, so that is exactly where it broke.
+
+A running executable cannot delete itself, so the previous one stays as
+`tsg.old-…` and the next `tsg update` removes it. A binary you built with
+`cargo build` is **never overwritten** — it says so and tells you what to do
+instead.
 
 **The macOS / Linux line** puts `tsg` in `~/.local/bin` and runs
 `tsg --install` (shell integration for bash / zsh / fish / nu). Intel Macs and
