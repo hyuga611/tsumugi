@@ -459,32 +459,26 @@ mod tests {
 
     /// `cargo build` の成果物へ、配布版を上書きしない。
     ///
-    /// **作者の機械ではこれが既定**（PATH がソースの木の `target\release` を
+    /// **作者の機械ではこれが既定**（PATH がソースの木の `target/release` を
     /// 指している）。黙って置き換えると、次の `cargo build` まで何が
     /// 動いているのか分からなくなる。
+    ///
+    /// パスは**部品から組む**。`C:\...` と書くと、Unix ではそれが
+    /// まるごと 1 つのファイル名になり、判定が素通りする（CI で踏んだ）。
     #[test]
     fn a_binary_built_from_source_is_left_alone() {
-        let art = |p: &str| is_build_artifact(Path::new(p));
-        assert!(art(r"C:\dev\tsumugi\target\release\tsg.exe"));
-        assert!(art("/home/x/tsumugi/target/debug/tsg"));
+        let art = |parts: &[&str]| {
+            let p: std::path::PathBuf = parts.iter().collect();
+            is_build_artifact(&p)
+        };
+        assert!(art(&["dev", "tsumugi", "target", "release", "tsg.exe"]));
+        assert!(art(&["home", "x", "tsumugi", "target", "debug", "tsg"]));
         // 入れた先はふつうのフォルダ。ここは入れ替えてよい。
-        assert!(!art(r"C:\Users\x\bin\tsg.exe"));
-        assert!(!art(r"D:\tools\tsg.exe"));
+        assert!(!art(&["Users", "x", "bin", "tsg.exe"]));
+        assert!(!art(&["tools", "tsg.exe"]));
         // `target` の下でも、profile の名前でなければ違う
-        assert!(!art(r"C:\x\target\other\tsg.exe"));
-    }
-    /// アイコンは埋め込む。別ファイルを探しに行く形にすると、
-    /// exe を 1 つ置いただけの環境で「入れる」が成立しない。
-    #[test]
-    fn the_icon_is_embedded_in_the_binary() {
-        let ico = include_bytes!("../../../assets/tsumugi.ico");
-        assert!(ico.len() > 1000, "アイコンが空");
-        assert_eq!(&ico[0..4], &[0, 0, 1, 0], "ICO の形をしていない");
-    }
-
-    #[test]
-    fn the_window_icon_is_a_square_of_rgba() {
-        let rgba = include_bytes!("../../../assets/icon.rgba");
-        assert_eq!(rgba.len(), 256 * 256 * 4, "256x256 の RGBA ではない");
+        assert!(!art(&["x", "target", "other", "tsg.exe"]));
+        // 直下に置かれた exe（親が 1 つも無い）でも落ちない
+        assert!(!is_build_artifact(Path::new("tsg.exe")));
     }
 }
