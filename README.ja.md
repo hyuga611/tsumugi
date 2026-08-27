@@ -65,11 +65,21 @@ tsg -V             # 版が出る
 Get-Command go     # Function と出れば、シェル統合が効いています
 ```
 
-`go` の右でエージェントを起こしたいときは、設定に 1 行:
+**AI を使うのに設定は要りません。** タブの状態表示（`●` 返事待ち）も知らせも、
+`tsg --install` が入れたフックが出しているので、ペインで `claude` や `codex` と
+打てばそのまま効きます。
+
+設定で決まるのは **`go` の右で何を自動で起こすか**だけです。書かなければ
+右は素のシェルで、そこで好きなものを打てます。
 
 ```toml
+[shell]
+program = "pwsh"              # 開くシェル（既定は PowerShell。cmd.exe も書ける）
+
 [workspace]
-agent = "claude"
+agent = "claude"              # go の右で起こすもの
+# agent = "codex"             # codex を使うならこちら
+# agent = ["codex", "-m", "gpt-5.4"]   # 引数を付けるなら配列で
 ```
 
 2 回目からは、入れた `tsg` 自身に頼めます。
@@ -90,6 +100,11 @@ tsg update --stop-sessions    # 走っているセッションも止める（中
 ようにしてあります。走っている自分は消せないので、古い exe は
 `tsg.exe.old-…` として残り、次の `tsg update` で消えます。
 `cargo build` で作った exe には**上書きしません**（断って、代わりの手を出します）。
+
+**macOS と Linux** には配布物がありません（`tsg update` もそう言います）。
+ソースから入れてください。`--install` は `~/.local/bin/tsg` に symlink を張り、
+シェル統合（bash / zsh / fish / nu）まで入れます。
+**ただし未検証です** — 動いたら / 動かなかったら教えてください（[いまの状態](#いまの状態)）。
 
 自分でビルドするなら:
 

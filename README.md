@@ -68,11 +68,21 @@ tsg -V             # prints the version
 Get-Command go     # `Function` means the shell integration took
 ```
 
-To have `go` start an agent on the right, one line in the config:
+**You do not need any configuration to use an agent.** The tab status (`●`
+waiting) and the notifications come from the hooks `tsg --install` put in, so
+typing `claude` or `codex` in a pane just works.
+
+The setting only decides **what `go` starts on the right**. Leave it out and
+the right pane is a plain shell you can type anything into.
 
 ```toml
+[shell]
+program = "pwsh"              # which shell to open (default: PowerShell; cmd.exe works too)
+
 [workspace]
-agent = "claude"
+agent = "claude"              # what go starts on the right
+# agent = "codex"             # for codex
+# agent = ["codex", "-m", "gpt-5.4"]   # with arguments, use an array
 ```
 
 After that, the copy you installed can do it itself:
@@ -94,6 +104,11 @@ there is only ever one way to install. A running executable cannot delete
 itself, so the old one stays as `tsg.exe.old-…` and the next `tsg update`
 removes it. A binary you built with `cargo build` is **never overwritten** —
 it says so and tells you what to do instead.
+
+**macOS and Linux** have no binaries to download (`tsg update` says so too):
+build from source. `--install` symlinks `~/.local/bin/tsg` and installs the
+shell integration (bash / zsh / fish / nu). **None of it is verified yet** —
+please tell me either way ([Status](#status)).
 
 Building it yourself:
 
