@@ -12,9 +12,9 @@ base64 = "0.23.1"
 interprocess = "2.4.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-tsg-pty = { version = "0.3.6", path = "../tsg-pty" }
-tsg-lsp = { version = "0.3.6", path = "../tsg-lsp" }
-tsg-term = { version = "0.3.6", path = "../tsg-term" }
+tsg-pty = { version = "0.3.7", path = "../tsg-pty" }
+tsg-lsp = { version = "0.3.7", path = "../tsg-lsp" }
+tsg-term = { version = "0.3.7", path = "../tsg-term" }
 regex = "1.13.1"
 
 [target."cfg(unix)".dependencies]

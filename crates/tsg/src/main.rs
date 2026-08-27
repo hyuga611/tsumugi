@@ -8016,7 +8016,7 @@ fn main() -> Result<()> {
             // 言語サーバの起こし方は設定に書いてある。**読むのはサーバ側**
             // （ファイルを持っているのがそこなので、診断もそこで受ける）。
             let (cfg, _) = Config::load();
-            return tsg_mux::server::run_with(&cli.session, cli.restore, cfg.lsp);
+            return tsg_mux::server::run_with(&cli.session, cli.restore, cfg.lsp, cfg.shell);
         }
         cli::Mode::Send(text) => return rpc::send(&cli.session, text),
         cli::Mode::Tap => return rpc::tap(&cli.session),

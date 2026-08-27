@@ -7,7 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-tsg-buffer = { version = "0.3.6", path = "../tsg-buffer" }
+tsg-buffer = { version = "0.3.7", path = "../tsg-buffer" }
 # 探すときの正規表現だけに使う。**入出力はしない**（arch.md の不変条件 2）。
 regex = { version = "1", default-features = false, features = ["std", "perf", "unicode"] }
 

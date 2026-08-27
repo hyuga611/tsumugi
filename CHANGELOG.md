@@ -3,6 +3,32 @@
 形式は [Keep a Changelog](https://keepachangelog.com/ja/1.1.0/)、
 版番号は [Semantic Versioning](https://semver.org/lang/ja/)。
 
+## [0.3.7] - 2026-08-27
+
+**tsumugi の中で `go` が効かなかった。** 原因は 2 つあり、どちらも
+「シェル統合を入れたのに効かない」の正体だった。
+
+### 変えた
+
+- **Windows で開く既定のシェルを PowerShell にした（cmd.exe をやめた）。**
+  `COMSPEC` をそのまま使っていたので、既定で開くのは cmd.exe だった。
+  tsumugi の要はどれもシェル統合（OSC 133）の上に載っている — 左のふち、
+  `[[` `]]`、`ac` / `io`、そして `go`。**cmd.exe にはそれを出す仕掛けが無い**
+  （`shell-integration/` にも「cmd.exe に相当するフックは無い」と書いてある）。
+  つまり既定のままでは、入れた人は必ず「効かない」状態から始まっていた。
+  `pwsh` が在ればそれ、無ければ Windows PowerShell。
+- **`[shell] program`** を足した。`"cmd.exe"` でも `["wsl.exe", "-d", "Ubuntu"]`
+  でも書ける。既定を変えた以上、選べる口が要る。
+
+### 直した
+
+- **名前を付けたセッションの中で `go` が `default` を探しにいっていた。**
+  `-s` を書かずに打つと、中から打っても外から打っても `default` が相手に
+  なっていた。**tsumugi の中から打たれたら、そのセッションが相手**にする
+  （`TSUMUGI_SESSION` を見る。`-s` を書けばそちらが勝つ）。
+  `--agent-state` や `--kill` も同じ道を通るので、名前を付けて使っている
+  人のところで揃って直る。
+
 ## [0.3.6] - 2026-08-27
 
 ### 直した

@@ -565,6 +565,20 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Cli {
     if cli.command.is_some() && !cli.session_given {
         cli.session = format!("run-{}", std::process::id());
     }
+
+    // tsumugi の中から打たれたなら、**相手はそのセッション**。
+    //
+    // ここが無いと、名前を付けたセッションの中で `go` や `--agent-state` を
+    // 打っても `default` を探しにいって「サーバへ接続できません」で終わる
+    // （実機で踏んだ）。外から別のセッションを触る道は塞がない —
+    // `-s` を書けばそちらが勝つ。
+    if !cli.session_given
+        && cli.command.is_none()
+        && let Ok(inside) = std::env::var("TSUMUGI_SESSION")
+        && !inside.is_empty()
+    {
+        cli.session = inside;
+    }
     cli
 }
 

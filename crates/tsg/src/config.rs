@@ -66,6 +66,10 @@ pub struct Config {
     /// **既定は消さず、上に重ねる。** 書かなかった拡張子は今までどおり
     /// （`tsg_lsp::servers` の表）。
     pub lsp: std::collections::BTreeMap<String, tsg_lsp::servers::Spec>,
+    /// 開くシェル。空なら OS ごとの既定
+    /// （Windows は PowerShell。**cmd.exe ではない** — シェル統合が無いと
+    /// 左のふちも `[[` も `ac` も `go` も効かないため）。
+    pub shell: Option<Vec<String>>,
     /// 裏に回っているときに、画面の隅へ知らせを出すか。
     ///
     /// **既定で出す。** エージェントが返事を待っていることに気づくのが
@@ -99,6 +103,7 @@ impl Default for Config {
             domains: Vec::new(),
             lsp: std::collections::BTreeMap::new(),
             popup: true,
+            shell: None,
             agent: None,
             keys: tsg_modal::Keymap::default(),
         }
@@ -145,6 +150,15 @@ struct File {
     /// `[workspace]` — `go` で組む作業台。
     #[serde(default)]
     workspace: WorkspaceFile,
+    /// `[shell]` — 開くシェル。
+    #[serde(default)]
+    shell: ShellFile,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ShellFile {
+    /// `"pwsh"` でも `["wsl.exe", "-d", "Ubuntu"]` でも。
+    program: Option<toml::Value>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -158,6 +172,13 @@ struct WorkspaceFile {
 /// **知らない形は黙って捨てない。** 書いたのに素のシェルが開くと、
 /// 設定が効いていないことに気づく手がかりがどこにも無い。
 fn parse_agent(v: Option<&toml::Value>) -> Result<Option<Vec<String>>, String> {
+    parse_words(v, "agent")
+}
+
+/// 「プログラムと引数」を読む。文字列も配列も通す。
+///
+/// **知らない形は黙って捨てない。** 書いたのに効かないのが一番困る。
+fn parse_words(v: Option<&toml::Value>, key: &str) -> Result<Option<Vec<String>>, String> {
     let Some(v) = v else {
         return Ok(None);
     };
@@ -172,13 +193,13 @@ fn parse_agent(v: Option<&toml::Value>) -> Result<Option<Vec<String>>, String> {
             for it in items {
                 match it.as_str() {
                     Some(s) if !s.trim().is_empty() => out.push(s.to_string()),
-                    _ => return Err(format!("agent = {v} を読めません（文字列の配列）")),
+                    _ => return Err(format!("{key} = {v} を読めません（文字列の配列）")),
                 }
             }
             Ok((!out.is_empty()).then_some(out))
         }
         other => Err(format!(
-            "agent = {other} を読めません（\"claude\" か [\"claude\", \"--continue\"]）"
+            "{key} = {other} を読めません（\"claude\" のような文字列か、その配列）"
         )),
     }
 }
@@ -348,6 +369,15 @@ pub fn template() -> String {
 # 窓が裏に居るとき、画面の隅にも知らせる（最小化していても届きます）。
 # どのタブが返事を待っているかまで出ます。
 # popup = {popup}
+
+[shell]
+# 開くシェル。書かなければ OS ごとの既定です。
+# Windows は PowerShell（pwsh があればそれ）。**cmd.exe ではありません** —
+# 左のふち・[[ ]]・ac / io・go はどれもシェル統合（OSC 133）の上に載っていて、
+# cmd.exe にはそれを出す仕掛けが無いので、既定にすると必ず「効かない」状態から
+# 始まることになります。cmd.exe を開きたいときは、ここに書いてください。
+# program = "pwsh"
+# program = ["wsl.exe", "-d", "Ubuntu"]
 
 [workspace]
 # `go`（シェル統合）と `Space w` で組む作業台。
@@ -632,6 +662,13 @@ impl Config {
                     ssh: v.ssh.clone().unwrap_or_else(|| "ssh".into()),
                 })
                 .collect(),
+            shell: match parse_words(f.shell.program.as_ref(), "program") {
+                Ok(v) => v,
+                Err(w) => {
+                    bad.push(w);
+                    None
+                }
+            },
             agent: match parse_agent(f.workspace.agent.as_ref()) {
                 Ok(v) => v,
                 Err(w) => {
@@ -708,6 +745,23 @@ mod tests {
     fn an_agent_written_the_wrong_way_says_so() {
         let w = warning("[workspace]\nagent = 3").expect("警告が出ていない");
         assert!(w.contains("agent"), "{w}");
+    }
+
+    /// 開くシェルも、文字列でも配列でも書ける。
+    #[test]
+    fn the_shell_can_be_written_either_way() {
+        assert_eq!(
+            parsed("[shell]\nprogram = \"pwsh\"").shell,
+            Some(vec!["pwsh".into()])
+        );
+        assert_eq!(
+            parsed("[shell]\nprogram = [\"wsl.exe\", \"-d\", \"Ubuntu\"]").shell,
+            Some(vec!["wsl.exe".into(), "-d".into(), "Ubuntu".into()])
+        );
+        // 書かなければ OS ごとの既定（ここでは決めない）
+        assert_eq!(parsed("").shell, None);
+        // 読めない書き方は黙って捨てない
+        assert!(warning("[shell]\nprogram = 3").is_some_and(|w| w.contains("program")));
     }
 
     /// 隅の知らせは既定で出す。切りたい人だけ切る。

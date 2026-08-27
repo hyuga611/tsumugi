@@ -70,7 +70,7 @@ tsg update --stop-sessions    # 走っているセッションも止める（中
 セッションの名前と止め方を出す**だけにしてあります（止めるというのは、
 中のシェルとエージェントを終わらせることなので）。
 
-**同じ版なら何も取ってきません**（`Already on v0.3.6.` と言って終わります）。
+**同じ版なら何も取ってきません**（`Already on v0.3.7.` と言って終わります）。
 中でやっているのは上と同じ `install.ps1` で、**入れ方を 2 通り持たない**
 ようにしてあります。走っている自分は消せないので、古い exe は
 `tsg.exe.old-…` として残り、次の `tsg update` で消えます。
@@ -262,6 +262,9 @@ ambiguous_width = "narrow"    # "wide" で罫線素片などを 2 幅に
 
 [theme]
 name = "夜霧"                  # 夜霧 / 墨 / 白磁
+
+[shell]
+program = "pwsh"              # 開くシェル。既定は PowerShell（cmd.exe ではありません）
 
 [workspace]
 agent = "claude"              # `go` の右で起こすもの。["codex", "-m", "gpt"] とも書けます

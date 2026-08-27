@@ -238,6 +238,8 @@ struct State {
     /// 次に起こすペインの作業ディレクトリ・起動コマンド。
     spawn_cwd: Option<String>,
     spawn_command: Option<Vec<String>>,
+    /// 設定で決めた既定のシェル（`[shell] program`）。無ければ `default_shell()`。
+    shell: Option<Vec<String>>,
 }
 
 impl State {
@@ -261,6 +263,7 @@ impl State {
             rows: 24,
             spawn_cwd: None,
             spawn_command: None,
+            shell: None,
             restore: true,
             lsp: crate::lsp::Lsp::default(),
         }
@@ -308,12 +311,14 @@ impl State {
         let id = self.next_pane;
         self.next_pane += 1;
 
-        let program = command
+        // 走らせるもの。頼まれたものが先、次に設定、最後に既定。
+        let want = command.clone().or_else(|| self.shell.clone());
+        let program = want
             .as_ref()
             .and_then(|c| c.first().cloned())
             .unwrap_or_else(default_shell);
         let mut cmd = CommandBuilder::new(&program);
-        if let Some(args) = command.as_ref() {
+        if let Some(args) = want.as_ref() {
             for a in &args[1..] {
                 cmd.arg(a);
             }
@@ -2539,12 +2544,14 @@ pub fn run_with(
     session: &str,
     restore: bool,
     lsp: std::collections::BTreeMap<String, tsg_lsp::servers::Spec>,
+    shell: Option<Vec<String>>,
 ) -> Result<()> {
     let (tx, rx, endpoint, _stop) = setup(session)?;
     // 一覧に出せるよう、生きている間だけ控えを置く（`sessions` の説明を参照）
     crate::sessions::register(session);
     let mut state = State::new(session.to_string(), tx);
     state.restore = restore;
+    state.shell = shell;
     state.lsp.set_overrides(lsp);
     state_loop(&mut state, rx);
     crate::sessions::unregister(session);
@@ -2613,12 +2620,34 @@ fn write_atomically(path: &std::path::Path, text: &str) -> std::io::Result<()> {
     result
 }
 
+/// 何も指定が無いときに開くシェル。
+///
+/// **Windows で `COMSPEC`（cmd.exe）を開かない。** tsumugi の要になっている
+/// ものは、どれもシェル統合（OSC 133）の上に載っている — 左のふち、
+/// `[[` `]]`、`ac` / `io`、そして `go`。cmd.exe にはそれを出す仕掛けが無い
+/// （`shell-integration/` にも「cmd.exe に相当するフックは無い」と書いてある）。
+/// 既定で開く先が cmd.exe だと、**入れた人は必ず「効かない」状態から始まる**
+/// （会社の PC で、profile に `go` を入れたのに tsumugi の中では無い、が起きた）。
+///
+/// cmd.exe を開きたい人は設定に書ける（`[shell] program = "cmd.exe"`）。
 fn default_shell() -> String {
-    if cfg!(windows) {
-        std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".into())
-    } else {
-        std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
+    if !cfg!(windows) {
+        return std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     }
+    // PowerShell 7 が在ればそれ、無ければ Windows PowerShell。
+    // **在るかどうかは 1 度だけ見る**（ペインを開くたびにプロセスを起こさない）。
+    static PS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PS.get_or_init(|| {
+        if std::process::Command::new("pwsh")
+            .args(["-NoProfile", "-NonInteractive", "-Command", "exit 0"])
+            .output()
+            .is_ok_and(|o| o.status.success())
+        {
+            return "pwsh".into();
+        }
+        "powershell.exe".into()
+    })
+    .clone()
 }
 
 /// `file://host/C:/dev/x` 形式（OSC 7）をパスへ戻す。
