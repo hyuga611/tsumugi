@@ -60,6 +60,21 @@ the VC++ redistributable**. Set `$env:TSUMUGI_DIR = 'D:\tools'` beforehand for a
 different location, `$env:TSUMUGI_NO_REGISTER = '1'` to skip the shortcuts, or
 `$env:TSUMUGI_VERSION = 'v0.1.0'` to pin a version.
 
+Then **open a new PowerShell** and check. A shell reads its config only at
+startup, so **the window you typed in will not have it yet**.
+
+```powershell
+tsg -V             # prints the version
+Get-Command go     # `Function` means the shell integration took
+```
+
+To have `go` start an agent on the right, one line in the config:
+
+```toml
+[workspace]
+agent = "claude"
+```
+
 After that, the copy you installed can do it itself:
 
 ```powershell

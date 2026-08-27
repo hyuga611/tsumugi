@@ -57,6 +57,21 @@ exe は CRT を静的リンクしてあるので、**VC++ 再頒布可能パッ�
 置き場所を変えるなら先に `$env:TSUMUGI_DIR = 'D:\tools'`、登録が要らなければ
 `$env:TSUMUGI_NO_REGISTER = '1'`、版を選ぶなら `$env:TSUMUGI_VERSION = 'v0.1.0'`。
 
+入れたら、**新しい PowerShell を開いて**確かめます。シェルの設定は
+起動のときにしか読まれないので、**打っていた窓のままでは効きません**。
+
+```powershell
+tsg -V             # 版が出る
+Get-Command go     # Function と出れば、シェル統合が効いています
+```
+
+`go` の右でエージェントを起こしたいときは、設定に 1 行:
+
+```toml
+[workspace]
+agent = "claude"
+```
+
 2 回目からは、入れた `tsg` 自身に頼めます。
 
 ```powershell
