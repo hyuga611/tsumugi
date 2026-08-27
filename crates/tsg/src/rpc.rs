@@ -858,7 +858,20 @@ pub fn workspace(
         bail!("どのペインで組めばいいのか分かりません");
     };
     client.send(&ClientMsg::Workspace { pane, cwd, agent })?;
-    std::thread::sleep(Duration::from_millis(200));
+    // **返事を読む。** 送って寝て切るだけにしていたので、サーバが返していた
+    // 理由（エージェントを起こせない等）が誰にも読まれないまま消えていた。
+    // `go` はこれを呼ぶだけなので、打った人に見えるのは「何も起きない」だけ
+    // になる — 0.3.11 で消したはずの症状が、この道に残っていた。
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        match client.recv_timeout(Duration::from_millis(200)) {
+            Some(ServerMsg::Error { message }) => bail!("{message}"),
+            // 組み上がると木が配られる。**そこで待つのをやめる**
+            // （5 秒待ってから戻るのでは、`go` が止まって見える）。
+            Some(ServerMsg::Layout(_)) => break,
+            _ => {}
+        }
+    }
     let _ = client.send(&ClientMsg::Detach);
     Ok(())
 }

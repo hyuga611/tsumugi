@@ -317,7 +317,9 @@ impl State {
             .as_ref()
             .and_then(|c| c.first().cloned())
             .unwrap_or_else(default_shell);
-        let mut cmd = CommandBuilder::new(&program);
+        // **名乗る名前と、起こすファイルは別。** タイトルには書かれたとおりの
+        // `claude` を出し、起こすのは `resolve_program` が引き直したほう。
+        let mut cmd = CommandBuilder::new(resolve_program(&program));
         if let Some(args) = want.as_ref() {
             for a in &args[1..] {
                 cmd.arg(a);
@@ -1752,7 +1754,27 @@ impl State {
                 // 左の木。**シェルは起こしたまま**にする。`:q` で木を閉じれば
                 // ふつうのペインとして使えるので、1 枚無駄にはならない。
                 let left = self.spawn_pane_in(cols, rows, Some(root.clone()), None)?;
-                let right = self.spawn_pane_in(cols, rows, Some(root.clone()), agent.clone())?;
+                // **途中の形を残さない。** 右（エージェント）が起こせないとき、
+                // 左（木）は既に生きている。そのまま `?` で抜けると、どのタブにも
+                // 載らないペインがセッションに溜まる（`go` を打ち直すたびに 1 枚）。
+                // 作業台を 1 通で組むと決めたのと同じ理屈で、片方だけ残さない。
+                let right = match self.spawn_pane_in(cols, rows, Some(root.clone()), agent.clone())
+                {
+                    Ok(right) => right,
+                    Err(e) => {
+                        if let Some(mut p) = self.panes.remove(&left) {
+                            let _ = p.pty.kill();
+                        }
+                        self.emit(PluginEvent::PaneClosed { pane: left });
+                        self.send_to(
+                            id,
+                            &ServerMsg::Error {
+                                message: format!("{e:#}"),
+                            },
+                        );
+                        return Ok(true);
+                    }
+                };
                 if let Some(p) = self.panes.get_mut(&left) {
                     p.dir = Some(root.clone());
                 }
@@ -2646,6 +2668,56 @@ fn write_atomically(path: &std::path::Path, text: &str) -> std::io::Result<()> {
 /// （会社の PC で、profile に `go` を入れたのに tsumugi の中では無い、が起きた）。
 ///
 /// cmd.exe を開きたい人は設定に書ける（`[shell] program = "cmd.exe"`）。
+/// 拡張子を書かない名前を、実際に起こせるファイルへ引き直す（Windows）。
+///
+/// npm は Windows に **`claude`（拡張子なしのシェル台本）と `claude.cmd` を
+/// 並べて置く**。`CreateProcessW` は PATHEXT を見ないので、名前だけを渡すと
+/// 拡張子なしのほうに当たり、Win32 実行ファイルではないので
+/// 「%1 は有効な Win32 アプリケーションではありません」(os error 193) で落ちる。
+/// `[workspace] agent = "claude"` — **README が例に載せている書き方**が
+/// これに当たっていた。
+///
+/// 引き直すのは**名前だけを書かれたとき**に限る。`claude.cmd` と書いた人の
+/// 指定や、パスで書かれたものは、こちらの都合で書き換えない。
+///
+/// 試す拡張子は PATHEXT ではなく `CreateProcessW` が起こせるものだけ。
+/// PATHEXT には `.VBS` や `.JS` のように、それ自体では起動できないものが
+/// 並んでいるので、当たっても 193 が出るだけになる。
+#[cfg(windows)]
+fn resolve_program(program: &str) -> String {
+    let Some(path) = std::env::var_os("PATH") else {
+        return program.into();
+    };
+    resolve_in(program, std::env::split_paths(&path))
+}
+
+/// PATH を渡してもらう側。**環境変数を読まないので試験できる。**
+#[cfg(windows)]
+fn resolve_in(program: &str, dirs: impl Iterator<Item = std::path::PathBuf>) -> String {
+    let p = std::path::Path::new(program);
+    if p.extension().is_some() || p.components().count() > 1 {
+        return program.into();
+    }
+    // cmd.exe と同じ順（ディレクトリごとに拡張子を舐める）。
+    for dir in dirs {
+        for ext in [".exe", ".com", ".bat", ".cmd"] {
+            let cand = dir.join(format!("{program}{ext}"));
+            if cand.is_file() {
+                return cand.to_string_lossy().into_owned();
+            }
+        }
+    }
+    // 見つからなければそのまま渡す。**ここで断らない** — 起動の失敗として
+    // 出たほうが、理由（PATH に無い / 権限）がそのまま人に届く。
+    program.into()
+}
+
+/// Unix では PATH の実行ビットで足りるので、何もしない。
+#[cfg(not(windows))]
+fn resolve_program(program: &str) -> String {
+    program.into()
+}
+
 fn default_shell() -> String {
     if !cfg!(windows) {
         return std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
@@ -2845,6 +2917,43 @@ fn walk_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// npm が置く `claude`（拡張子なし）ではなく `claude.cmd` を起こす。
+    ///
+    /// これを間違えると `CreateProcessW` が 193 で落ち、`go` は
+    /// **何も起きないように見える**（0.3.12 で実際にそうなっていた）。
+    #[cfg(windows)]
+    #[test]
+    fn a_bare_name_picks_the_extension_windows_can_start() {
+        let dir = std::env::temp_dir().join("tsg-resolve-test");
+        let _ = std::fs::create_dir_all(&dir);
+        // npm はこの 2 つを並べて置く。拡張子なしのほうは起こせない。
+        std::fs::write(dir.join("tsgfake"), b"#!/bin/sh\n").unwrap();
+        std::fs::write(dir.join("tsgfake.cmd"), b"@echo off\n").unwrap();
+
+        let got = resolve_in("tsgfake", [dir.clone()].into_iter());
+        assert_eq!(
+            got,
+            dir.join("tsgfake.cmd").to_string_lossy(),
+            "拡張子なしではなく .cmd を選ぶ"
+        );
+
+        // 書いた人の指定は書き換えない。
+        assert_eq!(
+            resolve_in("tsgfake.cmd", [dir.clone()].into_iter()),
+            "tsgfake.cmd"
+        );
+        let abs = dir.join("tsgfake.cmd").to_string_lossy().into_owned();
+        assert_eq!(resolve_in(&abs, [dir.clone()].into_iter()), abs);
+
+        // PATH に無ければそのまま渡す（断らない）。
+        assert_eq!(
+            resolve_in("tsg-nope", [dir.clone()].into_iter()),
+            "tsg-nope"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// 貼った絵は**セッションごとの場所**へ。名前はそのままパスにしない。
     #[test]

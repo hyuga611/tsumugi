@@ -16,8 +16,19 @@
 # cmd.exe has no equivalent hook. Use PowerShell, or accept that the
 # prompt-aware features stay dark.
 
-if ($env:TSG_SHELL_INTEGRATION) { return }
-$env:TSG_SHELL_INTEGRATION = "1"
+# Guard against being sourced twice in ONE shell.
+#
+# This must NOT be an environment variable. $env: entries are inherited by
+# child processes, and the mux server is very often a child of a shell that
+# already sourced this file (you type `tsg` in your terminal). Every pane the
+# server then opens starts with the flag already set, returns here, and the
+# whole integration is dead: no gutter, no [[ ]], no ac / io, and `go` is not
+# even a command. The bash / zsh / fish copies use plain shell variables, which
+# are not exported, so only PowerShell had this.
+#
+# A script-scope variable is per-process and never inherited.
+if ($Global:TsgShellIntegration) { return }
+$Global:TsgShellIntegration = $true
 
 $Global:__TsgEsc = [char]27
 $Global:__TsgBel = [char]7
