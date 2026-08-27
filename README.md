@@ -65,7 +65,7 @@ tsg update --force    # reinstall even if it is the same version
 ```
 
 **It downloads nothing when you are already on the latest** (it says
-`Already on v0.3.0.` and stops). Underneath it runs the same `install.ps1`, so
+`Already on v0.3.1.` and stops). Underneath it runs the same `install.ps1`, so
 there is only ever one way to install. A running executable cannot delete
 itself, so the old one stays as `tsg.exe.old-…` and the next `tsg update`
 removes it. A binary you built with `cargo build` is **never overwritten** —

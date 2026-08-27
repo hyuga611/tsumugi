@@ -256,6 +256,21 @@ mod imp {
             anyhow::bail!("入れ替えに失敗しました（上の出力を見てください）");
         }
 
+        // **置かれたか確かめる。** 台本は「もう最新です」と言って
+        // 何もせずに戻ることがある（成功として戻る）。避けたままだと
+        // tsg がどこにも無くなる — 入れ替えのつもりで消したことになる。
+        if !target.exists() {
+            if let Some(old) = &moved {
+                std::fs::rename(old, &target)
+                    .with_context(|| format!("{} を戻せません", target.display()))?;
+            }
+            r.notes.push(format!(
+                "すでに最新です（v{}）。入れ直すなら tsg update --force",
+                env!("CARGO_PKG_VERSION")
+            ));
+            return Ok(r);
+        }
+
         r.done
             .push(format!("{} を最新版にしました", target.display()));
         if let Some(old) = moved {
