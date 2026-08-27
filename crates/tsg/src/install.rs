@@ -301,25 +301,32 @@ mod imp {
         // **どの失敗の道でも、避けたものを戻す。** ここで早く返ると、
         // tsg がどこにも無いまま終わる（`?` で抜けた先では誰も戻さない）。
         let outcome = cmd.status();
-        let restore = |moved: &Option<PathBuf>| {
-            if let Some(old) = moved {
-                let _ = std::fs::rename(old, exe);
+        // **戻せたかどうかを見る。** 黙って「戻しました」と言って実は
+        // 戻っていないのが一番悪い。それを読んだ人は tsg を探しにいかない。
+        let restore = |moved: &Option<PathBuf>| -> String {
+            let Some(old) = moved else {
+                return String::new();
+            };
+            match std::fs::rename(old, exe) {
+                Ok(()) => "（tsg は元に戻しました）".to_string(),
+                Err(e) => format!(
+                    "（tsg を戻せませんでした: {e}。{} を tsg.exe へ名前だけ戻してください）",
+                    old.display()
+                ),
             }
         };
         let status = match outcome {
             Ok(s) => s,
             Err(e) => {
-                restore(&moved);
-                return Err(anyhow::anyhow!(e)).context(
-                    "powershell を起こせません（tsg.exe は元に戻しました。\n                         手で入れ直すなら: irm https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.ps1 | iex）",
-                );
+                let back = restore(&moved);
+                return Err(anyhow::anyhow!(e)).context(format!(
+                    "powershell を起こせません{back}。\n                         手で入れ直すなら: irm https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.ps1 | iex"
+                ));
             }
         };
         if !status.success() {
-            restore(&moved);
-            anyhow::bail!(
-                "入れ替えに失敗しました（tsg.exe は元に戻しました。上の出力を見てください）"
-            );
+            let back = restore(&moved);
+            anyhow::bail!("入れ替えに失敗しました{back}。上の出力を見てください");
         }
 
         // **置かれたか確かめる。** 台本は「もう最新です」と言って

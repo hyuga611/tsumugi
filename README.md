@@ -107,7 +107,7 @@ them: it prints the names of the running sessions and how to stop each one,
 because stopping one means ending the shells and agents inside it.
 
 **It downloads nothing when you are already on the latest** (it says
-`Already on v0.3.8.` and stops). Underneath it runs the same `install.ps1`, so
+`Already on v0.3.9.` and stops). Underneath it runs the same `install.ps1`, so
 there is only ever one way to install. A running executable cannot delete
 itself, so the old one stays as `tsg.exe.old-…` and the next `tsg update`
 removes it. A binary you built with `cargo build` is **never overwritten** —
