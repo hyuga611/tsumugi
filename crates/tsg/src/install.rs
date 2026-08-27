@@ -451,7 +451,6 @@ mod imp {
 #[cfg(not(windows))]
 mod imp {
     use super::{Report, Result, write_icon};
-    use anyhow::Context as _;
     use std::path::{Path, PathBuf};
 
     fn home() -> Option<PathBuf> {
