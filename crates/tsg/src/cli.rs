@@ -96,6 +96,8 @@ pub enum Mode {
         text: String,
         wait: bool,
     },
+    /// シェル統合を外す（`--install` が入れたものの片割れ）
+    UninstallShellIntegration(Option<String>),
     /// エージェントの hooks を入れる / 外す
     InstallAgentHooks(Option<String>),
     UninstallAgentHooks(Option<String>),
@@ -217,6 +219,9 @@ tsumugi (tsg) — ターミナルの画面を vim で編集できるドキュメ
                            （中のシェルも終わります）
       --install-shell-integration [シェル]
                            それを置いて、シェルの設定ファイルに 1 行足す
+                           （`--install` が済ませているので、ふつうは要りません）
+      --uninstall-shell-integration [シェル]
+                           その 1 行を外して、置いた台本を消す
       --diagnose           フォントと CJK 幅の実測値を出して終了
       --list               走っているセッションを並べる
       --kill               走っているサーバを止める（版が違っても効く。
@@ -372,6 +377,9 @@ pub fn parse<I: IntoIterator<Item = String>>(args: I) -> Cli {
                 cli.mode = Mode::InstallShellIntegration(next_value(&args, &mut i));
             }
             "--install" => cli.mode = Mode::Install,
+            "--uninstall-shell-integration" => {
+                cli.mode = Mode::UninstallShellIntegration(next_value(&args, &mut i));
+            }
             // **裸の `update` も受ける。** 打つ側が覚えているのは
             // 「tsg update」で、`--` が要るかどうかではない。
             "update" | "--update" | "--upgrade" => cli.mode = Mode::Update,

@@ -120,11 +120,9 @@ if (-not $NoRegister) {
 }
 
 Write-Host ''
-Write-Host ''
 if ($moved) {
     Write-Host 'The tsumugi you had open is still the old one. Close and reopen it,'
     Write-Host 'and stop the old multiplexer first:  tsg --list  then  tsg -s <name> --kill'
 }
 Write-Host 'Done. Open a new shell and type `tsg`, or use the Start Menu.'
-Write-Host 'Shell integration (prompt marks):  tsg --install-shell-integration'
-Write-Host 'AI agent status hooks:             tsg --install-agent-hooks'
+Write-Host 'Shell integration and agent hooks went in too; `tsg --uninstall` takes it all back out.'

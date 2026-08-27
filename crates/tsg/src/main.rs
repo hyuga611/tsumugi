@@ -7918,6 +7918,68 @@ fn print_shell_integration(name: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// 「入れる」は、**使える状態にする**ところまで。
+///
+/// 登録だけして「あとはこの 2 つも打ってください」と言うのは、入れ方を
+/// 3 つに割っているだけで、打つ側にとっては 1 つの用事でしかない。
+/// シェル統合が無ければ左のふちも `[[` も `ac` も `go` も効かないので、
+/// **入れたのに動かない**状態から始まることになる。
+///
+/// 個別に入れ直したい人のために、`--install-shell-integration` と
+/// `--install-agent-hooks` はそのまま残してある。
+fn install_everything() -> Result<install::Report> {
+    let mut r = install::install()?;
+
+    match shell::Shell::detect() {
+        Some(sh) => match shell::install(sh) {
+            Ok(msg) => r.done.push(msg),
+            Err(e) => r.notes.push(format!("シェル統合を入れられません: {e}")),
+        },
+        None => r.notes.push(
+            "今のシェルが分からないので、シェル統合は入れませんでした\n    \
+             （tsg --install-shell-integration bash|zsh|fish|pwsh|nu）"
+                .into(),
+        ),
+    }
+
+    // エージェントのフック。**入っていないものは黙って飛ばす**
+    // （`agent_hooks::targets` が設定の置き場所を見る）。
+    match agent_hooks::install(None) {
+        Ok(a) => {
+            r.done.extend(a.done);
+            r.notes.extend(a.notes);
+        }
+        Err(e) => r
+            .notes
+            .push(format!("エージェントのフックを入れられません: {e}")),
+    }
+    Ok(r)
+}
+
+/// 入れたものを全部戻す。**`--install` と対でなければ意味が無い。**
+fn uninstall_everything() -> Result<install::Report> {
+    let mut r = install::uninstall()?;
+
+    if let Some(sh) = shell::Shell::detect() {
+        match shell::uninstall(sh) {
+            Ok(Some(msg)) => r.done.push(msg),
+            Ok(None) => {}
+            Err(e) => r.notes.push(format!("シェル統合を外せません: {e}")),
+        }
+    }
+
+    match agent_hooks::uninstall(None) {
+        Ok(a) => {
+            r.done.extend(a.done);
+            r.notes.extend(a.notes);
+        }
+        Err(e) => r
+            .notes
+            .push(format!("エージェントのフックを外せません: {e}")),
+    }
+    Ok(r)
+}
+
 fn install_shell_integration(name: Option<&str>) -> Result<()> {
     let shell = pick_shell(name)?;
     println!("{}", shell::install(shell)?);
@@ -7986,7 +8048,7 @@ fn main() -> Result<()> {
         cli::Mode::Kill => return rpc::kill(&cli.session),
         cli::Mode::Capture(pane) => return rpc::capture(&cli.session, *pane),
         cli::Mode::Rpc => return rpc::raw(&cli.session, cli.spawn),
-        cli::Mode::Install => return report_install(install::install()),
+        cli::Mode::Install => return report_install(install_everything()),
         cli::Mode::Update => {
             let r = install::update(cli.force);
             let replaced = matches!(&r, Ok(rep) if !rep.done.is_empty());
@@ -7996,10 +8058,18 @@ fn main() -> Result<()> {
             }
             return Ok(());
         }
-        cli::Mode::Uninstall => return report_install(install::uninstall()),
+        cli::Mode::Uninstall => return report_install(uninstall_everything()),
         cli::Mode::ShellIntegration(name) => return print_shell_integration(name.as_deref()),
         cli::Mode::InstallShellIntegration(name) => {
             return install_shell_integration(name.as_deref());
+        }
+        cli::Mode::UninstallShellIntegration(name) => {
+            let sh = pick_shell(name.as_deref())?;
+            match shell::uninstall(sh)? {
+                Some(msg) => println!("  ✓ {msg}"),
+                None => println!("  入っていませんでした"),
+            }
+            return Ok(());
         }
         cli::Mode::Broadcast { text, wait } => {
             let ok = rpc::broadcast(&cli.session, text, *wait)?;

@@ -147,7 +147,9 @@ pub fn install(shell: Shell) -> Result<String> {
     if !next.is_empty() && !next.ends_with('\n') {
         next.push('\n');
     }
-    next.push_str("\n# tsumugi shell integration\n");
+    next.push('\n');
+    next.push_str(MARKER);
+    next.push('\n');
     next.push_str(&line);
     next.push('\n');
     std::fs::write(&rc, next).with_context(|| format!("{} を書けません", rc.display()))?;
@@ -159,6 +161,68 @@ pub fn install(shell: Shell) -> Result<String> {
         script.display(),
         rc.display()
     ))
+}
+
+/// rc から外して、置いた台本も消す。
+///
+/// **入れたものは戻せること。** `--install` が人の rc を書き換える以上、
+/// `--uninstall` で元へ戻らないなら、書き換えてよい理由が無い
+/// （`install.rs` の「戻せない変更はしない」と同じ約束）。
+///
+/// 返すのは何を変えたか。何も無ければ `None`。
+pub fn uninstall(shell: Shell) -> Result<Option<String>> {
+    let mut changed: Vec<String> = Vec::new();
+
+    if let Some(script) = script_dir().map(|d| d.join(shell.file_name()))
+        && script.exists()
+    {
+        std::fs::remove_file(&script)
+            .with_context(|| format!("{} を消せません", script.display()))?;
+        changed.push(format!("{} を消しました", script.display()));
+    }
+
+    if let Some(rc) = shell.rc_path()
+        && let Ok(current) = std::fs::read_to_string(&rc)
+    {
+        let next = without_our_lines(&current, shell.file_name());
+        if next != current {
+            std::fs::write(&rc, next).with_context(|| format!("{} を書けません", rc.display()))?;
+            changed.push(format!("{} から読み込む 1 行を外しました", rc.display()));
+        }
+    }
+
+    Ok((!changed.is_empty()).then(|| changed.join(" / ")))
+}
+
+/// 足した行に付ける見出し。**足す側と外す側で同じものを見る。**
+const MARKER: &str = "# tsumugi shell integration";
+
+/// rc から**こちらが足した行だけ**を抜く。人が書いた行は 1 行も触らない。
+///
+/// 目印は 2 つ — 置いた台本の名前を含む行と、その上に付けた見出し。
+/// 名前で見るので、人が場所を移していても当たる。
+fn without_our_lines(current: &str, script_name: &str) -> String {
+    let ends_with_newline = current.ends_with('\n');
+    let mut kept: Vec<&str> = Vec::new();
+    for line in current.lines() {
+        if line.trim() == MARKER {
+            // 見出しの前に 1 行空けて足しているので、外すときも一緒に持って帰る。
+            // **元のファイルへ戻ること**が約束なので、空行 1 つでも残さない。
+            if kept.last().is_some_and(|l| l.trim().is_empty()) {
+                kept.pop();
+            }
+            continue;
+        }
+        if line.contains(script_name) {
+            continue;
+        }
+        kept.push(line);
+    }
+    let mut next = kept.join("\n");
+    if ends_with_newline && !next.is_empty() {
+        next.push('\n');
+    }
+    next
 }
 
 fn script_dir() -> Option<PathBuf> {
@@ -195,6 +259,27 @@ fn powershell_profile() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use super::without_our_lines;
+
+    /// 外すのは**こちらが足した行だけ**。人の rc を削らない。
+    #[test]
+    fn taking_our_line_back_out_leaves_everything_else_alone() {
+        let rc = "Set-Alias ll Get-ChildItem\n\n# tsumugi shell integration\n. \"C:\\x\\tsumugi.ps1\"\n$env:FOO = 1\n";
+        let out = without_our_lines(rc, "tsumugi.ps1");
+        // 見出しの前に空けた 1 行も持って帰る（元のファイルへ戻ること）
+        assert_eq!(out, "Set-Alias ll Get-ChildItem\n$env:FOO = 1\n");
+    }
+
+    /// 入っていない rc は 1 バイトも変えない（何度走らせても同じ）。
+    #[test]
+    fn a_file_we_never_touched_comes_back_unchanged() {
+        let rc = "# mine\nSet-Alias g git\n";
+        assert_eq!(without_our_lines(rc, "tsumugi.ps1"), rc);
+        // 末尾の改行が無いものも、無いまま返す
+        let rc2 = "# mine";
+        assert_eq!(without_our_lines(rc2, "tsumugi.ps1"), rc2);
+    }
+
     use super::*;
 
     #[test]

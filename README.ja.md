@@ -48,9 +48,13 @@ PowerShell に 1 行。管理者権限は要りません。
 irm https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.ps1 | iex
 ```
 
-最新版の `tsg.exe` を `%USERPROFILE%in` へ置いて `tsg --install` まで済ませます。
+最新版の `tsg.exe` を `%USERPROFILE%\bin` へ置いて `tsg --install` まで済ませます。
+**この 1 行で使える状態になります。** スタートメニュー・PATH・右クリック登録に加えて、
+シェル統合（プロンプトの位置を tsumugi に伝えるもの。これが無いと左のふちも
+`[[` も `ac` も `go` も効きません）と、入っていれば Claude Code / Codex の
+フックまで入ります。**何を変えたかは全部画面に出て、`tsg --uninstall` で全部戻ります。**
 exe は CRT を静的リンクしてあるので、**VC++ 再頒布可能パッケージが無い PC でも動きます**。
-置き場所を変えるなら先に `$env:TSUMUGI_DIR = 'D:	ools'`、登録が要らなければ
+置き場所を変えるなら先に `$env:TSUMUGI_DIR = 'D:\tools'`、登録が要らなければ
 `$env:TSUMUGI_NO_REGISTER = '1'`、版を選ぶなら `$env:TSUMUGI_VERSION = 'v0.1.0'`。
 
 2 回目からは、入れた `tsg` 自身に頼めます。
@@ -66,7 +70,7 @@ tsg update --stop-sessions    # 走っているセッションも止める（中
 セッションの名前と止め方を出す**だけにしてあります（止めるというのは、
 中のシェルとエージェントを終わらせることなので）。
 
-**同じ版なら何も取ってきません**（`Already on v0.3.2.` と言って終わります）。
+**同じ版なら何も取ってきません**（`Already on v0.3.3.` と言って終わります）。
 中でやっているのは上と同じ `install.ps1` で、**入れ方を 2 通り持たない**
 ようにしてあります。走っている自分は消せないので、古い exe は
 `tsg.exe.old-…` として残り、次の `tsg update` で消えます。
@@ -85,13 +89,14 @@ cargo build --release
 登録します。**exe は動かしません** — ビルドした場所を指すだけです。
 `tsg --uninstall` で全部戻り、何を変えたかは毎回画面に出ます。
 
-強く推奨（1 回だけ）:
+シェル統合は `tsg --install` が入れているので、ふつうは何もしなくて構いません。
+別のシェルにも入れたいとき、入れ直したいときだけ:
 
 ```
-tsg --install-shell-integration     # OSC 133: プロンプト位置・終了コード・コマンドブロック
+tsg --install-shell-integration bash     # bash / zsh / fish / pwsh / nu
 ```
 
-これが無いと `[[` `]]`・左のふち・`ac` / `io` は手がかりを持てません。
+これが無いと `[[` `]]`・左のふち・`ac` / `io`・`go` は手がかりを持てません。
 
 > **Windows の SmartScreen**: 署名していないので初回に「Windows によって
 > PC が保護されました」が出ます。詳細情報 → 実行。スマート アプリ

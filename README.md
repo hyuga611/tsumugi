@@ -51,9 +51,12 @@ One line in PowerShell. No admin rights needed.
 irm https://raw.githubusercontent.com/hyuga611/tsumugi/main/install.ps1 | iex
 ```
 
-It downloads the latest `tsg.exe` into `%USERPROFILE%in` and runs `tsg --install`
-for you. The executable links the CRT statically, so it runs on machines **without
-the VC++ redistributable**. Set `$env:TSUMUGI_DIR = 'D:	ools'` beforehand for a
+It downloads the latest `tsg.exe` into `%USERPROFILE%\bin` and runs `tsg --install`
+for you. **That one line leaves you with a working setup**: besides the Start Menu,
+PATH and context-menu entries, it installs the shell integration (without it the left
+gutter, `[[`, `ac` and `go` do nothing) and, when they are present, the Claude Code and
+Codex hooks. **Every change is printed, and `tsg --uninstall` takes all of it back out.** The executable links the CRT statically, so it runs on machines **without
+the VC++ redistributable**. Set `$env:TSUMUGI_DIR = 'D:\tools'` beforehand for a
 different location, `$env:TSUMUGI_NO_REGISTER = '1'` to skip the shortcuts, or
 `$env:TSUMUGI_VERSION = 'v0.1.0'` to pin a version.
 
@@ -71,7 +74,7 @@ them: it prints the names of the running sessions and how to stop each one,
 because stopping one means ending the shells and agents inside it.
 
 **It downloads nothing when you are already on the latest** (it says
-`Already on v0.3.2.` and stops). Underneath it runs the same `install.ps1`, so
+`Already on v0.3.3.` and stops). Underneath it runs the same `install.ps1`, so
 there is only ever one way to install. A running executable cannot delete
 itself, so the old one stays as `tsg.exe.old-…` and the next `tsg update`
 removes it. A binary you built with `cargo build` is **never overwritten** —
@@ -91,13 +94,15 @@ adds "Open tsumugi here" to the folder context menu. **It does not move the
 executable** — it points at wherever you built it. `tsg --uninstall` removes
 everything it added, and every change is printed as it happens.
 
-Strongly recommended, once:
+`tsg --install` already installed the shell integration, so there is usually
+nothing to do here. Only if you want it in another shell, or want it back:
 
 ```
-tsg --install-shell-integration     # OSC 133: prompt marks, exit codes, command blocks
+tsg --install-shell-integration bash     # bash / zsh / fish / pwsh / nu
+tsg --uninstall-shell-integration        # takes the line back out
 ```
 
-Without it, `[[` `]]`, the gutter, and `ac` / `io` have nothing to work from.
+Without it, `[[` `]]`, the gutter, `ac` / `io` and `go` have nothing to work from.
 
 > **Windows SmartScreen**: the binary is unsigned, so the first launch shows
 > "Windows protected your PC". More info → Run anyway. If Smart App Control is
