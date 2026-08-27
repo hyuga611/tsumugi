@@ -268,27 +268,43 @@ impl TermState {
 
     /// マウスの所有者。
     ///
-    /// alt screen かつ子プロセスがマウスレポートを要求しているときだけ子へ渡す。
-    /// primary screen は常にドキュメントなので、たとえ要求されても渡さない。
+    /// **マウスレポートを要求している相手が持つ。**
+    ///
+    /// 以前は「alt screen かつ要求している」ときだけ渡していた。
+    /// primary screen はいつもドキュメントだから、という理屈だったが、
+    /// **画面を丸ごと描くのに alt screen を使わない道具がある**
+    /// （Claude Code がそう。自前で描いて、履歴も自分で持つ）。
+    /// そういう相手の上でホイールを取り上げると、**相手の画面が動かない** ——
+    /// 実機で「スクロールできない」になった。
+    ///
+    /// 要求していない相手（素のシェル）からは取り上げない。そこは今までどおり
+    /// スクロールバックを歩く。要求している相手の上で履歴を見たいときは
+    /// **Shift を押しながら**（`mouse_owner_with_shift`）。
     pub fn mouse_owner(&self) -> InputOwner {
         if let Some(pinned) = self.pins.mouse {
             return pinned;
         }
-        if self.grid.is_alt() && self.modes.mouse != MouseTracking::Off {
+        if self.modes.mouse != MouseTracking::Off {
             InputOwner::Child
         } else {
             InputOwner::Tsumugi
         }
     }
 
-    /// `Esc` を含むキーの所有者。alt screen なら子が持つ。
+    /// `Esc` を含むキーの所有者。
+    ///
+    /// alt screen の相手が持つのは前から。**マウスを要求している相手も持つ。**
+    /// 自前で画面を描く道具は Esc で自分の画面を畳む（一覧を閉じる、
+    /// 入力を取り消す）。そこを取り上げると、押しても**モードが変わるだけで
+    /// 相手の画面は開いたまま**になる —— 実機でそうなった。
     ///
     /// `C-\` はこの判定を迂回して常に tsumugi が取る（モーダル層の責務）。
+    /// **読むモードへ行く道が塞がらない**のはそのため。
     pub fn key_owner(&self) -> InputOwner {
         if let Some(pinned) = self.pins.key {
             return pinned;
         }
-        if self.grid.is_alt() {
+        if self.grid.is_alt() || self.modes.mouse != MouseTracking::Off {
             InputOwner::Child
         } else {
             InputOwner::Tsumugi
@@ -1039,13 +1055,27 @@ mod tests {
         assert_eq!(t.state.mouse_owner(), InputOwner::Tsumugi);
     }
 
+    /// **要求している相手が持つ。alt screen かどうかは見ない。**
+    ///
+    /// 画面を丸ごと描くのに alt screen を使わない道具がある（Claude Code）。
+    /// そこでホイールと Esc を取り上げると、相手の画面が動かず、Esc を押しても
+    /// モードが変わるだけになる（実機で両方踏んだ）。
     #[test]
-    fn primary_screen_never_yields_the_mouse() {
-        // primary でマウスレポートを要求されても、そこはドキュメントなので渡さない
+    fn an_app_that_asks_for_the_mouse_gets_it_even_on_the_primary_screen() {
         let mut t = term();
         t.feed(b"\x1b[?1000h\x1b[?1006h");
         assert_eq!(t.state.modes.mouse, MouseTracking::Normal);
+        assert!(!t.state.grid.is_alt(), "alt screen には入っていない");
+        assert_eq!(t.state.mouse_owner(), InputOwner::Child);
+        assert_eq!(t.state.key_owner(), InputOwner::Child, "Esc も相手のもの");
+    }
+
+    /// 要求していない相手（素のシェル）からは取り上げない。
+    #[test]
+    fn a_plain_shell_keeps_none_of_it() {
+        let t = term();
         assert_eq!(t.state.mouse_owner(), InputOwner::Tsumugi);
+        assert_eq!(t.state.key_owner(), InputOwner::Tsumugi);
     }
 
     #[test]

@@ -3849,6 +3849,30 @@ impl App {
     /// **フォルダを「開けません」で終わらせない。** そこへ行きたいのは
     /// 明らかなので、次の一手を置いておく（Enter は自分で押す）。
     fn open_or_cd(&mut self, path: &str) {
+        // 絵や PDF は、こちらで開いても読めない（中身は文字ではない）。
+        // **OS に渡す。** エディタに載せると化けた 1 行が出るだけで、
+        // 押した人が見たかったものは出てこない（実機で言われた）。
+        if let Some(full) = self.resolve(path)
+            && full.is_file()
+            && opens_in_the_os(&full)
+        {
+            let name = full
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| full.display().to_string());
+            match open_in_os(&full.display().to_string()) {
+                Ok(()) => {
+                    self.status_msg = t!(format!("{name} を開きました"), format!("opened {name}"));
+                }
+                Err(e) => {
+                    self.status_msg = t!(
+                        format!("{name} を開けません: {e}"),
+                        format!("cannot open {name}: {e}")
+                    );
+                }
+            }
+            return;
+        }
         if let Some(full) = self.resolve(path)
             && full.is_dir()
         {
@@ -6891,6 +6915,29 @@ fn on_tab_close(col: usize, x: usize, w: usize) -> bool {
     col + TAB_CLOSE_HIT >= x + w && col >= x
 }
 
+/// これは OS に渡すもの（文字として読めないもの）か。
+///
+/// **拡張子で見る。** 中身を見に行くにはサーバへ頼む往復が要り、押した瞬間に
+/// 決まらない。列に挙げるのは「文字ではないと言い切れるもの」だけで、
+/// 迷うものはエディタへ回す — 知らない拡張子のテキストを OS へ投げると、
+/// 別の道具が開くか、何も起きないかのどちらかになる。
+fn opens_in_the_os(path: &std::path::Path) -> bool {
+    let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        // 絵
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "webp" | "avif" | "ico" | "tif" | "tiff"
+        // 読み物・書類
+        | "pdf" | "docx" | "xlsx" | "pptx" | "doc" | "xls" | "ppt"
+        // 音と動画
+        | "mp3" | "wav" | "flac" | "m4a" | "ogg" | "mp4" | "mov" | "avi" | "mkv" | "webm"
+        // まとまり・実行するもの
+        | "zip" | "7z" | "rar" | "tar" | "gz" | "exe" | "msi" | "dll"
+    )
+}
+
 /// 「開く」対象の種別。ホバーの下線と Ctrl＋クリックで同じ判定を使う。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum OpenKind {
@@ -8259,6 +8306,7 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn ch(c: &str) -> Key {
         Key::Character(c.into())
@@ -8272,6 +8320,22 @@ mod tests {
         assert_eq!(quote_path(r"C:\my pics\a.png"), "\"C:\\my pics\\a.png\"");
         // すでに囲ってあるものは二重に囲わない
         assert_eq!(quote_path("\"C:\\a b\""), "\"C:\\a b\"");
+    }
+
+    /// 絵や PDF は OS に渡す。**エディタに載せても読めない。**
+    #[test]
+    fn things_that_are_not_text_go_to_the_os() {
+        let os = |p: &str| opens_in_the_os(Path::new(p));
+        assert!(os("a.png"));
+        assert!(os("X:/x/カルーセル一覧.JPG"), "大文字でも");
+        assert!(os("report.pdf"));
+        assert!(os("clip.mp4"));
+        // 文字として読めるものは、今までどおりこちらで開く
+        assert!(!os("main.rs"));
+        assert!(!os("README.md"));
+        assert!(!os("Cargo.toml"));
+        // 拡張子が無いものも、こちらで開く（フォルダや Makefile）
+        assert!(!os("Makefile"));
     }
 
     /// タブの ✕。**端の 1 桁は指が滑る場所**なので、字より 1 桁広く取る。
