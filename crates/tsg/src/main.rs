@@ -1550,18 +1550,24 @@ impl App {
                     alt,
                     alt_cursor,
                 } => {
-                    let area = self.area();
-                    let (w, h) = self
-                        .session
-                        .panes
-                        .get(&pane)
-                        .map(|v| (v.rect.w.max(1), v.rect.h.max(1)))
-                        .unwrap_or((area.w, area.h));
+                    // **鏡は PTY に伝えたのと同じ桁で組む**（`restore_snapshot`）。
+                    // ペインの幅そのままで組むとガターぶん広くなり、子が決めた
+                    // 折り返しと合わない。しかも窓の大きさが変わらなければ
+                    // `ServerMsg::Resized` は飛んでこないので、繋ぎ直したあと
+                    // 手でリサイズするまで直らない（`tsg update` の直後がこれ）。
+                    let mut fallback = self.area();
+                    fallback.w = fallback.w.saturating_sub(GUTTER).max(1);
                     self.session
                         .panes
                         .entry(pane)
-                        .or_insert_with(|| PaneView::new(w, h))
-                        .restore(&lines, (cursor_line, cursor_col), &alt, alt_cursor, w, h);
+                        .or_insert_with(|| PaneView::new(fallback.w, fallback.h))
+                        .restore_snapshot(
+                            &lines,
+                            (cursor_line, cursor_col),
+                            &alt,
+                            alt_cursor,
+                            fallback,
+                        );
                 }
                 ServerMsg::FileState {
                     pane,
@@ -2678,6 +2684,14 @@ impl App {
                 format!("{} is not there", exe.display())
             );
             return;
+        }
+        // **いまの大きさを置いてから開き直す。** 開き直した窓は
+        // `config::last_size()` を見るが、その印は窓ごとではなく 1 つしかない。
+        // 別の窓が先に書いていれば、そちらの大きさで開いてしまう。開いた先が
+        // 狭ければ、サーバから届く alt screen の絵は前の桁のままなので合わない。
+        if let Some(w) = &self.window {
+            let size = w.inner_size().to_logical::<f64>(w.scale_factor());
+            config::remember_size_now(size.width, size.height);
         }
         let mut cmd = std::process::Command::new(&exe);
         cmd.arg("--session").arg(&self.session_name);

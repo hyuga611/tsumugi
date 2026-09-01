@@ -453,6 +453,32 @@ impl PaneView {
     /// 来ても戻す先が無いので消えない。Esc とマウスの行き先
     /// （`key_owner` / `mouse_owner`）も alt かどうかで決まるので、
     /// 知らないままだとキーが子へ届かない。
+    /// スナップショットを、**PTY に伝えたのと同じ桁**で組み直す。
+    ///
+    /// ペインの幅そのままで組むとガター（`GUTTER`）ぶん広くなる。子は
+    /// `sync_layout` がサーバへ伝えた狭いほうの桁で折り返しを決めて描くので、
+    /// 広い鏡へ流し込むと折り返しの位置が合わない。窓の大きさが変わらない
+    /// 限り `ServerMsg::Resized` は来ないから、繋ぎ直したあとは手でリサイズ
+    /// するまで直らない。
+    ///
+    /// まだ割り付けが済んでいないペイン（表に出ていないタブなど）は
+    /// `fallback` で組む。潰れた大きさで組むと、そのタブへ移った瞬間に崩れる。
+    pub fn restore_snapshot(
+        &mut self,
+        lines: &[String],
+        cursor: (usize, usize),
+        alt: &[String],
+        alt_cursor: (usize, usize),
+        fallback: Rect,
+    ) {
+        let r = if self.rect.w > 0 {
+            self.pty_rect()
+        } else {
+            fallback
+        };
+        self.restore(lines, cursor, alt, alt_cursor, r.w.max(1), r.h.max(1));
+    }
+
     pub fn restore(
         &mut self,
         lines: &[String],
@@ -484,7 +510,12 @@ impl PaneView {
             self.term.feed(b"\x1b[?1049h");
             for (i, line) in alt.iter().take(rows).enumerate() {
                 self.term.feed(format!("\x1b[{};1H", i + 1).as_bytes());
-                self.term.feed(line.as_bytes());
+                // **入り切らない行は切る。折り返させない。**
+                // alt screen の行は絶対位置に置かれた絵であって、続きのある
+                // 文章ではない。送り主より狭い窓へ繋ぎ直したときに折り返すと、
+                // はみ出したぶんが次の行を上書きし、そこへ次の行が重なって
+                // 画面が崩れる（`tsg update` のあとに見えるあれ）。
+                self.term.feed(clip_ansi(line, cols).as_bytes());
             }
             self.term.feed(
                 format!(
@@ -497,6 +528,59 @@ impl PaneView {
         }
         self.follow_tail = true;
     }
+}
+
+/// ANSI の付いた 1 行を、表示幅 `cols` で切る。
+///
+/// エスケープはすべて通し、**見える文字だけ**を数える。落とすと切った先が
+/// 前の色を引きずるので、印字しない指定はそのまま残す。
+fn clip_ansi(line: &str, cols: usize) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut used = 0usize;
+    let mut it = line.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '\x1b' {
+            let w = tsg_term::width_of(c);
+            if used + w > cols {
+                continue;
+            }
+            used += w;
+            out.push(c);
+            continue;
+        }
+        out.push(c);
+        // CSI と OSC は終端の見つけ方が違う。それ以外は 2 文字。
+        match it.peek() {
+            Some('[') => {
+                out.push(it.next().unwrap_or('['));
+                for c in it.by_ref() {
+                    out.push(c);
+                    if ('\x40'..='\x7e').contains(&c) {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                out.push(it.next().unwrap_or(']'));
+                while let Some(c) = it.next() {
+                    out.push(c);
+                    if c == '\x07' {
+                        break;
+                    }
+                    if c == '\x1b' && it.peek() == Some(&'\\') {
+                        out.push(it.next().unwrap_or('\\'));
+                        break;
+                    }
+                }
+            }
+            _ => {
+                if let Some(c) = it.next() {
+                    out.push(c);
+                }
+            }
+        }
+    }
+    out
 }
 
 #[derive(Default)]
@@ -994,6 +1078,92 @@ mod tests {
         let back = v.term.state.grid.document_text();
         assert!(back.contains("prompt 0"), "履歴が戻っていない: {back}");
         assert!(!back.contains("TUI top"), "alt の中身が残っている: {back}");
+    }
+
+    /// **鏡は PTY に伝えたのと同じ桁で組む。**
+    ///
+    /// `sync_layout` がサーバへ伝えるのは `pty_rect()`（ガターを除いた幅）。
+    /// 繋ぎ直したときの鏡をペインの幅そのままで組むと、ガターぶん広くなる。
+    /// 子はサーバに伝わった狭いほうの桁で折り返しを決めて描くので、画面が
+    /// 合わない。しかも窓の大きさが変わらない限り `ServerMsg::Resized` は
+    /// 飛んでこないから、手でリサイズするまで直らない
+    /// （`tsg update` の直後がこれ。実機で踏んだ）。
+    #[test]
+    fn the_mirror_is_built_at_the_width_the_pty_was_told() {
+        let mut v = PaneView::new(1, 1);
+        v.rect = Rect {
+            x: 0,
+            y: 0,
+            w: 80,
+            h: 24,
+        };
+        let want = v.pty_rect();
+        assert_eq!(want.w, 80 - GUTTER, "PTY に伝える幅がガターぶん狭くない");
+
+        v.restore_snapshot(&[], (0, 0), &[], (0, 0), area());
+        assert_eq!(
+            v.term.state.grid.cols, want.w,
+            "鏡の桁が PTY に伝えた桁と違う"
+        );
+        assert_eq!(
+            v.term.state.grid.rows, want.h,
+            "鏡の行が PTY に伝えた行と違う"
+        );
+    }
+
+    /// まだ割り付けが済んでいないペイン（表に出ていないタブなど）は、
+    /// 潰れた大きさで組まない。
+    #[test]
+    fn a_pane_without_a_rect_yet_is_built_from_the_fallback() {
+        let mut v = PaneView::new(1, 1);
+        v.restore_snapshot(&[], (0, 0), &[], (0, 0), area());
+        assert_eq!(v.term.state.grid.cols, area().w);
+    }
+
+    /// **サーバが送ってくる alt の行は、送った時点の桁で組まれている。**
+    /// 繋ぎ直した窓のほうが狭いと、折り返したぶんが下の行を押し流す。
+    /// `tsg update` のあとに画面が崩れるのはこれ（実機で 190 桁 → 140 桁に
+    /// なるのを測った）。
+    #[test]
+    fn a_wide_alt_line_does_not_spill_into_the_next_row() {
+        let mut v = PaneView::new(20, 4);
+        // 送り主は 40 桁だった。受けるほうは 20 桁しかない。
+        let alt: Vec<String> = vec![
+            "A".repeat(40),
+            "BBBB".to_string(),
+            "CCCC".to_string(),
+            "DDDD".to_string(),
+        ];
+        v.restore(&[], (0, 0), &alt, (0, 0), 20, 4);
+
+        let screen = v.term.state.grid.document_text();
+        let rows: Vec<&str> = screen.lines().map(str::trim_end).collect();
+        assert_eq!(rows.first().copied(), Some("A".repeat(20).as_str()));
+        assert_eq!(
+            rows.get(1).copied(),
+            Some("BBBB"),
+            "2 行目が流された: {screen}"
+        );
+        assert_eq!(
+            rows.get(2).copied(),
+            Some("CCCC"),
+            "3 行目が流された: {screen}"
+        );
+        assert_eq!(
+            rows.get(3).copied(),
+            Some("DDDD"),
+            "4 行目が流された: {screen}"
+        );
+    }
+
+    /// 切っても色は落とさない。落とすと、切った先が前の色を引きずる。
+    #[test]
+    fn clipping_a_line_keeps_its_colors_and_its_wide_chars_whole() {
+        let colored = "[31mabcdef[0m";
+        assert_eq!(clip_ansi(colored, 3), "[31mabc[0m");
+        assert_eq!(clip_ansi(colored, 99), colored);
+        // 全角は 2 桁。半端に割らない。
+        assert_eq!(clip_ansi("あいう", 3), "あ");
     }
 
     #[test]
