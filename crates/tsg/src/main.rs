@@ -222,6 +222,11 @@ struct App {
     dir_drag: Option<std::path::PathBuf>,
     /// ポインタの下にある対象（パス・URL・ハッシュ・語）。下線を引く。
     hover: Option<(u32, Range)>,
+    /// ポインタの下にある「ひとかたまり」。右上にコピーボタンを出す。
+    ///
+    /// 覚えておくのは**文書行**であって画面の行ではない。画面の行で覚えると、
+    /// ボタンを押しにいく途中で流れた画面に対して、ボタンだけが取り残される。
+    copy_block: Option<(u32, tsg_buffer::Block)>,
     /// 右ドラッグの起点。離した場所で「メニュー」か「プロンプトへ落とす」に分かれる。
     right_from: Option<(u32, Pos, usize, usize)>,
     /// 自分で分割を頼んだ。次に届く配置で、増えたペインへ移る。
@@ -313,6 +318,7 @@ impl App {
             dir_drag: None,
             focus_new_pane: false,
             hover: None,
+            copy_block: None,
             right_from: None,
             drag_from: Pos::default(),
             cols: 80,
@@ -3649,6 +3655,16 @@ impl App {
             return;
         }
 
+        // コピーボタン。**本文の選択より先に見る。** 後にすると、押した瞬間に
+        // 選択が始まってボタンが消え、押せないボタンになる。
+        if button == MouseButton::Left
+            && self.on_copy_chip(col, row)
+            && let Some((id, block)) = self.copy_block
+        {
+            self.copy_the_block(id, block);
+            return;
+        }
+
         // タブバー（`mouse-parity.md` §4.5「タブバーをクリック」「タブをドラッグ」）
         if row < self.tab_rows() {
             if let Some((x, w, tab, ..)) = self
@@ -4299,6 +4315,114 @@ impl App {
                 w.request_redraw();
             }
         }
+    }
+
+    /// コピーボタンの見出し。**字ではなく帯の上に置く**ので、
+    /// 記号がフォントに無くて消える、という事故を起こさない。
+    fn copy_label() -> &'static str {
+        t!(" コピー ", " Copy ")
+    }
+
+    /// 見出しの桁数。全角は 2 桁として数える。
+    fn copy_label_width() -> usize {
+        Self::copy_label().chars().map(tsg_term::width_of).sum()
+    }
+
+    /// コピーボタンが占める画面上の桁・行・幅。
+    ///
+    /// **描く側と当てる側が同じここを通る。** 別々に計算すると、
+    /// 見えているのに押せないボタン（あるいはその逆）ができる。
+    fn copy_chip(&self, id: u32, block: &tsg_buffer::Block) -> Option<(usize, usize, usize)> {
+        let view = self.session.panes.get(&id)?;
+        let rect = view.text_rect();
+        // 塊のうち、いま画面に出ている一番上の行に出す。塊の頭が上へ流れても
+        // ボタンは見えている範囲に残る。
+        let row = (block.start..=block.end).find_map(|l| view.row_of(l, rect.h))?;
+        let w = Self::copy_label_width();
+        if rect.w <= w {
+            return None;
+        }
+        let buf = view.buffer();
+        // 塊の右肩に置く。塊が狭ければすぐ右、広ければペインの右端で止める。
+        let right = (block.start..=block.end)
+            .map(|l| tsg_buffer::last_col(&buf, l) + 1)
+            .max()
+            .unwrap_or(0);
+        let x = (right + 1).min(rect.w - w);
+        Some((rect.x + x, rect.y + row, w))
+    }
+
+    /// その桁・行がコピーボタンの上か。
+    fn on_copy_chip(&self, col: usize, row: usize) -> bool {
+        let Some((id, block)) = self.copy_block.as_ref() else {
+            return false;
+        };
+        self.copy_chip(*id, block)
+            .is_some_and(|(x, y, w)| row == y && (x..x + w).contains(&col))
+    }
+
+    /// ポインタの下の塊を拾い直す。
+    ///
+    /// **ボタンの上に載っている間は今の塊を保つ。** 塊から外れた瞬間に
+    /// 消えると、ボタンへ指を伸ばす途中でボタンが消えて押せない。
+    fn update_copy_block(&mut self) {
+        let (col, row) = self.cell_at(self.pointer);
+        // マウスが子のものなら出さない。相手が握っているところへボタンを置くと、
+        // 見えているのに押すと相手へ届く（押せないボタン）になる。
+        // Shift でこちらの手に戻るので、そのときは出る。
+        if self.mouse_goes_to_child() {
+            if self.copy_block.take().is_some()
+                && let Some(w) = &self.window
+            {
+                w.request_redraw();
+            }
+            return;
+        }
+        if self.on_copy_chip(col, row) {
+            return;
+        }
+        let next = self
+            .session
+            .pane_at(col, row)
+            .filter(|id| !self.on_gutter(*id, col))
+            .and_then(|id| Some((id, self.doc_pos(id, col, row)?)))
+            .and_then(|(id, pos)| {
+                let view = self.session.panes.get(&id)?;
+                // 木や開いたファイルには「相手が描いた塊」が無い。ここで出すと、
+                // 自分で書いている文書の上に意味の無いボタンが乗る。
+                if view.exploring() || view.file.is_some() {
+                    return None;
+                }
+                let buf = view.buffer();
+                Some((id, tsg_buffer::block_at(&buf, pos.line)?))
+            });
+        if next != self.copy_block {
+            self.copy_block = next;
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+    }
+
+    /// コピーボタンを押した。塊を**そのまま貼れる形**で写す。
+    fn copy_the_block(&mut self, id: u32, block: tsg_buffer::Block) {
+        let text = {
+            let Some(view) = self.session.panes.get(&id) else {
+                return;
+            };
+            let buf = view.buffer();
+            tsg_buffer::copy_text(&buf, &block)
+        };
+        if text.is_empty() {
+            self.status_msg = t!("写すものがありません", "nothing to copy").into();
+            return;
+        }
+        let lines = text.lines().count();
+        self.set_clipboard(&text);
+        self.status_msg = t!(
+            format!("{lines} 行コピーしました"),
+            format!("copied {lines} line(s)")
+        );
     }
 
     fn on_mouse_move(&mut self, event_loop: &ActiveEventLoop) {
@@ -5344,6 +5468,13 @@ impl App {
             })
             .collect();
 
+        // コピーボタンの位置は描く前に出しておく。描いている間は
+        // `self` を貸し出せない（描画器を可変で借りている）。
+        let copy_chip = self
+            .copy_block
+            .and_then(|(id, block)| Some((id, block, self.copy_chip(id, &block)?)));
+        let pointer_cell = self.cell_at(self.pointer);
+
         {
             let Some(renderer) = self.renderer.as_mut() else {
                 return;
@@ -5623,6 +5754,31 @@ impl App {
                         }
                     }
 
+                    // ポインタの下の塊に薄く下地を敷く。
+                    // **どこまでが写るのかが、押す前に見える。** 押してから
+                    // 「そこじゃなかった」と気づくのは、選び直すより高くつく。
+                    // 字を描く前に塗る（選択と同じ順）。
+                    if let Some((cid, block, _)) = copy_chip
+                        && cid == *id
+                    {
+                        for line in block.start..=block.end {
+                            let Some(r) = view.row_of(line, rect.h) else {
+                                continue;
+                            };
+                            let x0 = block.left.min(rect.w);
+                            let x1 = (tsg_buffer::last_col(&doc, line) + 1).min(rect.w);
+                            if x1 > x0 {
+                                renderer.rect(
+                                    (rect.x + x0) as f32,
+                                    (rect.y + r) as f32,
+                                    (x1 - x0) as f32,
+                                    1.0,
+                                    th.fade(th.hover, 0.18),
+                                );
+                            }
+                        }
+                    }
+
                     // ファイルではカーソルは常にエンジンのもの。端末では入力中だけ
                     // シェルのカーソル（そこが「生きている末尾」だから）。
                     //
@@ -5751,6 +5907,29 @@ impl App {
                                 run_fg,
                             );
                         }
+                    }
+
+                    // コピーボタン。**字を描いたあとに置く。**
+                    // 先に置くと、あとから来るセルの下地と字に潜って読めなくなる。
+                    if let Some((cid, _, (chip_x, chip_y, chip_w))) = copy_chip
+                        && cid == *id
+                    {
+                        let (cx, cy) = pointer_cell;
+                        let lit = cy == chip_y && (chip_x..chip_x + chip_w).contains(&cx);
+                        renderer.rect(
+                            chip_x as f32,
+                            chip_y as f32,
+                            chip_w as f32,
+                            1.0,
+                            if lit { th.accent } else { th.panel_bg },
+                        );
+                        renderer.text(
+                            chip_x as f32,
+                            chip_y as f32,
+                            Self::copy_label(),
+                            if lit { th.bg } else { th.fg },
+                            true,
+                        );
                     }
 
                     if is_active
@@ -7786,7 +7965,12 @@ impl ApplicationHandler for App {
                 }
             }
 
-            WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
+            WindowEvent::ModifiersChanged(m) => {
+                self.mods = m.state();
+                // Shift を押した瞬間にマウスがこちらの手へ戻る。指を動かさないと
+                // ボタンが出てこない、では「押さえたのに出ない」になる。
+                self.update_copy_block();
+            }
 
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == ElementState::Pressed {
@@ -7809,6 +7993,7 @@ impl ApplicationHandler for App {
                 } else {
                     // 掴んでいないときは、下にある対象を拾って下線を引く（§3）。
                     self.update_hover();
+                    self.update_copy_block();
                 }
             }
 

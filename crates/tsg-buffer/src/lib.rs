@@ -9,6 +9,7 @@
 //! ターミナルでは全角が 2 セルを占めるため、バイトや文字数で数えると
 //! 画面上の位置と一致しなくなる。
 
+pub mod block;
 pub mod dir;
 pub mod file;
 pub mod markdown;
@@ -17,6 +18,7 @@ pub mod tree;
 
 use tsg_term::{Cell, Grid, SemanticMarks};
 
+pub use block::{Block, By as BlockBy, block_at, copy_text};
 pub use dir::{DirBuffer, DirEntry};
 pub use file::{FileBuffer, Splice};
 pub use syntax::{Lang, State as SyntaxState, Token, highlight, highlight_from};
@@ -92,6 +94,16 @@ pub trait Buffer {
 
     /// OSC 133 由来のセマンティックマーク。File バッファでは空。
     fn marks(&self) -> &SemanticMarks;
+
+    /// その行が自動折り返しで次の行へ続いているか。
+    ///
+    /// **画面の行と論理行は別物である。** 端末は幅で切って次の行へ流すが、
+    /// 書いた側は改行を打っていない。ここを見ずに写すと、切れ目に無い改行が
+    /// 混ざったものが手元に来る（コピーした長いコマンドがそのまま動かない）。
+    /// ファイルバッファには折り返しが無いので既定は `false`。
+    fn line_wrapped(&self, _line: usize) -> bool {
+        false
+    }
 
     /// 構文木で指せるもの（`tree.rs`）。**端末には無い。**
     ///
@@ -257,6 +269,27 @@ pub fn line_text(buf: &dyn Buffer, line: usize) -> String {
     s.trim_end().to_string()
 }
 
+/// 折り返しを踏まえた 1 行。**続きがある行の末尾は削らない。**
+///
+/// 折り返しの途中は幅いっぱいまで字が入っているので、末尾の空白は
+/// 詰め物ではなく本文である。ここで削ると、つないだときに単語がくっつく。
+fn line_text_joinable(buf: &dyn Buffer, line: usize) -> String {
+    let Some(cells) = buf.cells(line) else {
+        return String::new();
+    };
+    let mut s = String::new();
+    for cell in cells {
+        if cell.width != 0 {
+            s.push_str(&cell.text);
+        }
+    }
+    if buf.line_wrapped(line) {
+        s
+    } else {
+        s.trim_end().to_string()
+    }
+}
+
 /// 行の一部（両端を含む列範囲）。
 fn line_text_range(buf: &dyn Buffer, line: usize, from: usize, to: usize) -> String {
     let Some(cells) = buf.cells(line) else {
@@ -273,13 +306,25 @@ fn line_text_range(buf: &dyn Buffer, line: usize, from: usize, to: usize) -> Str
 }
 
 /// 範囲のテキストを取り出す（ヤンクの実体）。
+///
+/// **折り返しは改行として写さない。** 端末が幅で切った継ぎ目に改行を入れると、
+/// 貼った先で 1 本のコマンドが 2 行に割れる。矩形選択だけは別で、
+/// あれは「画面のこの桁からこの桁まで」と人が指した以上、見えたとおりに写す。
 pub fn extract(buf: &dyn Buffer, range: &Range) -> String {
     let (start, end) = (range.start, range.end);
     match range.kind {
         RangeKind::Line => {
             let mut out = String::new();
-            for line in start.line..=end.line.min(buf.line_count().saturating_sub(1)) {
-                out.push_str(&line_text(buf, line));
+            let last = end.line.min(buf.line_count().saturating_sub(1));
+            for line in start.line..=last {
+                out.push_str(&line_text_joinable(buf, line));
+                if !buf.line_wrapped(line) {
+                    out.push('\n');
+                }
+            }
+            // 行単位のヤンクは改行で終わる（レジスタの種類がそれで決まる）。
+            // 最後の行が折り返しの途中でも、人が選んだのはそこまでである。
+            if !out.ends_with('\n') {
                 out.push('\n');
             }
             out
@@ -301,13 +346,19 @@ pub fn extract(buf: &dyn Buffer, range: &Range) -> String {
             if start.line == end.line {
                 return line_text_range(buf, start.line, start.col, end.col);
             }
-            let mut out = line_text_range(buf, start.line, start.col, usize::MAX)
-                .trim_end()
-                .to_string();
-            out.push('\n');
-            for line in (start.line + 1)..end.line {
-                out.push_str(&line_text(buf, line));
+            let mut out = String::new();
+            let head = line_text_range(buf, start.line, start.col, usize::MAX);
+            if buf.line_wrapped(start.line) {
+                out.push_str(&head);
+            } else {
+                out.push_str(head.trim_end());
                 out.push('\n');
+            }
+            for line in (start.line + 1)..end.line {
+                out.push_str(&line_text_joinable(buf, line));
+                if !buf.line_wrapped(line) {
+                    out.push('\n');
+                }
             }
             if end.line < buf.line_count() {
                 out.push_str(&line_text_range(buf, end.line, 0, end.col));
@@ -350,6 +401,10 @@ impl Buffer for TermBuffer<'_> {
 
     fn marks(&self) -> &SemanticMarks {
         self.marks
+    }
+
+    fn line_wrapped(&self, line: usize) -> bool {
+        self.grid.document_line(line).is_some_and(|l| l.wrapped)
     }
 }
 
@@ -402,6 +457,38 @@ mod tests {
         let buf = TermBuffer::new(&t.state.grid, &t.state.marks);
         let r = Range::new(Pos::new(0, 2), Pos::new(1, 2), RangeKind::Char);
         assert_eq!(extract(&buf, &r), "cdef\nghi");
+    }
+
+    #[test]
+    fn a_wrapped_line_is_not_yanked_with_a_newline_in_the_middle() {
+        // 幅 40 に対して長いコマンド。画面では 2 行だが、打った人は 1 行しか打っていない。
+        // ここに改行が入ると、貼った先でコマンドが割れて動かない。
+        let t = term_with("echo hi && ls -la /very/long/path/that/wraps");
+        let buf = TermBuffer::new(&t.state.grid, &t.state.marks);
+        let r = Range::new(Pos::new(0, 0), Pos::new(1, 0), RangeKind::Line);
+        assert_eq!(
+            extract(&buf, &r),
+            "echo hi && ls -la /very/long/path/that/wraps\n",
+            "折り返しの継ぎ目に改行が入っている"
+        );
+    }
+
+    #[test]
+    fn a_real_line_break_still_becomes_a_newline() {
+        let t = term_with("one\r\ntwo\r\n");
+        let buf = TermBuffer::new(&t.state.grid, &t.state.marks);
+        let r = Range::new(Pos::new(0, 0), Pos::new(1, 0), RangeKind::Line);
+        assert_eq!(extract(&buf, &r), "one\ntwo\n");
+    }
+
+    #[test]
+    fn a_block_selection_keeps_the_lines_it_was_drawn_over() {
+        // 矩形は「画面のこの桁からこの桁まで」と人が指したもの。
+        // 折り返しをつないでしまうと、指した形と違うものが来る。
+        let t = term_with("echo hi && ls -la /very/long/path/that/wraps");
+        let buf = TermBuffer::new(&t.state.grid, &t.state.marks);
+        let r = Range::new(Pos::new(0, 0), Pos::new(1, 3), RangeKind::Block);
+        assert_eq!(extract(&buf, &r).lines().count(), 2);
     }
 
     #[test]
