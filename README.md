@@ -418,6 +418,7 @@ The four design documents are the source of truth, and predate the code:
 - [docs/modal-spec.md](docs/modal-spec.md) — the modal layer
 - [docs/mouse-parity.md](docs/mouse-parity.md) — every command's mouse path
 - [docs/arch.md](docs/arch.md) — architecture, invariants, milestones
+- [docs/SCOPE.md](docs/SCOPE.md) — what goes in, what stays out, and the gate a new feature has to pass
 
 Each milestone has a results document (`docs/m*-results.md`) recording what was
 measured on real hardware, including what went wrong.
